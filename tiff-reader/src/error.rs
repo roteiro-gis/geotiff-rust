@@ -29,6 +29,18 @@ pub enum Error {
     #[error("unsupported compression: {0}")]
     UnsupportedCompression(u16),
 
+    #[error("unsupported predictor: {0}")]
+    UnsupportedPredictor(u16),
+
+    #[error("unsupported planar configuration: {0}")]
+    UnsupportedPlanarConfiguration(u16),
+
+    #[error("unsupported bits per sample: {0}")]
+    UnsupportedBitsPerSample(u16),
+
+    #[error("unsupported sample format: {0}")]
+    UnsupportedSampleFormat(u16),
+
     #[error("decompression failed for strip/tile {index}: {reason}")]
     DecompressionFailed { index: usize, reason: String },
 
@@ -37,6 +49,28 @@ pub enum Error {
         offset: u64,
         needed: u64,
         available: u64,
+    },
+
+    #[error("offset {offset} with length {length} is out of bounds for a {data_len}-byte file")]
+    OffsetOutOfBounds {
+        offset: u64,
+        length: u64,
+        data_len: u64,
+    },
+
+    #[error("invalid TIFF tag {tag}: {reason}")]
+    InvalidTagValue {
+        tag: u16,
+        reason: String,
+    },
+
+    #[error("invalid image layout: {0}")]
+    InvalidImageLayout(String),
+
+    #[error("type mismatch: expected {expected}, found {actual}")]
+    TypeMismatch {
+        expected: &'static str,
+        actual: String,
     },
 
     #[error("{0}")]

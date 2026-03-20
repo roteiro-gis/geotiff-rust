@@ -1,6 +1,7 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::header::ByteOrder;
 use crate::io::Cursor;
+use crate::source::TiffSource;
 
 /// TIFF data type codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +51,8 @@ impl TagType {
         match self {
             Self::Byte | Self::Ascii | Self::SByte | Self::Undefined => 1,
             Self::Short | Self::SShort => 2,
-            Self::Long | Self::SLong | Self::Float | Self::Ifd8 => 4,
-            Self::Rational | Self::SRational | Self::Double | Self::Long8 | Self::SLong8 => 8,
+            Self::Long | Self::SLong | Self::Float => 4,
+            Self::Rational | Self::SRational | Self::Double | Self::Long8 | Self::SLong8 | Self::Ifd8 => 8,
             Self::Unknown(_) => 1,
         }
     }
@@ -143,6 +144,25 @@ impl TagValue {
             _ => None,
         }
     }
+
+    /// Extract a value list as unsigned offsets/counts.
+    pub fn as_u64_vec(&self) -> Option<Vec<u64>> {
+        match self {
+            Self::Byte(v) => Some(v.iter().map(|&x| x as u64).collect()),
+            Self::Short(v) => Some(v.iter().map(|&x| x as u64).collect()),
+            Self::Long(v) => Some(v.iter().map(|&x| x as u64).collect()),
+            Self::Long8(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// Extract a SHORT array without cloning when possible.
+    pub fn as_u16_slice(&self) -> Option<&[u16]> {
+        match self {
+            Self::Short(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 impl Tag {
@@ -152,22 +172,22 @@ impl Tag {
         type_code: u16,
         count: u64,
         value_offset_bytes: &[u8],
-        data: &[u8],
+        source: &dyn TiffSource,
         byte_order: ByteOrder,
     ) -> Result<Self> {
         let tag_type = TagType::from_code(type_code);
-        let total_size = count as usize * tag_type.element_size();
+        let total_size = value_len(code, count, tag_type.element_size())?;
 
+        let owned;
         let value_bytes = if total_size <= 4 {
-            // Value is inline in the 4-byte offset field.
             &value_offset_bytes[..total_size]
         } else {
-            // Value is at the offset stored in the 4-byte field.
             let offset = match byte_order {
                 ByteOrder::LittleEndian => u32::from_le_bytes(value_offset_bytes.try_into().unwrap()),
                 ByteOrder::BigEndian => u32::from_be_bytes(value_offset_bytes.try_into().unwrap()),
-            } as usize;
-            &data[offset..offset + total_size]
+            } as u64;
+            owned = read_value_bytes(source, offset, total_size)?;
+            owned.as_slice()
         };
 
         let value = decode_value(&tag_type, count, value_bytes, byte_order)?;
@@ -185,20 +205,22 @@ impl Tag {
         type_code: u16,
         count: u64,
         value_offset_bytes: &[u8],
-        data: &[u8],
+        source: &dyn TiffSource,
         byte_order: ByteOrder,
     ) -> Result<Self> {
         let tag_type = TagType::from_code(type_code);
-        let total_size = count as usize * tag_type.element_size();
+        let total_size = value_len(code, count, tag_type.element_size())?;
 
+        let owned;
         let value_bytes = if total_size <= 8 {
             &value_offset_bytes[..total_size]
         } else {
             let offset = match byte_order {
                 ByteOrder::LittleEndian => u64::from_le_bytes(value_offset_bytes.try_into().unwrap()),
                 ByteOrder::BigEndian => u64::from_be_bytes(value_offset_bytes.try_into().unwrap()),
-            } as usize;
-            &data[offset..offset + total_size]
+            };
+            owned = read_value_bytes(source, offset, total_size)?;
+            owned.as_slice()
         };
 
         let value = decode_value(&tag_type, count, value_bytes, byte_order)?;
@@ -209,6 +231,45 @@ impl Tag {
             value,
         })
     }
+}
+
+fn read_value_bytes(source: &dyn TiffSource, offset: u64, len: usize) -> Result<Vec<u8>> {
+    if let Some(data) = source.as_slice() {
+        return Ok(slice_at(data, offset, len)?.to_vec());
+    }
+    source.read_exact_at(offset, len)
+}
+
+fn value_len(tag: u16, count: u64, element_size: usize) -> Result<usize> {
+    let count = usize::try_from(count).map_err(|_| Error::InvalidTagValue {
+        tag,
+        reason: "value count does not fit in memory".into(),
+    })?;
+    count.checked_mul(element_size).ok_or_else(|| Error::InvalidTagValue {
+        tag,
+        reason: "value byte length overflows usize".into(),
+    })
+}
+
+fn slice_at(data: &[u8], offset: u64, len: usize) -> Result<&[u8]> {
+    let start = usize::try_from(offset).map_err(|_| Error::OffsetOutOfBounds {
+        offset,
+        length: len as u64,
+        data_len: data.len() as u64,
+    })?;
+    let end = start.checked_add(len).ok_or(Error::OffsetOutOfBounds {
+        offset,
+        length: len as u64,
+        data_len: data.len() as u64,
+    })?;
+    if end > data.len() {
+        return Err(Error::OffsetOutOfBounds {
+            offset,
+            length: len as u64,
+            data_len: data.len() as u64,
+        });
+    }
+    Ok(&data[start..end])
 }
 
 fn decode_value(
@@ -226,9 +287,7 @@ fn decode_value(
         }
         TagType::Ascii => {
             let raw = cursor.read_bytes(n)?;
-            // TIFF ASCII values are null-terminated.
-            let s = std::str::from_utf8(raw)
-                .unwrap_or("")
+            let s = String::from_utf8_lossy(raw)
                 .trim_end_matches('\0')
                 .to_string();
             TagValue::Ascii(s)

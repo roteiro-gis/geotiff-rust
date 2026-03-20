@@ -395,21 +395,9 @@ mod tests {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            let mut request = [0u8; 4096];
-                            let read = match stream.read(&mut request) {
-                                Ok(read) => read,
-                                Err(_) => continue,
+                            let Some((request_line, range)) = read_request(&mut stream) else {
+                                continue;
                             };
-                            let request = String::from_utf8_lossy(&request[..read]);
-                            let mut lines = request.lines();
-                            let request_line = lines.next().unwrap_or_default();
-                            let mut range = None;
-                            for line in lines {
-                                let lower = line.to_ascii_lowercase();
-                                if let Some(value) = lower.strip_prefix("range: bytes=") {
-                                    range = Some(value.trim().to_string());
-                                }
-                            }
 
                             if request_line.starts_with("HEAD ") {
                                 let response = format!(
@@ -420,10 +408,7 @@ mod tests {
                                 continue;
                             }
 
-                            if let Some(range_spec) = range {
-                                let (start_s, end_s) = range_spec.split_once('-').unwrap();
-                                let start: usize = start_s.parse().unwrap();
-                                let end: usize = end_s.parse().unwrap();
+                            if let Some((start, end)) = range {
                                 let body = &bytes[start..=end];
                                 let response = format!(
                                     "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
@@ -461,6 +446,45 @@ mod tests {
         fn url(&self) -> String {
             format!("http://{}", self.addr)
         }
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> Option<(String, Option<(usize, usize)>)> {
+        let mut request = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+
+        loop {
+            let read = stream.read(&mut chunk).ok()?;
+            if read == 0 {
+                return None;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+            if request.len() >= 16 * 1024 {
+                return None;
+            }
+        }
+
+        let request = String::from_utf8_lossy(&request);
+        let mut lines = request.lines();
+        let request_line = lines.next()?.to_string();
+        let mut range = None;
+        for line in lines {
+            let lower = line.to_ascii_lowercase();
+            if let Some(value) = lower.strip_prefix("range: bytes=") {
+                let (start_s, end_s) = value.trim().split_once('-')?;
+                let start = start_s.parse().ok()?;
+                let end = end_s.parse().ok()?;
+                if start > end {
+                    return None;
+                }
+                range = Some((start, end));
+                break;
+            }
+        }
+
+        Some((request_line, range))
     }
 
     impl Drop for TestServer {

@@ -80,16 +80,13 @@ fn reads_real_world_signed_and_compressed_geotiffs() {
 fn opens_real_world_cog_over_http_ranges() {
     let bytes =
         std::fs::read(fixture("gdal/gcore/data/cog/byte_little_endian_golden.tif")).unwrap();
-    let chunk_size = bytes.len().next_power_of_two();
     let Some(server) = TestServer::start(bytes) else {
         return;
     };
     let file = HttpGeoTiffFile::open_with_options(
         server.url(),
         HttpOpenOptions {
-            // Keep the interoperability test focused on real-world COG decoding rather than
-            // stress-testing the in-process HTTP server with tiny synthetic ranges.
-            chunk_size,
+            chunk_size: 128,
             cache_bytes: 1024 * 1024,
             cache_slots: 16,
             ..HttpOpenOptions::default()

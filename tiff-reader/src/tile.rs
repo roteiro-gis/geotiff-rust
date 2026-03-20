@@ -99,21 +99,39 @@ pub(crate) fn read_image(
         .collect();
 
     #[cfg(feature = "rayon")]
-    let decoded_blocks: Result<Vec<_>> = specs
-        .par_iter()
-        .map(|&spec| {
-            read_tile_block(
-                source,
-                ifd,
-                byte_order,
-                cache,
-                spec,
-                &layout,
-                gdal_structural_metadata,
-            )
-            .map(|block| (spec, block))
-        })
-        .collect();
+    let decoded_blocks: Result<Vec<_>> = if source.as_slice().is_some() {
+        specs
+            .par_iter()
+            .map(|&spec| {
+                read_tile_block(
+                    source,
+                    ifd,
+                    byte_order,
+                    cache,
+                    spec,
+                    &layout,
+                    gdal_structural_metadata,
+                )
+                .map(|block| (spec, block))
+            })
+            .collect()
+    } else {
+        specs
+            .iter()
+            .map(|&spec| {
+                read_tile_block(
+                    source,
+                    ifd,
+                    byte_order,
+                    cache,
+                    spec,
+                    &layout,
+                    gdal_structural_metadata,
+                )
+                .map(|block| (spec, block))
+            })
+            .collect()
+    };
 
     #[cfg(not(feature = "rayon"))]
     let decoded_blocks: Result<Vec<_>> = specs

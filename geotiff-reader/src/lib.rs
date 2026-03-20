@@ -265,10 +265,38 @@ impl GeoTiffFile {
         self.tiff.read_image::<T>(0).map_err(Into::into)
     }
 
+    /// Decode a base-resolution pixel window into a typed ndarray.
+    pub fn read_window<T: TiffSample>(
+        &self,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        self.tiff
+            .read_window::<T>(0, row_off, col_off, rows, cols)
+            .map_err(Into::into)
+    }
+
     /// Decode an overview raster into a typed ndarray.
     pub fn read_overview<T: TiffSample>(&self, overview_index: usize) -> Result<ArrayD<T>> {
         let ifd_index = self.overview_ifd_index(overview_index)?;
         self.tiff.read_image::<T>(ifd_index).map_err(Into::into)
+    }
+
+    /// Decode an overview pixel window into a typed ndarray.
+    pub fn read_overview_window<T: TiffSample>(
+        &self,
+        overview_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        let ifd_index = self.overview_ifd_index(overview_index)?;
+        self.tiff
+            .read_window::<T>(ifd_index, row_off, col_off, rows, cols)
+            .map_err(Into::into)
     }
 }
 
@@ -582,6 +610,26 @@ mod tests {
         let overview = file.read_overview::<u8>(0).unwrap();
         assert_eq!(overview.shape(), &[1, 1]);
         let (values, offset) = overview.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![99]);
+    }
+
+    #[test]
+    fn reads_base_raster_window() {
+        let file = GeoTiffFile::from_bytes(build_simple_geotiff(false)).unwrap();
+        let window = file.read_window::<u8>(1, 0, 1, 2).unwrap();
+        assert_eq!(window.shape(), &[1, 2]);
+        let (values, offset) = window.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![30, 40]);
+    }
+
+    #[test]
+    fn reads_overview_window() {
+        let file = GeoTiffFile::from_bytes(build_geotiff_with_overview()).unwrap();
+        let window = file.read_overview_window::<u8>(0, 0, 0, 1, 1).unwrap();
+        assert_eq!(window.shape(), &[1, 1]);
+        let (values, offset) = window.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![99]);
     }

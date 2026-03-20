@@ -11,18 +11,115 @@ use crate::filters;
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
-use crate::GdalStructuralMetadata;
+use crate::{GdalStructuralMetadata, Window};
 
 const TAG_JPEG_TABLES: u16 = 347;
 
-pub(crate) fn read_image(
+pub(crate) fn read_window(
     source: &dyn TiffSource,
     ifd: &Ifd,
     byte_order: ByteOrder,
     cache: &BlockCache,
+    window: Window,
     gdal_structural_metadata: Option<&GdalStructuralMetadata>,
 ) -> Result<Vec<u8>> {
     let layout = ifd.raster_layout()?;
+    if window.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let output_len = window.output_len(&layout)?;
+    let mut output = vec![0u8; output_len];
+    let window_row_end = window.row_end();
+    let output_row_bytes = window.cols * layout.pixel_stride_bytes();
+
+    let specs = collect_strip_specs(ifd, &layout)?;
+    let relevant_specs: Vec<_> = specs
+        .iter()
+        .copied()
+        .filter(|spec| {
+            let spec_row_end = spec.row_start + spec.rows_in_strip;
+            spec.row_start < window_row_end && spec_row_end > window.row_off
+        })
+        .collect();
+
+    #[cfg(not(feature = "rayon"))]
+    let decoded_blocks: Result<Vec<_>> = relevant_specs
+        .iter()
+        .map(|&spec| {
+            read_strip_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
+        })
+        .collect();
+
+    #[cfg(feature = "rayon")]
+    let decoded_blocks: Result<Vec<_>> = relevant_specs
+        .par_iter()
+        .map(|&spec| {
+            read_strip_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
+        })
+        .collect();
+
+    for (spec, block) in decoded_blocks? {
+        let block = &*block;
+        let block_row_end = spec.row_start + spec.rows_in_strip;
+        let copy_row_start = spec.row_start.max(window.row_off);
+        let copy_row_end = block_row_end.min(window_row_end);
+
+        if layout.planar_configuration == 1 {
+            let src_row_bytes = layout.row_bytes();
+            let copy_bytes_per_row = window.cols * layout.pixel_stride_bytes();
+            for row in copy_row_start..copy_row_end {
+                let src_row_index = row - spec.row_start;
+                let dest_row_index = row - window.row_off;
+                let src_offset =
+                    src_row_index * src_row_bytes + window.col_off * layout.pixel_stride_bytes();
+                let dest_offset = dest_row_index * output_row_bytes;
+                output[dest_offset..dest_offset + copy_bytes_per_row]
+                    .copy_from_slice(&block[src_offset..src_offset + copy_bytes_per_row]);
+            }
+        } else {
+            let src_row_bytes = layout.sample_plane_row_bytes();
+            for row in copy_row_start..copy_row_end {
+                let src_row_index = row - spec.row_start;
+                let dest_row_index = row - window.row_off;
+                let src_row =
+                    &block[src_row_index * src_row_bytes..(src_row_index + 1) * src_row_bytes];
+                let dest_row = &mut output
+                    [dest_row_index * output_row_bytes..(dest_row_index + 1) * output_row_bytes];
+                for col in window.col_off..window.col_end() {
+                    let src = &src_row
+                        [col * layout.bytes_per_sample..(col + 1) * layout.bytes_per_sample];
+                    let dest_col_index = col - window.col_off;
+                    let pixel_base = dest_col_index * layout.pixel_stride_bytes()
+                        + spec.plane * layout.bytes_per_sample;
+                    dest_row[pixel_base..pixel_base + layout.bytes_per_sample].copy_from_slice(src);
+                }
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn collect_strip_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<StripBlockSpec>> {
     let offsets = ifd
         .strip_offsets()
         .ok_or(Error::TagNotFound(crate::ifd::TAG_STRIP_OFFSETS))?;
@@ -51,12 +148,7 @@ pub(crate) fn read_image(
         )));
     }
 
-    let output_len = layout
-        .row_bytes()
-        .checked_mul(layout.height)
-        .ok_or_else(|| Error::InvalidImageLayout("decoded raster size overflows usize".into()))?;
-    let mut output = vec![0u8; output_len];
-    let specs: Vec<_> = (0..expected)
+    Ok((0..expected)
         .map(|strip_index| {
             let plane = if layout.planar_configuration == 1 {
                 0
@@ -79,79 +171,7 @@ pub(crate) fn read_image(
                 rows_in_strip,
             }
         })
-        .collect();
-
-    #[cfg(not(feature = "rayon"))]
-    let decoded_blocks: Result<Vec<_>> = specs
-        .iter()
-        .map(|&spec| {
-            read_strip_block(
-                source,
-                ifd,
-                byte_order,
-                cache,
-                spec,
-                &layout,
-                gdal_structural_metadata,
-            )
-            .map(|block| (spec, block))
-        })
-        .collect();
-
-    #[cfg(feature = "rayon")]
-    let decoded_blocks: Result<Vec<_>> = specs
-        .par_iter()
-        .map(|&spec| {
-            read_strip_block(
-                source,
-                ifd,
-                byte_order,
-                cache,
-                spec,
-                &layout,
-                gdal_structural_metadata,
-            )
-            .map(|block| (spec, block))
-        })
-        .collect();
-
-    for (spec, block) in decoded_blocks? {
-        let block = &*block;
-
-        if layout.planar_configuration == 1 {
-            let dest_offset = spec
-                .row_start
-                .checked_mul(layout.row_bytes())
-                .ok_or_else(|| Error::InvalidImageLayout("row offset overflows usize".into()))?;
-            let block_len = spec
-                .rows_in_strip
-                .checked_mul(layout.row_bytes())
-                .ok_or_else(|| {
-                    Error::InvalidImageLayout("strip byte length overflows usize".into())
-                })?;
-            output[dest_offset..dest_offset + block_len].copy_from_slice(&block[..block_len]);
-        } else {
-            let src_row_bytes = layout.sample_plane_row_bytes();
-            for row in 0..spec.rows_in_strip {
-                let src_row = &block[row * src_row_bytes..(row + 1) * src_row_bytes];
-                let dest_row_offset = (spec.row_start + row)
-                    .checked_mul(layout.row_bytes())
-                    .ok_or_else(|| {
-                        Error::InvalidImageLayout("row offset overflows usize".into())
-                    })?;
-                let dest_row = &mut output[dest_row_offset..dest_row_offset + layout.row_bytes()];
-                for col in 0..layout.width {
-                    let src = &src_row
-                        [col * layout.bytes_per_sample..(col + 1) * layout.bytes_per_sample];
-                    let pixel_base =
-                        col * layout.pixel_stride_bytes() + spec.plane * layout.bytes_per_sample;
-                    dest_row[pixel_base..pixel_base + layout.bytes_per_sample].copy_from_slice(src);
-                }
-            }
-        }
-    }
-
-    Ok(output)
+        .collect())
 }
 
 #[derive(Clone, Copy)]

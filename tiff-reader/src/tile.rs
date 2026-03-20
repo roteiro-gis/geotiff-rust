@@ -11,18 +11,126 @@ use crate::filters;
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
-use crate::GdalStructuralMetadata;
+use crate::{GdalStructuralMetadata, Window};
 
 const TAG_JPEG_TABLES: u16 = 347;
 
-pub(crate) fn read_image(
+pub(crate) fn read_window(
     source: &dyn TiffSource,
     ifd: &Ifd,
     byte_order: ByteOrder,
     cache: &BlockCache,
+    window: Window,
     gdal_structural_metadata: Option<&GdalStructuralMetadata>,
 ) -> Result<Vec<u8>> {
     let layout = ifd.raster_layout()?;
+    if window.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let output_len = window.output_len(&layout)?;
+    let mut output = vec![0u8; output_len];
+    let window_row_end = window.row_end();
+    let window_col_end = window.col_end();
+    let output_row_bytes = window.cols * layout.pixel_stride_bytes();
+
+    let specs = collect_tile_specs(ifd, &layout)?;
+    let relevant_specs: Vec<_> = specs
+        .iter()
+        .copied()
+        .filter(|spec| {
+            let spec_row_end = spec.y + spec.rows_in_tile;
+            let spec_col_end = spec.x + spec.cols_in_tile;
+            spec.y < window_row_end
+                && spec_row_end > window.row_off
+                && spec.x < window_col_end
+                && spec_col_end > window.col_off
+        })
+        .collect();
+
+    #[cfg(feature = "rayon")]
+    let decoded_blocks: Result<Vec<_>> = relevant_specs
+        .par_iter()
+        .map(|&spec| {
+            read_tile_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
+        })
+        .collect();
+
+    #[cfg(not(feature = "rayon"))]
+    let decoded_blocks: Result<Vec<_>> = relevant_specs
+        .iter()
+        .map(|&spec| {
+            read_tile_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
+        })
+        .collect();
+
+    for (spec, block) in decoded_blocks? {
+        let block = &*block;
+        let copy_row_start = spec.y.max(window.row_off);
+        let copy_row_end = (spec.y + spec.rows_in_tile).min(window_row_end);
+        let copy_col_start = spec.x.max(window.col_off);
+        let copy_col_end = (spec.x + spec.cols_in_tile).min(window_col_end);
+
+        let src_row_bytes = spec.tile_width
+            * if layout.planar_configuration == 1 {
+                layout.pixel_stride_bytes()
+            } else {
+                layout.bytes_per_sample
+            };
+
+        if layout.planar_configuration == 1 {
+            let copy_bytes_per_row = (copy_col_end - copy_col_start) * layout.pixel_stride_bytes();
+            for row in copy_row_start..copy_row_end {
+                let src_row_index = row - spec.y;
+                let dest_row_index = row - window.row_off;
+                let src_offset = src_row_index * src_row_bytes
+                    + (copy_col_start - spec.x) * layout.pixel_stride_bytes();
+                let dest_offset = dest_row_index * output_row_bytes
+                    + (copy_col_start - window.col_off) * layout.pixel_stride_bytes();
+                output[dest_offset..dest_offset + copy_bytes_per_row]
+                    .copy_from_slice(&block[src_offset..src_offset + copy_bytes_per_row]);
+            }
+        } else {
+            for row in copy_row_start..copy_row_end {
+                let src_row_index = row - spec.y;
+                let dest_row_index = row - window.row_off;
+                let src_row =
+                    &block[src_row_index * src_row_bytes..(src_row_index + 1) * src_row_bytes];
+                let dest_row = &mut output
+                    [dest_row_index * output_row_bytes..(dest_row_index + 1) * output_row_bytes];
+                for col in copy_col_start..copy_col_end {
+                    let src = &src_row[(col - spec.x) * layout.bytes_per_sample
+                        ..(col - spec.x + 1) * layout.bytes_per_sample];
+                    let pixel_base = (col - window.col_off) * layout.pixel_stride_bytes()
+                        + spec.plane * layout.bytes_per_sample;
+                    dest_row[pixel_base..pixel_base + layout.bytes_per_sample].copy_from_slice(src);
+                }
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn collect_tile_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<TileBlockSpec>> {
     let tile_width = ifd
         .tile_width()
         .ok_or(Error::TagNotFound(crate::ifd::TAG_TILE_WIDTH))? as usize;
@@ -64,8 +172,7 @@ pub(crate) fn read_image(
         )));
     }
 
-    let mut output = vec![0u8; layout.row_bytes() * layout.height];
-    let specs: Vec<_> = (0..expected)
+    Ok((0..expected)
         .map(|tile_index| {
             let plane = if layout.planar_configuration == 1 {
                 0
@@ -96,78 +203,7 @@ pub(crate) fn read_image(
                 tile_height,
             }
         })
-        .collect();
-
-    #[cfg(not(feature = "rayon"))]
-    let decoded_blocks: Result<Vec<_>> = specs
-        .iter()
-        .map(|&spec| {
-            read_tile_block(
-                source,
-                ifd,
-                byte_order,
-                cache,
-                spec,
-                &layout,
-                gdal_structural_metadata,
-            )
-            .map(|block| (spec, block))
-        })
-        .collect();
-
-    #[cfg(feature = "rayon")]
-    let decoded_blocks: Result<Vec<_>> = specs
-        .par_iter()
-        .map(|&spec| {
-            read_tile_block(
-                source,
-                ifd,
-                byte_order,
-                cache,
-                spec,
-                &layout,
-                gdal_structural_metadata,
-            )
-            .map(|block| (spec, block))
-        })
-        .collect();
-
-    for (spec, block) in decoded_blocks? {
-        let block = &*block;
-
-        let src_row_bytes = spec.tile_width
-            * if layout.planar_configuration == 1 {
-                layout.pixel_stride_bytes()
-            } else {
-                layout.bytes_per_sample
-            };
-
-        if layout.planar_configuration == 1 {
-            let copy_bytes_per_row = spec.cols_in_tile * layout.pixel_stride_bytes();
-            for row in 0..spec.rows_in_tile {
-                let src_offset = row * src_row_bytes;
-                let dest_offset =
-                    (spec.y + row) * layout.row_bytes() + spec.x * layout.pixel_stride_bytes();
-                output[dest_offset..dest_offset + copy_bytes_per_row]
-                    .copy_from_slice(&block[src_offset..src_offset + copy_bytes_per_row]);
-            }
-        } else {
-            for row in 0..spec.rows_in_tile {
-                let src_row = &block[row * src_row_bytes..(row + 1) * src_row_bytes];
-                let dest_row_offset = (spec.y + row) * layout.row_bytes();
-                let dest_row = &mut output[dest_row_offset..dest_row_offset + layout.row_bytes()];
-                for col in 0..spec.cols_in_tile {
-                    let src = &src_row
-                        [col * layout.bytes_per_sample..(col + 1) * layout.bytes_per_sample];
-                    let pixel_base = (spec.x + col) * layout.pixel_stride_bytes()
-                        + spec.plane * layout.bytes_per_sample;
-                    dest_row[pixel_base..pixel_base + layout.bytes_per_sample].copy_from_slice(src);
-                }
-            }
-        }
-    }
-
-    Ok(output)
+        .collect())
 }
 
 #[derive(Clone, Copy)]

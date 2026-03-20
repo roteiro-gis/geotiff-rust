@@ -79,6 +79,35 @@ pub(crate) struct GdalStructuralMetadata {
     block_trailer_repeats_last_4_bytes: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Window {
+    pub row_off: usize,
+    pub col_off: usize,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+impl Window {
+    pub(crate) fn is_empty(self) -> bool {
+        self.rows == 0 || self.cols == 0
+    }
+
+    pub(crate) fn row_end(self) -> usize {
+        self.row_off + self.rows
+    }
+
+    pub(crate) fn col_end(self) -> usize {
+        self.col_off + self.cols
+    }
+
+    pub(crate) fn output_len(self, layout: &RasterLayout) -> Result<usize> {
+        self.cols
+            .checked_mul(self.rows)
+            .and_then(|pixels| pixels.checked_mul(layout.pixel_stride_bytes()))
+            .ok_or_else(|| Error::InvalidImageLayout("window size overflows usize".into()))
+    }
+}
+
 impl GdalStructuralMetadata {
     fn from_prefix(bytes: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(bytes).ok()?;
@@ -278,23 +307,94 @@ impl TiffFile {
     /// Decode an image into native-endian interleaved sample bytes.
     pub fn read_image_bytes(&self, ifd_index: usize) -> Result<Vec<u8>> {
         let ifd = self.ifd(ifd_index)?;
+        let layout = ifd.raster_layout()?;
+        self.decode_window_bytes(
+            ifd,
+            Window {
+                row_off: 0,
+                col_off: 0,
+                rows: layout.height,
+                cols: layout.width,
+            },
+        )
+    }
+
+    /// Decode a pixel window into native-endian interleaved sample bytes.
+    pub fn read_window_bytes(
+        &self,
+        ifd_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<u8>> {
+        let ifd = self.ifd(ifd_index)?;
+        let layout = ifd.raster_layout()?;
+        let window = validate_window(&layout, row_off, col_off, rows, cols)?;
+        self.decode_window_bytes(ifd, window)
+    }
+
+    fn decode_window_bytes(&self, ifd: &Ifd, window: Window) -> Result<Vec<u8>> {
+        if window.is_empty() {
+            return Ok(Vec::new());
+        }
+
         if ifd.is_tiled() {
-            tile::read_image(
+            tile::read_window(
                 self.source.as_ref(),
                 ifd,
                 self.byte_order(),
                 &self.block_cache,
+                window,
                 self.gdal_structural_metadata.as_ref(),
             )
         } else {
-            strip::read_image(
+            strip::read_window(
                 self.source.as_ref(),
                 ifd,
                 self.byte_order(),
                 &self.block_cache,
+                window,
                 self.gdal_structural_metadata.as_ref(),
             )
         }
+    }
+
+    /// Decode a window into a typed ndarray.
+    ///
+    /// Single-band rasters are returned as shape `[rows, cols]`.
+    /// Multi-band rasters are returned as shape `[rows, cols, samples_per_pixel]`.
+    pub fn read_window<T: TiffSample>(
+        &self,
+        ifd_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        let ifd = self.ifd(ifd_index)?;
+        let layout = ifd.raster_layout()?;
+        let window = validate_window(&layout, row_off, col_off, rows, cols)?;
+        if !T::matches_layout(&layout) {
+            return Err(Error::TypeMismatch {
+                expected: T::type_name(),
+                actual: format!(
+                    "sample_format={} bits_per_sample={}",
+                    layout.sample_format, layout.bits_per_sample
+                ),
+            });
+        }
+
+        let decoded = self.decode_window_bytes(ifd, window)?;
+        let values = T::decode_many(&decoded);
+        let shape = if layout.samples_per_pixel == 1 {
+            vec![window.rows, window.cols]
+        } else {
+            vec![window.rows, window.cols, layout.samples_per_pixel]
+        };
+        ArrayD::from_shape_vec(IxDyn(&shape), values).map_err(|e| {
+            Error::InvalidImageLayout(format!("failed to build ndarray from decoded raster: {e}"))
+        })
     }
 
     /// Decode an image into a typed ndarray.
@@ -314,17 +414,35 @@ impl TiffFile {
             });
         }
 
-        let decoded = self.read_image_bytes(ifd_index)?;
-        let values = T::decode_many(&decoded);
-        let shape = if layout.samples_per_pixel == 1 {
-            vec![layout.height, layout.width]
-        } else {
-            vec![layout.height, layout.width, layout.samples_per_pixel]
-        };
-        ArrayD::from_shape_vec(IxDyn(&shape), values).map_err(|e| {
-            Error::InvalidImageLayout(format!("failed to build ndarray from decoded raster: {e}"))
-        })
+        self.read_window(ifd_index, 0, 0, layout.height, layout.width)
     }
+}
+
+fn validate_window(
+    layout: &RasterLayout,
+    row_off: usize,
+    col_off: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<Window> {
+    let row_end = row_off
+        .checked_add(rows)
+        .ok_or_else(|| Error::InvalidImageLayout("window row range overflows usize".into()))?;
+    let col_end = col_off
+        .checked_add(cols)
+        .ok_or_else(|| Error::InvalidImageLayout("window column range overflows usize".into()))?;
+    if row_end > layout.height || col_end > layout.width {
+        return Err(Error::InvalidImageLayout(format!(
+            "window [{row_off}..{row_end}, {col_off}..{col_end}) exceeds raster bounds {}x{}",
+            layout.height, layout.width
+        )));
+    }
+    Ok(Window {
+        row_off,
+        col_off,
+        rows,
+        cols,
+    })
 }
 
 fn parse_gdal_structural_metadata(source: &dyn TiffSource) -> Option<GdalStructuralMetadata> {
@@ -360,12 +478,14 @@ fn parse_gdal_structural_metadata_len(bytes: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use super::{
         parse_gdal_structural_metadata, parse_gdal_structural_metadata_len, GdalStructuralMetadata,
         TiffFile, GDAL_STRUCTURAL_METADATA_PREFIX,
     };
-    use crate::source::BytesSource;
+    use crate::source::{BytesSource, TiffSource};
 
     fn le_u16(value: u16) -> [u8; 2] {
         value.to_le_bytes()
@@ -432,6 +552,217 @@ mod tests {
         data
     }
 
+    fn build_tiled_tiff(
+        width: u32,
+        height: u32,
+        tile_width: u32,
+        tile_height: u32,
+        tiles: &[&[u8]],
+    ) -> Vec<u8> {
+        let mut entries = BTreeMap::new();
+        entries.insert(256, (4, 1, le_u32(width).to_vec()));
+        entries.insert(257, (4, 1, le_u32(height).to_vec()));
+        entries.insert(258, (3, 1, [8, 0, 0, 0].to_vec()));
+        entries.insert(259, (3, 1, [1, 0, 0, 0].to_vec()));
+        entries.insert(277, (3, 1, [1, 0, 0, 0].to_vec()));
+        entries.insert(322, (4, 1, le_u32(tile_width).to_vec()));
+        entries.insert(323, (4, 1, le_u32(tile_height).to_vec()));
+        entries.insert(
+            325,
+            (
+                4,
+                tiles.len() as u32,
+                tiles
+                    .iter()
+                    .flat_map(|tile| le_u32(tile.len() as u32))
+                    .collect(),
+            ),
+        );
+
+        let ifd_offset = 8u32;
+        let ifd_size = 2 + (entries.len() + 1) * 12 + 4;
+        let mut tile_data_offset = ifd_offset as usize + ifd_size;
+        let tile_offsets: Vec<u32> = tiles
+            .iter()
+            .map(|tile| {
+                let offset = tile_data_offset as u32;
+                tile_data_offset += tile.len();
+                offset
+            })
+            .collect();
+        entries.insert(
+            324,
+            (
+                4,
+                tile_offsets.len() as u32,
+                tile_offsets
+                    .iter()
+                    .flat_map(|offset| le_u32(*offset))
+                    .collect(),
+            ),
+        );
+
+        let mut next_data_offset = tile_data_offset;
+        let mut data = Vec::with_capacity(next_data_offset);
+        data.extend_from_slice(b"II");
+        data.extend_from_slice(&le_u16(42));
+        data.extend_from_slice(&le_u32(ifd_offset));
+        data.extend_from_slice(&le_u16(entries.len() as u16));
+
+        let mut deferred = Vec::new();
+        for (tag, (ty, count, value)) in entries {
+            data.extend_from_slice(&le_u16(tag));
+            data.extend_from_slice(&le_u16(ty));
+            data.extend_from_slice(&le_u32(count));
+            if value.len() <= 4 {
+                let mut inline = [0u8; 4];
+                inline[..value.len()].copy_from_slice(&value);
+                data.extend_from_slice(&inline);
+            } else {
+                let offset = next_data_offset as u32;
+                data.extend_from_slice(&le_u32(offset));
+                next_data_offset += value.len();
+                deferred.push(value);
+            }
+        }
+        data.extend_from_slice(&le_u32(0));
+        for tile in tiles {
+            data.extend_from_slice(tile);
+        }
+        for value in deferred {
+            data.extend_from_slice(&value);
+        }
+        data
+    }
+
+    fn build_multi_strip_tiff(width: u32, rows: &[&[u8]]) -> Vec<u8> {
+        let mut entries = BTreeMap::new();
+        entries.insert(256, (4, 1, le_u32(width).to_vec()));
+        entries.insert(257, (4, 1, le_u32(rows.len() as u32).to_vec()));
+        entries.insert(258, (3, 1, [8, 0, 0, 0].to_vec()));
+        entries.insert(259, (3, 1, [1, 0, 0, 0].to_vec()));
+        entries.insert(277, (3, 1, [1, 0, 0, 0].to_vec()));
+        entries.insert(278, (4, 1, le_u32(1).to_vec()));
+        entries.insert(
+            279,
+            (
+                4,
+                rows.len() as u32,
+                rows.iter()
+                    .flat_map(|row| le_u32(row.len() as u32))
+                    .collect(),
+            ),
+        );
+
+        let ifd_offset = 8u32;
+        let ifd_size = 2 + (entries.len() + 1) * 12 + 4;
+        let mut strip_data_offset = ifd_offset as usize + ifd_size;
+        let strip_offsets: Vec<u32> = rows
+            .iter()
+            .map(|row| {
+                let offset = strip_data_offset as u32;
+                strip_data_offset += row.len();
+                offset
+            })
+            .collect();
+        entries.insert(
+            273,
+            (
+                4,
+                strip_offsets.len() as u32,
+                strip_offsets
+                    .iter()
+                    .flat_map(|offset| le_u32(*offset))
+                    .collect(),
+            ),
+        );
+
+        let mut next_data_offset = strip_data_offset;
+        let mut data = Vec::with_capacity(next_data_offset);
+        data.extend_from_slice(b"II");
+        data.extend_from_slice(&le_u16(42));
+        data.extend_from_slice(&le_u32(ifd_offset));
+        data.extend_from_slice(&le_u16(entries.len() as u16));
+
+        let mut deferred = Vec::new();
+        for (tag, (ty, count, value)) in entries {
+            data.extend_from_slice(&le_u16(tag));
+            data.extend_from_slice(&le_u16(ty));
+            data.extend_from_slice(&le_u32(count));
+            if value.len() <= 4 {
+                let mut inline = [0u8; 4];
+                inline[..value.len()].copy_from_slice(&value);
+                data.extend_from_slice(&inline);
+            } else {
+                let offset = next_data_offset as u32;
+                data.extend_from_slice(&le_u32(offset));
+                next_data_offset += value.len();
+                deferred.push(value);
+            }
+        }
+        data.extend_from_slice(&le_u32(0));
+        for row in rows {
+            data.extend_from_slice(row);
+        }
+        for value in deferred {
+            data.extend_from_slice(&value);
+        }
+        data
+    }
+
+    struct CountingSource {
+        bytes: Vec<u8>,
+        reads: AtomicUsize,
+    }
+
+    impl CountingSource {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn reset_reads(&self) {
+            self.reads.store(0, Ordering::SeqCst);
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    impl TiffSource for CountingSource {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+
+        fn read_exact_at(&self, offset: u64, len: usize) -> crate::error::Result<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let start =
+                usize::try_from(offset).map_err(|_| crate::error::Error::OffsetOutOfBounds {
+                    offset,
+                    length: len as u64,
+                    data_len: self.len(),
+                })?;
+            let end = start
+                .checked_add(len)
+                .ok_or(crate::error::Error::OffsetOutOfBounds {
+                    offset,
+                    length: len as u64,
+                    data_len: self.len(),
+                })?;
+            if end > self.bytes.len() {
+                return Err(crate::error::Error::OffsetOutOfBounds {
+                    offset,
+                    length: len as u64,
+                    data_len: self.len(),
+                });
+            }
+            Ok(self.bytes[start..end].to_vec())
+        }
+    }
+
     #[test]
     fn reads_stripped_u8_image() {
         let data = build_stripped_tiff(2, 2, &[1, 2, 3, 4], &[]);
@@ -461,6 +792,72 @@ mod tests {
         let (values, offset) = image.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn reads_stripped_u8_window() {
+        let data = build_multi_strip_tiff(
+            4,
+            &[
+                &[1, 2, 3, 4],
+                &[5, 6, 7, 8],
+                &[9, 10, 11, 12],
+                &[13, 14, 15, 16],
+            ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+        let window = file.read_window::<u8>(0, 1, 1, 2, 2).unwrap();
+        assert_eq!(window.shape(), &[2, 2]);
+        let (values, offset) = window.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![6, 7, 10, 11]);
+    }
+
+    #[test]
+    fn reads_tiled_u8_window() {
+        let data = build_tiled_tiff(
+            4,
+            4,
+            2,
+            2,
+            &[
+                &[1, 2, 5, 6],
+                &[3, 4, 7, 8],
+                &[9, 10, 13, 14],
+                &[11, 12, 15, 16],
+            ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+        let window = file.read_window::<u8>(0, 1, 1, 2, 2).unwrap();
+        assert_eq!(window.shape(), &[2, 2]);
+        let (values, offset) = window.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![6, 7, 10, 11]);
+    }
+
+    #[test]
+    fn windowed_tiled_reads_only_intersecting_blocks() {
+        let data = build_tiled_tiff(
+            4,
+            4,
+            2,
+            2,
+            &[
+                &[1, 2, 5, 6],
+                &[3, 4, 7, 8],
+                &[9, 10, 13, 14],
+                &[11, 12, 15, 16],
+            ],
+        );
+        let source = Arc::new(CountingSource::new(data));
+        let file = TiffFile::from_source(source.clone()).unwrap();
+        source.reset_reads();
+
+        let window = file.read_window::<u8>(0, 0, 0, 2, 2).unwrap();
+        let (values, offset) = window.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![1, 2, 5, 6]);
+        assert_eq!(source.reads(), 1);
     }
 
     #[test]

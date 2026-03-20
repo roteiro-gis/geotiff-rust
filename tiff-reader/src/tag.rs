@@ -141,6 +141,14 @@ impl TagValue {
         }
     }
 
+    /// Extract raw bytes for byte-oriented tag payloads.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Byte(v) | Self::Undefined(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
     /// Extract as a slice of f64 values.
     pub fn as_f64_vec(&self) -> Option<Vec<f64>> {
         match self {

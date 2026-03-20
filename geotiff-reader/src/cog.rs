@@ -13,7 +13,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use reqwest::StatusCode;
 use tiff_reader::source::{SharedSource, TiffSource};
-use tiff_reader::TiffFile;
+use tiff_reader::{OpenOptions as TiffOpenOptions, TiffFile};
 
 use crate::{Error, GeoTiffFile, Result};
 
@@ -26,6 +26,8 @@ pub struct HttpOpenOptions {
     pub cache_bytes: usize,
     /// Maximum cached chunks.
     pub cache_slots: usize,
+    /// TIFF decoder options applied after range reads are assembled.
+    pub tiff_options: TiffOpenOptions,
 }
 
 impl Default for HttpOpenOptions {
@@ -34,6 +36,7 @@ impl Default for HttpOpenOptions {
             chunk_size: 256 * 1024,
             cache_bytes: 64 * 1024 * 1024,
             cache_slots: 257,
+            tiff_options: TiffOpenOptions::default(),
         }
     }
 }
@@ -54,7 +57,7 @@ impl HttpGeoTiffFile {
     pub fn open_with_options(url: impl Into<String>, options: HttpOpenOptions) -> Result<Self> {
         let url = url.into();
         let source: SharedSource = Arc::new(HttpRangeSource::open(url.clone(), options)?);
-        let tiff = TiffFile::from_source(source)?;
+        let tiff = TiffFile::from_source_with_options(source, options.tiff_options)?;
         let inner = GeoTiffFile::from_tiff(tiff)?;
         Ok(Self { url, inner })
     }
@@ -278,6 +281,7 @@ mod tests {
                 chunk_size: 128,
                 cache_bytes: 1024 * 1024,
                 cache_slots: 16,
+                ..HttpOpenOptions::default()
             },
         )
         .unwrap();

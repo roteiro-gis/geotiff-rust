@@ -1,5 +1,7 @@
 //! Geo-transform: pixel coordinates to/from geographic coordinates.
 
+use crate::crs::RasterType;
+
 /// An affine geo-transform mapping pixel (col, row) to map (x, y).
 ///
 /// Follows the GDAL convention:
@@ -22,13 +24,34 @@ pub struct GeoTransform {
 impl GeoTransform {
     /// Build from ModelTiepoint (tag 33922) and ModelPixelScale (tag 33550).
     pub fn from_tiepoint_and_scale(tiepoint: &[f64; 6], pixel_scale: &[f64; 3]) -> Self {
+        Self::from_tiepoint_and_scale_with_raster_type(
+            tiepoint,
+            pixel_scale,
+            RasterType::PixelIsArea,
+        )
+    }
+
+    /// Build from ModelTiepoint and ModelPixelScale using the GeoTIFF raster type.
+    ///
+    /// The returned transform is normalized to a corner-based affine transform so
+    /// bounds and pixel-space math stay consistent for both PixelIsArea and
+    /// PixelIsPoint rasters.
+    pub fn from_tiepoint_and_scale_with_raster_type(
+        tiepoint: &[f64; 6],
+        pixel_scale: &[f64; 3],
+        raster_type: RasterType,
+    ) -> Self {
         // tiepoint: [I, J, K, X, Y, Z]
         // pixel_scale: [ScaleX, ScaleY, ScaleZ]
+        let pixel_offset = match raster_type {
+            RasterType::PixelIsPoint => 0.5,
+            RasterType::PixelIsArea | RasterType::Unknown(_) => 0.0,
+        };
         Self {
-            origin_x: tiepoint[3] - tiepoint[0] * pixel_scale[0],
+            origin_x: tiepoint[3] - (tiepoint[0] + pixel_offset) * pixel_scale[0],
             pixel_width: pixel_scale[0],
             skew_x: 0.0,
-            origin_y: tiepoint[4] + tiepoint[1] * pixel_scale[1],
+            origin_y: tiepoint[4] + (tiepoint[1] + pixel_offset) * pixel_scale[1],
             skew_y: 0.0,
             pixel_height: -pixel_scale[1],
         }
@@ -94,6 +117,7 @@ impl GeoTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crs::RasterType;
 
     #[test]
     fn tiepoint_and_scale_roundtrip() {
@@ -124,5 +148,24 @@ mod tests {
         assert!((bounds[1] - 0.0).abs() < 1e-10); // min_y
         assert!((bounds[2] - 10.0).abs() < 1e-10); // max_x
         assert!((bounds[3] - 10.0).abs() < 1e-10); // max_y
+    }
+
+    #[test]
+    fn pixel_is_point_tiepoint_is_normalized_to_outer_bounds() {
+        let tp = [0.0, 0.0, 0.0, 100.0, 200.0, 0.0];
+        let scale = [2.0, 2.0, 0.0];
+        let gt = GeoTransform::from_tiepoint_and_scale_with_raster_type(
+            &tp,
+            &scale,
+            RasterType::PixelIsPoint,
+        );
+
+        let (min_x, max_y) = gt.pixel_to_geo(0.0, 0.0);
+        assert!((min_x - 99.0).abs() < 1e-10);
+        assert!((max_y - 201.0).abs() < 1e-10);
+
+        let (center_x, center_y) = gt.pixel_to_geo(0.5, 0.5);
+        assert!((center_x - 100.0).abs() < 1e-10);
+        assert!((center_y - 200.0).abs() < 1e-10);
     }
 }

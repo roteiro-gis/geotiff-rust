@@ -7,13 +7,18 @@
 //! # Example
 //!
 //! ```no_run
+//! # #[cfg(feature = "local")]
+//! # fn main() -> Result<(), geotiff_reader::Error> {
 //! use geotiff_reader::GeoTiffFile;
 //!
 //! let file = GeoTiffFile::open("dem.tif")?;
 //! println!("EPSG: {:?}", file.epsg());
 //! println!("bounds: {:?}", file.geo_bounds());
 //! println!("size: {}x{}", file.width(), file.height());
-//! # Ok::<(), geotiff_reader::Error>(())
+//! # Ok(())
+//! # }
+//! # #[cfg(not(feature = "local"))]
+//! # fn main() {}
 //! ```
 
 pub mod crs;
@@ -26,22 +31,37 @@ pub mod cog;
 
 pub use error::{Error, Result};
 
-use std::path::Path;
-
+#[cfg(feature = "local")]
 use crs::CrsInfo;
+#[cfg(feature = "local")]
 use geokeys::GeoKeyDirectory;
+#[cfg(feature = "local")]
 use ndarray::ArrayD;
 #[cfg(feature = "local")]
-use tiff_reader::{TagValue, TiffFile, TiffSample};
+use std::path::Path;
+#[cfg(feature = "local")]
+use tiff_reader::{OpenOptions as TiffOpenOptions, TagValue, TiffFile, TiffSample};
+#[cfg(feature = "local")]
 use transform::GeoTransform;
 
+#[cfg(feature = "local")]
 const TAG_MODEL_PIXEL_SCALE: u16 = 33550;
+#[cfg(feature = "local")]
 const TAG_MODEL_TIEPOINT: u16 = 33922;
+#[cfg(feature = "local")]
 const TAG_MODEL_TRANSFORMATION: u16 = 34264;
+#[cfg(feature = "local")]
 const TAG_GEO_KEY_DIRECTORY: u16 = 34735;
+#[cfg(feature = "local")]
 const TAG_GEO_DOUBLE_PARAMS: u16 = 34736;
+#[cfg(feature = "local")]
 const TAG_GEO_ASCII_PARAMS: u16 = 34737;
+#[cfg(feature = "local")]
 const TAG_GDAL_NODATA: u16 = 42113;
+#[cfg(feature = "local")]
+const TAG_NEW_SUBFILE_TYPE: u16 = 254;
+#[cfg(feature = "local")]
+const TAG_SUBFILE_TYPE: u16 = 255;
 
 /// A GeoTIFF file handle with geospatial metadata.
 #[cfg(feature = "local")]
@@ -53,6 +73,9 @@ pub struct GeoTiffFile {
     transform: Option<GeoTransform>,
     overview_ifds: Vec<usize>,
 }
+
+#[cfg(feature = "local")]
+pub use tiff_reader::OpenOptions as GeoTiffOpenOptions;
 
 /// Parsed geospatial metadata from GeoKeys and model tags.
 #[derive(Debug, Clone)]
@@ -81,13 +104,23 @@ pub struct GeoMetadata {
 impl GeoTiffFile {
     /// Open a GeoTIFF file from disk.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let tiff = TiffFile::open(path)?;
+        Self::open_with_options(path, TiffOpenOptions::default())
+    }
+
+    /// Open a GeoTIFF file from disk with explicit TIFF decoder options.
+    pub fn open_with_options<P: AsRef<Path>>(path: P, options: GeoTiffOpenOptions) -> Result<Self> {
+        let tiff = TiffFile::open_with_options(path, options)?;
         Self::from_tiff(tiff)
     }
 
     /// Open a GeoTIFF from an owned byte buffer.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
-        let tiff = TiffFile::from_bytes(data)?;
+        Self::from_bytes_with_options(data, TiffOpenOptions::default())
+    }
+
+    /// Open a GeoTIFF from bytes with explicit TIFF decoder options.
+    pub fn from_bytes_with_options(data: Vec<u8>, options: GeoTiffOpenOptions) -> Result<Self> {
+        let tiff = TiffFile::from_bytes_with_options(data, options)?;
         Self::from_tiff(tiff)
     }
 
@@ -108,7 +141,11 @@ impl GeoTiffFile {
             .or_else(|| {
                 let tiepoint = tiepoints.first()?;
                 let scale = pixel_scale.as_ref()?;
-                Some(GeoTransform::from_tiepoint_and_scale(tiepoint, scale))
+                Some(GeoTransform::from_tiepoint_and_scale_with_raster_type(
+                    tiepoint,
+                    scale,
+                    crs.raster_type_enum(),
+                ))
             });
         let geo_bounds = transform
             .as_ref()
@@ -118,10 +155,7 @@ impl GeoTiffFile {
             .iter()
             .enumerate()
             .skip(1)
-            .filter_map(|(index, candidate)| {
-                (candidate.width() <= ifd.width() && candidate.height() <= ifd.height())
-                    .then_some(index)
-            })
+            .filter_map(|(index, candidate)| is_overview_ifd(ifd, candidate).then_some(index))
             .collect();
 
         let geo_metadata = GeoMetadata {
@@ -239,6 +273,34 @@ impl GeoTiffFile {
 }
 
 #[cfg(feature = "local")]
+fn is_overview_ifd(base: &tiff_reader::Ifd, candidate: &tiff_reader::Ifd) -> bool {
+    let smaller = candidate.width() < base.width() || candidate.height() < base.height();
+    if !smaller {
+        return false;
+    }
+
+    let same_layout = candidate.samples_per_pixel() == base.samples_per_pixel()
+        && candidate.bits_per_sample() == base.bits_per_sample()
+        && candidate.sample_format() == base.sample_format()
+        && candidate.photometric_interpretation() == base.photometric_interpretation();
+    if !same_layout {
+        return false;
+    }
+
+    candidate
+        .tag(TAG_NEW_SUBFILE_TYPE)
+        .and_then(|tag| tag.value.as_u64())
+        .map(|flags| flags & 0x1 != 0)
+        .or_else(|| {
+            candidate
+                .tag(TAG_SUBFILE_TYPE)
+                .and_then(|tag| tag.value.as_u16())
+                .map(|value| value == 2)
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(feature = "local")]
 fn parse_geokey_directory(ifd: &tiff_reader::Ifd) -> Result<GeoKeyDirectory> {
     let directory = ifd
         .tag(TAG_GEO_KEY_DIRECTORY)
@@ -294,6 +356,12 @@ fn parse_nodata(ifd: &tiff_reader::Ifd) -> Option<String> {
 mod tests {
     use super::GeoTiffFile;
 
+    #[derive(Clone)]
+    struct TestIfdSpec {
+        entries: Vec<(u16, u16, u32, Vec<u8>)>,
+        image_data: Vec<u8>,
+    }
+
     fn le_u16(value: u16) -> [u8; 2] {
         value.to_le_bytes()
     }
@@ -306,87 +374,181 @@ mod tests {
         value.to_le_bytes()
     }
 
-    fn build_simple_geotiff() -> Vec<u8> {
+    fn build_classic_tiff(ifds: &[TestIfdSpec]) -> Vec<u8> {
+        let mut ifd_offsets = Vec::with_capacity(ifds.len());
+        let mut cursor = 8usize;
+        for ifd in ifds {
+            ifd_offsets.push(cursor as u32);
+            let deferred_len: usize = ifd
+                .entries
+                .iter()
+                .filter(|(tag, _, _, value)| *tag != 273 && value.len() > 4)
+                .map(|(_, _, _, value)| value.len())
+                .sum();
+            cursor += 2 + ifd.entries.len() * 12 + 4 + ifd.image_data.len() + deferred_len;
+        }
+
+        let mut bytes = Vec::with_capacity(cursor);
+        bytes.extend_from_slice(b"II");
+        bytes.extend_from_slice(&le_u16(42));
+        bytes.extend_from_slice(&le_u32(ifd_offsets.first().copied().unwrap_or(0)));
+
+        for (ifd_index, ifd) in ifds.iter().enumerate() {
+            let ifd_offset = ifd_offsets[ifd_index] as usize;
+            debug_assert_eq!(bytes.len(), ifd_offset);
+
+            let ifd_size = 2 + ifd.entries.len() * 12 + 4;
+            let mut next_data_offset = ifd_offset + ifd_size;
+            let image_offset = next_data_offset as u32;
+            next_data_offset += ifd.image_data.len();
+
+            bytes.extend_from_slice(&le_u16(ifd.entries.len() as u16));
+            let mut deferred = Vec::new();
+            for (tag, ty, count, value) in &ifd.entries {
+                bytes.extend_from_slice(&le_u16(*tag));
+                bytes.extend_from_slice(&le_u16(*ty));
+                bytes.extend_from_slice(&le_u32(*count));
+                if *tag == 273 {
+                    bytes.extend_from_slice(&le_u32(image_offset));
+                } else if value.len() <= 4 {
+                    let mut inline = [0u8; 4];
+                    inline[..value.len()].copy_from_slice(value);
+                    bytes.extend_from_slice(&inline);
+                } else {
+                    bytes.extend_from_slice(&le_u32(next_data_offset as u32));
+                    next_data_offset += value.len();
+                    deferred.push(value.clone());
+                }
+            }
+
+            let next_ifd_offset = ifd_offsets.get(ifd_index + 1).copied().unwrap_or(0);
+            bytes.extend_from_slice(&le_u32(next_ifd_offset));
+            bytes.extend_from_slice(&ifd.image_data);
+            for value in deferred {
+                bytes.extend_from_slice(&value);
+            }
+            debug_assert_eq!(bytes.len(), next_data_offset);
+        }
+
+        bytes
+    }
+
+    fn build_simple_geotiff(pixel_is_point: bool) -> Vec<u8> {
         let image_data = vec![10u8, 20, 30, 40];
         let tiepoints = [0.0, 0.0, 0.0, 100.0, 200.0, 0.0];
         let scales = [2.0, 2.0, 0.0];
-        let geo_keys: [u16; 12] = [
-            1, 1, 0, 2, // header
-            1024, 0, 1, 2, // model type = Geographic
-            2048, 0, 1, 4326, // EPSG:4326
-        ];
+        let geo_keys = if pixel_is_point {
+            vec![
+                1, 1, 0, 3, // header
+                1024, 0, 1, 2, // model type = Geographic
+                1025, 0, 1, 2, // raster type = PixelIsPoint
+                2048, 0, 1, 4326, // EPSG:4326
+            ]
+        } else {
+            vec![
+                1, 1, 0, 2, // header
+                1024, 0, 1, 2, // model type = Geographic
+                2048, 0, 1, 4326, // EPSG:4326
+            ]
+        };
         let nodata = b"-9999\0".to_vec();
 
-        let entries = vec![
-            (256u16, 4u16, 1u32, le_u32(2).to_vec()),
-            (257u16, 4u16, 1u32, le_u32(2).to_vec()),
-            (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
-            (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
-            (273u16, 4u16, 1u32, vec![]),
-            (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
-            (278u16, 4u16, 1u32, le_u32(2).to_vec()),
-            (279u16, 4u16, 1u32, le_u32(image_data.len() as u32).to_vec()),
-            (
-                33550u16,
-                12u16,
-                3u32,
-                scales.iter().flat_map(|value| le_f64(*value)).collect(),
-            ),
-            (
-                33922u16,
-                12u16,
-                6u32,
-                tiepoints.iter().flat_map(|value| le_f64(*value)).collect(),
-            ),
-            (
-                34735u16,
-                3u16,
-                geo_keys.len() as u32,
-                geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
-            ),
-            (42113u16, 2u16, nodata.len() as u32, nodata),
-        ];
+        build_classic_tiff(&[TestIfdSpec {
+            image_data,
+            entries: vec![
+                (256u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (
+                    33550u16,
+                    12u16,
+                    3u32,
+                    scales.iter().flat_map(|value| le_f64(*value)).collect(),
+                ),
+                (
+                    33922u16,
+                    12u16,
+                    6u32,
+                    tiepoints.iter().flat_map(|value| le_f64(*value)).collect(),
+                ),
+                (
+                    34735u16,
+                    3u16,
+                    geo_keys.len() as u32,
+                    geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
+                ),
+                (42113u16, 2u16, nodata.len() as u32, nodata),
+            ],
+        }])
+    }
 
-        let ifd_offset = 8u32;
-        let ifd_size = 2 + entries.len() * 12 + 4;
-        let mut next_data_offset = ifd_offset as usize + ifd_size;
-        let image_offset = next_data_offset as u32;
-        next_data_offset += image_data.len();
+    fn build_geotiff_with_overview() -> Vec<u8> {
+        let base = TestIfdSpec {
+            image_data: vec![10u8, 20, 30, 40],
+            entries: vec![
+                (256u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (
+                    33550u16,
+                    12u16,
+                    3u32,
+                    [2.0, 2.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    33922u16,
+                    12u16,
+                    6u32,
+                    [0.0, 0.0, 0.0, 100.0, 200.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    34735u16,
+                    3u16,
+                    12u32,
+                    [1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326]
+                        .iter()
+                        .flat_map(|value| le_u16(*value))
+                        .collect(),
+                ),
+            ],
+        };
+        let overview = TestIfdSpec {
+            image_data: vec![99u8],
+            entries: vec![
+                (254u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (256u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(1).to_vec()),
+            ],
+        };
 
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"II");
-        bytes.extend_from_slice(&le_u16(42));
-        bytes.extend_from_slice(&le_u32(ifd_offset));
-        bytes.extend_from_slice(&le_u16(entries.len() as u16));
-
-        let mut deferred = Vec::new();
-        for (tag, ty, count, value) in entries {
-            bytes.extend_from_slice(&le_u16(tag));
-            bytes.extend_from_slice(&le_u16(ty));
-            bytes.extend_from_slice(&le_u32(count));
-            if tag == 273 {
-                bytes.extend_from_slice(&le_u32(image_offset));
-            } else if value.len() <= 4 {
-                let mut inline = [0u8; 4];
-                inline[..value.len()].copy_from_slice(&value);
-                bytes.extend_from_slice(&inline);
-            } else {
-                bytes.extend_from_slice(&le_u32(next_data_offset as u32));
-                next_data_offset += value.len();
-                deferred.push(value);
-            }
-        }
-        bytes.extend_from_slice(&le_u32(0));
-        bytes.extend_from_slice(&image_data);
-        for value in deferred {
-            bytes.extend_from_slice(&value);
-        }
-        bytes
+        build_classic_tiff(&[base, overview])
     }
 
     #[test]
     fn parses_geotiff_metadata_and_reads_raster() {
-        let file = GeoTiffFile::from_bytes(build_simple_geotiff()).unwrap();
+        let file = GeoTiffFile::from_bytes(build_simple_geotiff(false)).unwrap();
         assert_eq!(file.epsg(), Some(4326));
         assert_eq!(file.width(), 2);
         assert_eq!(file.height(), 2);
@@ -399,5 +561,28 @@ mod tests {
         let (values, offset) = raster.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn pixel_is_point_metadata_shifts_bounds_to_outer_edges() {
+        let file = GeoTiffFile::from_bytes(build_simple_geotiff(true)).unwrap();
+        assert_eq!(file.geo_bounds(), Some([99.0, 197.0, 103.0, 201.0]));
+
+        let transform = file.transform().unwrap();
+        let (center_x, center_y) = transform.pixel_to_geo(0.5, 0.5);
+        assert_eq!((center_x, center_y), (100.0, 200.0));
+    }
+
+    #[test]
+    fn discovers_reduced_resolution_overviews() {
+        let file = GeoTiffFile::from_bytes(build_geotiff_with_overview()).unwrap();
+        assert_eq!(file.overview_count(), 1);
+        assert_eq!(file.overview_ifd_index(0).unwrap(), 1);
+
+        let overview = file.read_overview::<u8>(0).unwrap();
+        assert_eq!(overview.shape(), &[1, 1]);
+        let (values, offset) = overview.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![99]);
     }
 }

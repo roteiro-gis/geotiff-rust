@@ -28,7 +28,7 @@ tempfile = "3"
 default = ["local", "rayon"]
 local = ["dep:tiff-reader"]
 rayon = ["dep:rayon", "local", "tiff-reader/rayon"]
-cog = ["dep:reqwest"]
+cog = ["dep:reqwest", "local"]
 
 [dependencies.reqwest]
 version = "0.12"

@@ -2,6 +2,24 @@
 
 use crate::geokeys::{self, GeoKeyDirectory};
 
+/// GeoTIFF raster-space interpretation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RasterType {
+    PixelIsArea,
+    PixelIsPoint,
+    Unknown(u16),
+}
+
+impl RasterType {
+    pub fn from_code(code: u16) -> Self {
+        match code {
+            1 => Self::PixelIsArea,
+            2 => Self::PixelIsPoint,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
 /// Extracted CRS information from GeoKeys.
 #[derive(Debug, Clone)]
 pub struct CrsInfo {
@@ -37,5 +55,10 @@ impl CrsInfo {
         self.projected_epsg
             .or(self.geographic_epsg)
             .map(|e| e as u32)
+    }
+
+    /// Returns the GeoTIFF raster-space interpretation.
+    pub fn raster_type_enum(&self) -> RasterType {
+        RasterType::from_code(self.raster_type)
     }
 }

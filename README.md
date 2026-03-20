@@ -47,7 +47,7 @@ let pixels: ndarray::ArrayD<u16> = file.read_image(0)?;
 - IFD chain traversal (multi-page/multi-image)
 - Random-access decode from mmap, in-memory bytes, or custom sources
 - Strip and tile data access
-- Compression: Deflate, LZW, PackBits, JPEG (optional), ZSTD (optional)
+- Compression: Deflate, LZW, PackBits, JPEG-in-TIFF compression 7 (optional), ZSTD (optional)
 - Parallel strip/tile decompression via Rayon
 - All standard tag types (BYTE through IFD8)
 - Typed raster reads into `ndarray::ArrayD`
@@ -57,10 +57,11 @@ let pixels: ndarray::ArrayD<u16> = file.read_image(0)?;
 - CRS/EPSG extraction (ProjectedCSType, GeographicType)
 - Model tiepoint and pixel scale (tags 33922, 33550)
 - Model transformation matrix (tag 34264)
+- Correct `PixelIsArea`/`PixelIsPoint` normalization for affine bounds and transforms
 - Nodata from GDAL_NODATA tag (42113)
 - Band interleaving detection
 - Pixel-to-geographic coordinate transforms
-- Overview discovery for internally tiled/overviewed GeoTIFFs
+- Overview discovery for reduced-resolution GeoTIFF IFDs
 - Optional HTTP range-backed remote COG/GeoTIFF access
 
 ## Feature flags
@@ -75,9 +76,9 @@ geotiff-reader = { version = "0.1", features = ["cog"] }  # + HTTP range-backed 
 |---|---|---|
 | `local` | yes | Local file reading via `tiff-reader` |
 | `rayon` | yes | Parallel strip/tile decompression |
-| `jpeg` | yes | JPEG compression support (tiff-reader) |
+| `jpeg` | yes | JPEG-in-TIFF compression 7 support, including `JPEGTables`-backed abbreviated streams |
 | `zstd` | yes | ZSTD compression support (tiff-reader) |
-| `cog` | no | Enable HTTP range-backed remote GeoTIFF/COG open |
+| `cog` | no | Enable HTTP range-backed remote GeoTIFF/COG open; implies `local` |
 
 ## Testing
 

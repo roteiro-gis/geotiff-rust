@@ -1,17 +1,30 @@
 //! Compression filter pipeline for TIFF strip/tile decompression.
 
+#[cfg(feature = "jpeg")]
+use std::io::Cursor;
+use std::io::Read;
+
 use crate::error::{Error, Result};
 use crate::header::ByteOrder;
 
 /// Decompress a strip or tile according to the TIFF compression tag.
-pub fn decompress(compression: u16, data: &[u8], index: usize) -> Result<Vec<u8>> {
+pub fn decompress(
+    compression: u16,
+    data: &[u8],
+    index: usize,
+    _jpeg_tables: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     match compression {
         1 => Ok(data.to_vec()),
         8 | 32946 => decompress_deflate(data, index),
         5 => decompress_lzw(data, index),
         32773 => decompress_packbits(data, index),
         #[cfg(feature = "jpeg")]
-        6 | 7 => decompress_jpeg(data, index),
+        6 => Err(Error::UnsupportedCompression(compression)),
+        #[cfg(feature = "jpeg")]
+        7 => decompress_jpeg(data, index, _jpeg_tables),
+        #[cfg(not(feature = "jpeg"))]
+        6 | 7 => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "zstd")]
         50000 => decompress_zstd(data, index),
         _ => Err(Error::UnsupportedCompression(compression)),
@@ -60,7 +73,6 @@ pub fn fix_endianness_and_predict(
 
 fn decompress_deflate(data: &[u8], index: usize) -> Result<Vec<u8>> {
     use flate2::read::ZlibDecoder;
-    use std::io::Read;
 
     let mut decoder = ZlibDecoder::new(data);
     let mut out = Vec::new();
@@ -123,10 +135,11 @@ fn decompress_packbits(data: &[u8], index: usize) -> Result<Vec<u8>> {
 }
 
 #[cfg(feature = "jpeg")]
-fn decompress_jpeg(data: &[u8], index: usize) -> Result<Vec<u8>> {
+fn decompress_jpeg(data: &[u8], index: usize, jpeg_tables: Option<&[u8]>) -> Result<Vec<u8>> {
     use jpeg_decoder::Decoder;
 
-    let mut decoder = Decoder::new(data);
+    let stream = merge_jpeg_stream(jpeg_tables, data);
+    let mut decoder = Decoder::new(Cursor::new(stream));
     decoder.decode().map_err(|e| Error::DecompressionFailed {
         index,
         reason: format!("JPEG: {e}"),
@@ -135,10 +148,40 @@ fn decompress_jpeg(data: &[u8], index: usize) -> Result<Vec<u8>> {
 
 #[cfg(feature = "zstd")]
 fn decompress_zstd(data: &[u8], index: usize) -> Result<Vec<u8>> {
-    zstd::bulk::decompress(data, 64 * 1024 * 1024).map_err(|e| Error::DecompressionFailed {
+    zstd::stream::decode_all(Cursor::new(data)).map_err(|e| Error::DecompressionFailed {
         index,
         reason: format!("ZSTD: {e}"),
     })
+}
+
+#[cfg(feature = "jpeg")]
+fn merge_jpeg_stream(jpeg_tables: Option<&[u8]>, scan_data: &[u8]) -> Vec<u8> {
+    if scan_data.starts_with(&[0xff, 0xd8]) || jpeg_tables.is_none() {
+        return scan_data.to_vec();
+    }
+
+    let tables = jpeg_tables.unwrap_or_default();
+    let table_body = match tables.strip_suffix(&[0xff, 0xd9]) {
+        Some(without_eoi) => without_eoi,
+        None => tables,
+    };
+    let scan_body = match scan_data.strip_prefix(&[0xff, 0xd8]) {
+        Some(without_soi) => without_soi,
+        None => scan_data,
+    };
+
+    let mut merged = Vec::with_capacity(table_body.len() + scan_body.len() + 2);
+    if table_body.starts_with(&[0xff, 0xd8]) {
+        merged.extend_from_slice(table_body);
+    } else {
+        merged.extend_from_slice(&[0xff, 0xd8]);
+        merged.extend_from_slice(table_body);
+    }
+    merged.extend_from_slice(scan_body);
+    if !merged.ends_with(&[0xff, 0xd9]) {
+        merged.extend_from_slice(&[0xff, 0xd9]);
+    }
+    merged
 }
 
 fn fix_endianness(buf: &mut [u8], byte_order: ByteOrder, bit_depth: u16) {
@@ -266,6 +309,8 @@ fn predict_f64(input: &mut [u8], output: &mut [u8], samples: u16) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "jpeg")]
+    use super::merge_jpeg_stream;
     use super::{decompress_packbits, fix_endianness_and_predict};
     use crate::header::ByteOrder;
 
@@ -280,5 +325,16 @@ mod tests {
     fn packbits_decoder_rejects_truncated_repeat_run() {
         let err = decompress_packbits(&[0xff], 0).unwrap_err();
         assert!(err.to_string().contains("PackBits"));
+    }
+
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn merges_jpeg_tables_with_abbreviated_scan() {
+        let merged = merge_jpeg_stream(
+            Some(&[0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0xff, 0xd9]),
+            &[0xff, 0xda, 0x00, 0x08, 0x00],
+        );
+        assert_eq!(&merged[..6], &[0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43]);
+        assert!(merged.ends_with(&[0xff, 0xd9]));
     }
 }

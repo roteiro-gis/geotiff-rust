@@ -12,6 +12,8 @@ use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
 
+const TAG_JPEG_TABLES: u16 = 347;
+
 pub fn read_image(
     source: &dyn TiffSource,
     ifd: &Ifd,
@@ -214,7 +216,10 @@ fn read_tile_block(
         source.read_exact_at(spec.offset, len)?
     };
 
-    let mut decoded = filters::decompress(ifd.compression(), &compressed, spec.index)?;
+    let jpeg_tables = ifd
+        .tag(TAG_JPEG_TABLES)
+        .and_then(|tag| tag.value.as_bytes());
+    let mut decoded = filters::decompress(ifd.compression(), &compressed, spec.index, jpeg_tables)?;
     let samples = if layout.planar_configuration == 1 {
         layout.samples_per_pixel
     } else {

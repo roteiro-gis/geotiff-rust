@@ -1,0 +1,27 @@
+[package]
+name = "geotiff-rust-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tiff-reader = { path = "../tiff-reader", default-features = true }
+geotiff-reader = { path = "../geotiff-reader", default-features = true }
+
+[[bin]]
+name = "tiff_open"
+path = "fuzz_targets/tiff_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "geotiff_open"
+path = "fuzz_targets/geotiff_open.rs"
+test = false
+doc = false
+bench = false

@@ -11,14 +11,16 @@ use crate::filters;
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
+use crate::GdalStructuralMetadata;
 
 const TAG_JPEG_TABLES: u16 = 347;
 
-pub fn read_image(
+pub(crate) fn read_image(
     source: &dyn TiffSource,
     ifd: &Ifd,
     byte_order: ByteOrder,
     cache: &BlockCache,
+    gdal_structural_metadata: Option<&GdalStructuralMetadata>,
 ) -> Result<Vec<u8>> {
     let layout = ifd.raster_layout()?;
     let offsets = ifd
@@ -83,8 +85,16 @@ pub fn read_image(
     let decoded_blocks: Result<Vec<_>> = specs
         .iter()
         .map(|&spec| {
-            read_strip_block(source, ifd, byte_order, cache, spec, &layout)
-                .map(|block| (spec, block))
+            read_strip_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
         })
         .collect();
 
@@ -92,8 +102,16 @@ pub fn read_image(
     let decoded_blocks: Result<Vec<_>> = specs
         .par_iter()
         .map(|&spec| {
-            read_strip_block(source, ifd, byte_order, cache, spec, &layout)
-                .map(|block| (spec, block))
+            read_strip_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
         })
         .collect();
 
@@ -153,6 +171,7 @@ fn read_strip_block(
     cache: &BlockCache,
     spec: StripBlockSpec,
     layout: &RasterLayout,
+    gdal_structural_metadata: Option<&GdalStructuralMetadata>,
 ) -> Result<Arc<Vec<u8>>> {
     let cache_key = BlockKey {
         ifd_index: ifd.index,
@@ -194,6 +213,13 @@ fn read_strip_block(
             data_len: source.len(),
         })?;
         source.read_exact_at(spec.offset, len)?
+    };
+
+    let compressed = match gdal_structural_metadata {
+        Some(metadata) => metadata
+            .unwrap_block(&compressed, byte_order, spec.offset)?
+            .to_vec(),
+        None => compressed,
     };
 
     let jpeg_tables = ifd

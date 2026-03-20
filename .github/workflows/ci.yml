@@ -2,20 +2,25 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   checks:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -24,13 +29,77 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all --check
 
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Run tests
-        run: cargo test --workspace
-
-      - name: Run all-feature tests
+      - name: Run tests with all features
         run: cargo test --workspace --all-features
+
+  no-default-features:
+    name: No default features
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test TIFF reader with no default features
+        run: cargo test -p tiff-reader --no-default-features
+
+      - name: Test GeoTIFF reader with no default features
+        run: cargo test -p geotiff-reader --no-default-features
+
+      - name: Test GeoTIFF reader with COG only
+        run: cargo test -p geotiff-reader --no-default-features --features cog
+
+  corpus:
+    name: Corpus sync
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify corpus fixtures are up to date
+        run: ./scripts/fetch-interoperability-corpus.sh --verify-only
+
+      - name: Verify fuzz seeds
+        run: |
+          ./scripts/seed-fuzz-corpus.sh
+          git diff --exit-code -- fuzz/corpus
+
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check fuzz targets
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins
+
+      - name: Lint fuzz targets
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings

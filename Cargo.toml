@@ -1,5 +1,6 @@
 [workspace]
 members = ["tiff-reader", "geotiff-reader"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]

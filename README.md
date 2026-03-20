@@ -86,6 +86,20 @@ geotiff-reader = { version = "0.1", features = ["cog"] }  # + HTTP range-backed 
 cargo test --all-features
 ```
 
+Real-world interoperability fixtures are checked in under `testdata/interoperability` and can be re-verified locally without network access:
+
+```sh
+./scripts/fetch-interoperability-corpus.sh --verify-only
+```
+
+Fuzzing uses that corpus as its seed set:
+
+```sh
+./scripts/seed-fuzz-corpus.sh
+cargo fuzz run tiff_open fuzz/corpus/tiff_open
+cargo fuzz run geotiff_open fuzz/corpus/geotiff_open
+```
+
 ## License
 
 MIT OR Apache-2.0

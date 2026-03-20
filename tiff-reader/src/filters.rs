@@ -89,7 +89,7 @@ fn decompress_lzw(data: &[u8], index: usize) -> Result<Vec<u8>> {
     use weezl::decode::Decoder;
     use weezl::BitOrder;
 
-    let mut decoder = Decoder::new(BitOrder::Msb, 8);
+    let mut decoder = Decoder::with_tiff_size_switch(BitOrder::Msb, 8);
     decoder
         .decode(data)
         .map_err(|e| Error::DecompressionFailed {
@@ -156,7 +156,7 @@ fn decompress_zstd(data: &[u8], index: usize) -> Result<Vec<u8>> {
 
 #[cfg(feature = "jpeg")]
 fn merge_jpeg_stream(jpeg_tables: Option<&[u8]>, scan_data: &[u8]) -> Vec<u8> {
-    if scan_data.starts_with(&[0xff, 0xd8]) || jpeg_tables.is_none() {
+    if jpeg_tables.is_none() {
         return scan_data.to_vec();
     }
 
@@ -309,9 +309,11 @@ fn predict_f64(input: &mut [u8], output: &mut [u8], samples: u16) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     #[cfg(feature = "jpeg")]
     use super::merge_jpeg_stream;
-    use super::{decompress_packbits, fix_endianness_and_predict};
+    use super::{decompress_lzw, decompress_packbits, fix_endianness_and_predict};
     use crate::header::ByteOrder;
 
     #[test]
@@ -325,6 +327,19 @@ mod tests {
     fn packbits_decoder_rejects_truncated_repeat_run() {
         let err = decompress_packbits(&[0xff], 0).unwrap_err();
         assert!(err.to_string().contains("PackBits"));
+    }
+
+    #[test]
+    fn lzw_real_cog_tile_requires_repeated_trailer_bytes() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../testdata/interoperability/gdal/gcore/data/cog/byte_little_endian_golden.tif");
+        let bytes = std::fs::read(fixture).unwrap();
+
+        let without_trailer = &bytes[570..570 + 1223];
+        let with_trailer = &bytes[570..570 + 1227];
+
+        assert!(decompress_lzw(without_trailer, 0).is_ok());
+        assert!(decompress_lzw(with_trailer, 0).is_ok());
     }
 
     #[cfg(feature = "jpeg")]

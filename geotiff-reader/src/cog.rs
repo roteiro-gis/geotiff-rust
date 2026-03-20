@@ -97,7 +97,7 @@ impl HttpRangeSource {
             client,
             url,
             len,
-            chunk_size: options.chunk_size.max(4096),
+            chunk_size: options.chunk_size.max(1),
             cache: Mutex::new(RangeCacheState {
                 cache: LruCache::new(slots),
                 current_bytes: 0,
@@ -257,12 +257,15 @@ fn parse_total_length(content_range: &str) -> Option<u64> {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
-    use super::{parse_total_length, HttpGeoTiffFile, HttpOpenOptions};
+    use tiff_reader::source::TiffSource;
+
+    use super::{parse_total_length, HttpGeoTiffFile, HttpOpenOptions, HttpRangeSource};
 
     #[test]
     fn parses_total_length_from_content_range() {
@@ -291,6 +294,30 @@ mod tests {
         let (values, offset) = raster.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn reads_real_cog_tile_bytes_exactly_over_small_ranges() {
+        let Some(bytes) = real_cog_fixture() else {
+            return;
+        };
+        let Some(server) = TestServer::start(bytes.clone()) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 128,
+                cache_bytes: 1024 * 1024,
+                cache_slots: 16,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        let expected = &bytes[570..570 + 1223];
+        let actual = source.read_exact_at(570, 1223).unwrap();
+        assert_eq!(actual, expected);
     }
 
     fn build_simple_geotiff() -> Vec<u8> {
@@ -377,6 +404,12 @@ mod tests {
         bytes
     }
 
+    fn real_cog_fixture() -> Option<Vec<u8>> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../testdata/interoperability/gdal/gcore/data/cog/byte_little_endian_golden.tif");
+        std::fs::read(path).ok()
+    }
+
     struct TestServer {
         addr: SocketAddr,
         stop: Arc<AtomicBool>,
@@ -395,21 +428,9 @@ mod tests {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            let mut request = [0u8; 4096];
-                            let read = match stream.read(&mut request) {
-                                Ok(read) => read,
-                                Err(_) => continue,
+                            let Some((request_line, range)) = read_request(&mut stream) else {
+                                continue;
                             };
-                            let request = String::from_utf8_lossy(&request[..read]);
-                            let mut lines = request.lines();
-                            let request_line = lines.next().unwrap_or_default();
-                            let mut range = None;
-                            for line in lines {
-                                let lower = line.to_ascii_lowercase();
-                                if let Some(value) = lower.strip_prefix("range: bytes=") {
-                                    range = Some(value.trim().to_string());
-                                }
-                            }
 
                             if request_line.starts_with("HEAD ") {
                                 let response = format!(
@@ -420,10 +441,7 @@ mod tests {
                                 continue;
                             }
 
-                            if let Some(range_spec) = range {
-                                let (start_s, end_s) = range_spec.split_once('-').unwrap();
-                                let start: usize = start_s.parse().unwrap();
-                                let end: usize = end_s.parse().unwrap();
+                            if let Some((start, end)) = range {
                                 let body = &bytes[start..=end];
                                 let response = format!(
                                     "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
@@ -461,6 +479,45 @@ mod tests {
         fn url(&self) -> String {
             format!("http://{}", self.addr)
         }
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> Option<(String, Option<(usize, usize)>)> {
+        let mut request = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+
+        loop {
+            let read = stream.read(&mut chunk).ok()?;
+            if read == 0 {
+                return None;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+            if request.len() >= 16 * 1024 {
+                return None;
+            }
+        }
+
+        let request = String::from_utf8_lossy(&request);
+        let mut lines = request.lines();
+        let request_line = lines.next()?.to_string();
+        let mut range = None;
+        for line in lines {
+            let lower = line.to_ascii_lowercase();
+            if let Some(value) = lower.strip_prefix("range: bytes=") {
+                let (start_s, end_s) = value.trim().split_once('-')?;
+                let start = start_s.parse().ok()?;
+                let end = end_s.parse().ok()?;
+                if start > end {
+                    return None;
+                }
+                range = Some((start, end));
+                break;
+            }
+        }
+
+        Some((request_line, range))
     }
 
     impl Drop for TestServer {

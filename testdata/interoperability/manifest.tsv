@@ -1,0 +1,11 @@
+# relative_path	sha256	targets	source_url
+gdal/gcore/data/byte.tif	59ed6e9dd19291bbdc230092ab7f6bc46fb0537ee4c9eec15dd58021cd9c12be	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/byte.tif
+gdal/gcore/data/byte_point.tif	45d0f68b312e0a8502f256a746454570e865e3dd9348f789c15e79043060b22e	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/byte_point.tif
+gdal/gcore/data/WGS_1984_Web_Mercator.tif	87916d141469e794602c62bbf76b4169412b2088d43ecd580ddfb674b9932c8a	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/WGS_1984_Web_Mercator.tif
+gdal/gcore/data/byte_with_ovr.tif	b0d837a199cabeb278ebdab725aa26415cc5ba0d77133d098f70446d0d204bd0	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/byte_with_ovr.tif
+gdal/gcore/data/byte_zstd.tif	70892132bcda3f8318fe986a4625b634f58dd055c7b8435b5a4362eb0879ec26	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/byte_zstd.tif
+gdal/gcore/data/bigtiff_one_strip_long.tif	48f2855399857d6cacf11fabb1cde4c63fe6368371132a007033282f4b1419ee	tiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/bigtiff_one_strip_long.tif
+gdal/gcore/data/gtiff/byte_JPEG.tif	2545d1407aa3ffbf6913b192fe886e33bd183b0115a021451e9ff83fb58ad226	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/gtiff/byte_JPEG.tif
+gdal/gcore/data/gtiff/byte_NONE_tiled.tif	82c5b10d17f85e3a723aaf28b8b966263fadaa78177025ec4cbc98c50f708469	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/gtiff/byte_NONE_tiled.tif
+gdal/gcore/data/cog/byte_little_endian_golden.tif	5de793b475b2fc903b2cbfd92cdaca5040cd141ef4df65dd82a684cd46734957	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gcore/data/cog/byte_little_endian_golden.tif
+gdal/gdrivers/data/gtiff/int8.tif	3d2625b03da3de3fda100ec577362b10307aafc3aa9793c28d6480a2c5e96cc5	tiff_open,geotiff_open	https://raw.githubusercontent.com/OSGeo/gdal/master/autotest/gdrivers/data/gtiff/int8.tif

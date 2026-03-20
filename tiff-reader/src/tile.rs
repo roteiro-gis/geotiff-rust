@@ -11,14 +11,16 @@ use crate::filters;
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
+use crate::GdalStructuralMetadata;
 
 const TAG_JPEG_TABLES: u16 = 347;
 
-pub fn read_image(
+pub(crate) fn read_image(
     source: &dyn TiffSource,
     ifd: &Ifd,
     byte_order: ByteOrder,
     cache: &BlockCache,
+    gdal_structural_metadata: Option<&GdalStructuralMetadata>,
 ) -> Result<Vec<u8>> {
     let layout = ifd.raster_layout()?;
     let tile_width = ifd
@@ -96,21 +98,37 @@ pub fn read_image(
         })
         .collect();
 
-    #[cfg(feature = "rayon")]
-    let decoded_blocks: Result<Vec<_>> = specs
-        .par_iter()
-        .map(|&spec| {
-            read_tile_block(source, ifd, byte_order, cache, spec, &layout)
-                .map(|block| (spec, block))
-        })
-        .collect();
-
     #[cfg(not(feature = "rayon"))]
     let decoded_blocks: Result<Vec<_>> = specs
         .iter()
         .map(|&spec| {
-            read_tile_block(source, ifd, byte_order, cache, spec, &layout)
-                .map(|block| (spec, block))
+            read_tile_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
+        })
+        .collect();
+
+    #[cfg(feature = "rayon")]
+    let decoded_blocks: Result<Vec<_>> = specs
+        .par_iter()
+        .map(|&spec| {
+            read_tile_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
         })
         .collect();
 
@@ -173,6 +191,7 @@ fn read_tile_block(
     cache: &BlockCache,
     spec: TileBlockSpec,
     layout: &RasterLayout,
+    gdal_structural_metadata: Option<&GdalStructuralMetadata>,
 ) -> Result<Arc<Vec<u8>>> {
     let cache_key = BlockKey {
         ifd_index: ifd.index,
@@ -214,6 +233,13 @@ fn read_tile_block(
             data_len: source.len(),
         })?;
         source.read_exact_at(spec.offset, len)?
+    };
+
+    let compressed = match gdal_structural_metadata {
+        Some(metadata) => metadata
+            .unwrap_block(&compressed, byte_order, spec.offset)?
+            .to_vec(),
+        None => compressed,
     };
 
     let jpeg_tables = ifd

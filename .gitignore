@@ -9,3 +9,8 @@ target/
 
 # macOS Finder metadata
 .DS_Store
+
+# cargo-fuzz outputs
+fuzz/artifacts/
+fuzz/coverage/
+fuzz/target/

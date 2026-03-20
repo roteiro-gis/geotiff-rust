@@ -5,6 +5,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -96,7 +97,10 @@ fn opens_real_world_cog_over_http_ranges() {
 
     assert_eq!(file.inner().width(), 20);
     assert_eq!(file.inner().height(), 20);
-    let raster: ArrayD<u8> = file.inner().read_raster().unwrap();
+    let raster: ArrayD<u8> = file
+        .inner()
+        .read_raster()
+        .unwrap_or_else(|err| panic!("{err}; served ranges: {:?}", server.served_ranges()));
     assert_eq!(raster.shape(), &[20, 20]);
 }
 
@@ -104,6 +108,7 @@ fn opens_real_world_cog_over_http_ranges() {
 struct TestServer {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
+    served_ranges: Arc<Mutex<Vec<Option<(usize, usize)>>>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -115,6 +120,8 @@ impl TestServer {
         let addr = listener.local_addr().ok()?;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
+        let served_ranges = Arc::new(Mutex::new(Vec::new()));
+        let served_ranges_worker = served_ranges.clone();
 
         let handle = thread::spawn(move || {
             while !stop_flag.load(Ordering::Relaxed) {
@@ -123,6 +130,7 @@ impl TestServer {
                         let Some((request_line, range)) = read_request(&mut stream) else {
                             continue;
                         };
+                        served_ranges_worker.lock().unwrap().push(range);
 
                         if request_line.starts_with("HEAD ") {
                             let response = format!(
@@ -164,12 +172,17 @@ impl TestServer {
         Some(Self {
             addr,
             stop,
+            served_ranges,
             handle: Some(handle),
         })
     }
 
     fn url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    fn served_ranges(&self) -> Vec<Option<(usize, usize)>> {
+        self.served_ranges.lock().unwrap().clone()
     }
 }
 

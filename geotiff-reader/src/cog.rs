@@ -97,7 +97,7 @@ impl HttpRangeSource {
             client,
             url,
             len,
-            chunk_size: options.chunk_size.max(4096),
+            chunk_size: options.chunk_size.max(1),
             cache: Mutex::new(RangeCacheState {
                 cache: LruCache::new(slots),
                 current_bytes: 0,
@@ -257,12 +257,15 @@ fn parse_total_length(content_range: &str) -> Option<u64> {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
-    use super::{parse_total_length, HttpGeoTiffFile, HttpOpenOptions};
+    use tiff_reader::source::TiffSource;
+
+    use super::{parse_total_length, HttpGeoTiffFile, HttpOpenOptions, HttpRangeSource};
 
     #[test]
     fn parses_total_length_from_content_range() {
@@ -291,6 +294,30 @@ mod tests {
         let (values, offset) = raster.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn reads_real_cog_tile_bytes_exactly_over_small_ranges() {
+        let Some(bytes) = real_cog_fixture() else {
+            return;
+        };
+        let Some(server) = TestServer::start(bytes.clone()) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 128,
+                cache_bytes: 1024 * 1024,
+                cache_slots: 16,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        let expected = &bytes[570..570 + 1223];
+        let actual = source.read_exact_at(570, 1223).unwrap();
+        assert_eq!(actual, expected);
     }
 
     fn build_simple_geotiff() -> Vec<u8> {
@@ -375,6 +402,12 @@ mod tests {
             bytes.extend_from_slice(&value);
         }
         bytes
+    }
+
+    fn real_cog_fixture() -> Option<Vec<u8>> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../testdata/interoperability/gdal/gcore/data/cog/byte_little_endian_golden.tif");
+        std::fs::read(path).ok()
     }
 
     struct TestServer {

@@ -99,53 +99,43 @@ impl GdalStructuralMetadata {
         byte_order: ByteOrder,
         offset: u64,
     ) -> Result<&'a [u8]> {
-        let mut payload_start = 0usize;
-        let mut payload_end = raw.len();
-
         if self.block_leader_size_as_u32 {
             if raw.len() < 4 {
-                return Err(Error::InvalidImageLayout(format!(
-                    "GDAL block leader at offset {offset} is truncated"
-                )));
+                return Ok(raw);
             }
             let declared_len = match byte_order {
                 ByteOrder::LittleEndian => u32::from_le_bytes(raw[..4].try_into().unwrap()),
                 ByteOrder::BigEndian => u32::from_be_bytes(raw[..4].try_into().unwrap()),
             } as usize;
-            payload_start = 4;
-            payload_end = payload_start.checked_add(declared_len).ok_or_else(|| {
-                Error::InvalidImageLayout("GDAL block payload overflows usize".into())
-            })?;
-        }
-
-        if self.block_trailer_repeats_last_4_bytes {
-            if payload_end.checked_add(4).is_none() || raw.len() < payload_end + 4 {
-                return Err(Error::InvalidImageLayout(format!(
-                    "GDAL block trailer at offset {offset} is truncated"
-                )));
-            }
-            if payload_end >= 4 {
-                let expected = &raw[payload_end - 4..payload_end];
-                let trailer = &raw[payload_end..payload_end + 4];
-                if expected != trailer {
-                    return Err(Error::InvalidImageLayout(format!(
-                        "GDAL block trailer mismatch at offset {offset}"
-                    )));
+            if let Some(payload_end) = 4usize.checked_add(declared_len) {
+                if payload_end <= raw.len() {
+                    if self.block_trailer_repeats_last_4_bytes {
+                        let trailer_end = payload_end.checked_add(4).ok_or_else(|| {
+                            Error::InvalidImageLayout("GDAL block trailer overflows usize".into())
+                        })?;
+                        if trailer_end <= raw.len() {
+                            let expected = &raw[payload_end - 4..payload_end];
+                            let trailer = &raw[payload_end..trailer_end];
+                            if expected != trailer {
+                                return Err(Error::InvalidImageLayout(format!(
+                                    "GDAL block trailer mismatch at offset {offset}"
+                                )));
+                            }
+                        }
+                    }
+                    return Ok(&raw[4..payload_end]);
                 }
             }
-        } else if payload_end > raw.len() {
-            return Err(Error::InvalidImageLayout(format!(
-                "GDAL block leader length exceeds available bytes at offset {offset}"
-            )));
         }
 
-        if payload_end > raw.len() || payload_start > payload_end {
-            return Err(Error::InvalidImageLayout(format!(
-                "GDAL structural metadata produced an invalid payload range at offset {offset}"
-            )));
+        if self.block_trailer_repeats_last_4_bytes && raw.len() >= 8 {
+            let split = raw.len() - 4;
+            if raw[split - 4..split] == raw[split..] {
+                return Ok(&raw[..split]);
+            }
         }
 
-        Ok(&raw[payload_start..payload_end])
+        Ok(raw)
     }
 }
 
@@ -345,23 +335,26 @@ fn parse_gdal_structural_metadata(source: &dyn TiffSource) -> Option<GdalStructu
 
     let probe_len = available_len.min(64);
     let probe = source.read_exact_at(8, probe_len).ok()?;
-    let declared_len = parse_gdal_structural_metadata_size(&probe)?;
-    if declared_len == 0 || declared_len > available_len {
+    let total_len = parse_gdal_structural_metadata_len(&probe)?;
+    if total_len == 0 || total_len > available_len {
         return None;
     }
 
-    let bytes = source.read_exact_at(8, declared_len).ok()?;
+    let bytes = source.read_exact_at(8, total_len).ok()?;
     GdalStructuralMetadata::from_prefix(&bytes)
 }
 
-fn parse_gdal_structural_metadata_size(bytes: &[u8]) -> Option<usize> {
+fn parse_gdal_structural_metadata_len(bytes: &[u8]) -> Option<usize> {
     let text = std::str::from_utf8(bytes).ok()?;
-    let value = text.strip_prefix(GDAL_STRUCTURAL_METADATA_PREFIX)?;
+    let newline_index = text.find('\n')?;
+    let header = &text[..newline_index];
+    let value = header.strip_prefix(GDAL_STRUCTURAL_METADATA_PREFIX)?;
     let digits: String = value.chars().take_while(|ch| ch.is_ascii_digit()).collect();
     if digits.is_empty() {
         return None;
     }
-    digits.parse().ok()
+    let payload_len: usize = digits.parse().ok()?;
+    newline_index.checked_add(1)?.checked_add(payload_len)
 }
 
 #[cfg(test)]
@@ -369,8 +362,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        parse_gdal_structural_metadata, GdalStructuralMetadata, TiffFile,
-        GDAL_STRUCTURAL_METADATA_PREFIX,
+        parse_gdal_structural_metadata, parse_gdal_structural_metadata_len, GdalStructuralMetadata,
+        TiffFile, GDAL_STRUCTURAL_METADATA_PREFIX,
     };
     use crate::source::BytesSource;
 
@@ -511,9 +504,10 @@ mod tests {
     #[test]
     fn parses_gdal_structural_metadata_before_binary_prefix_data() {
         let rest = "LAYOUT=IFDS_BEFORE_DATA\nBLOCK_ORDER=ROW_MAJOR\nBLOCK_LEADER=SIZE_AS_UINT4\nBLOCK_TRAILER=LAST_4_BYTES_REPEATED\nKNOWN_INCOMPATIBLE_EDITION=NO\n";
-        let prefix = format!("{GDAL_STRUCTURAL_METADATA_PREFIX}{:06} bytes\n{rest}", 0);
-        let metadata_len = prefix.len();
-        let prefix = format!("{GDAL_STRUCTURAL_METADATA_PREFIX}{metadata_len:06} bytes\n{rest}");
+        let prefix = format!(
+            "{GDAL_STRUCTURAL_METADATA_PREFIX}{:06} bytes\n{rest}",
+            rest.len()
+        );
 
         let mut bytes = vec![0u8; 8];
         bytes.extend_from_slice(prefix.as_bytes());
@@ -523,5 +517,31 @@ mod tests {
         let metadata = parse_gdal_structural_metadata(&source).unwrap();
         assert!(metadata.block_leader_size_as_u32);
         assert!(metadata.block_trailer_repeats_last_4_bytes);
+    }
+
+    #[test]
+    fn parses_gdal_structural_metadata_declared_length_as_header_plus_payload() {
+        let rest = "LAYOUT=IFDS_BEFORE_DATA\nBLOCK_ORDER=ROW_MAJOR\n";
+        let prefix = format!(
+            "{GDAL_STRUCTURAL_METADATA_PREFIX}{:06} bytes\n{rest}",
+            rest.len()
+        );
+        assert_eq!(
+            parse_gdal_structural_metadata_len(prefix.as_bytes()),
+            Some(prefix.len())
+        );
+    }
+
+    #[test]
+    fn leaves_payload_only_gdal_block_unchanged() {
+        let metadata = GdalStructuralMetadata {
+            block_leader_size_as_u32: true,
+            block_trailer_repeats_last_4_bytes: true,
+        };
+        let payload = [0x80u8, 0x1a, 0xcf, 0x68, 0x43, 0x9a, 0x11, 0x08];
+        let unwrapped = metadata
+            .unwrap_block(&payload, crate::ByteOrder::LittleEndian, 570)
+            .unwrap();
+        assert_eq!(unwrapped, payload);
     }
 }

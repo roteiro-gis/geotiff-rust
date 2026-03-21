@@ -54,6 +54,9 @@ jobs:
       - name: Test TIFF reader with no default features
         run: cargo test -p tiff-reader --no-default-features
 
+      - name: Test TIFF writer with no default features
+        run: cargo test -p tiff-writer --no-default-features
+
       - name: Test GeoTIFF reader with no default features
         run: cargo test -p geotiff-reader --no-default-features
 

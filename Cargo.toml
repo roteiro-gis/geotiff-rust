@@ -1,5 +1,5 @@
 [workspace]
-members = ["tiff-reader", "geotiff-reader"]
+members = ["tiff-core", "tiff-reader", "tiff-writer", "geotiff-core", "geotiff-reader", "geotiff-writer"]
 exclude = ["fuzz"]
 resolver = "2"
 

@@ -6,28 +6,33 @@ use std::io::Read;
 
 use crate::error::{Error, Result};
 use crate::header::ByteOrder;
+use tiff_core::{Compression, Predictor};
 
-/// Decompress a strip or tile according to the TIFF compression tag.
+/// Decompress a strip or tile according to the TIFF compression scheme.
 pub fn decompress(
     compression: u16,
     data: &[u8],
     index: usize,
     _jpeg_tables: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    match compression {
-        1 => Ok(data.to_vec()),
-        8 | 32946 => decompress_deflate(data, index),
-        5 => decompress_lzw(data, index),
-        32773 => decompress_packbits(data, index),
+    match Compression::from_code(compression) {
+        Some(Compression::None) => Ok(data.to_vec()),
+        Some(Compression::Deflate | Compression::DeflateOld) => decompress_deflate(data, index),
+        Some(Compression::Lzw) => decompress_lzw(data, index),
+        Some(Compression::PackBits) => decompress_packbits(data, index),
         #[cfg(feature = "jpeg")]
-        6 => Err(Error::UnsupportedCompression(compression)),
+        Some(Compression::OldJpeg) => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "jpeg")]
-        7 => decompress_jpeg(data, index, _jpeg_tables),
+        Some(Compression::Jpeg) => decompress_jpeg(data, index, _jpeg_tables),
         #[cfg(not(feature = "jpeg"))]
-        6 | 7 => Err(Error::UnsupportedCompression(compression)),
+        Some(Compression::OldJpeg | Compression::Jpeg) => {
+            Err(Error::UnsupportedCompression(compression))
+        }
         #[cfg(feature = "zstd")]
-        50000 => decompress_zstd(data, index),
-        _ => Err(Error::UnsupportedCompression(compression)),
+        Some(Compression::Zstd) => decompress_zstd(data, index),
+        #[cfg(not(feature = "zstd"))]
+        Some(Compression::Zstd) => Err(Error::UnsupportedCompression(compression)),
+        None => Err(Error::UnsupportedCompression(compression)),
     }
 }
 
@@ -39,17 +44,17 @@ pub fn fix_endianness_and_predict(
     byte_order: ByteOrder,
     predictor: u16,
 ) -> Result<()> {
-    match predictor {
-        1 => {
+    match Predictor::from_code(predictor) {
+        Some(Predictor::None) => {
             fix_endianness(row, byte_order, bit_depth);
             Ok(())
         }
-        2 => {
+        Some(Predictor::Horizontal) => {
             fix_endianness(row, byte_order, bit_depth);
             reverse_horizontal_predictor(row, bit_depth, samples);
             Ok(())
         }
-        3 => match bit_depth {
+        Some(Predictor::FloatingPoint) => match bit_depth {
             16 => {
                 let mut encoded = row.to_vec();
                 predict_f16(&mut encoded, row, samples);
@@ -67,7 +72,7 @@ pub fn fix_endianness_and_predict(
             }
             _ => Err(Error::UnsupportedPredictor(3)),
         },
-        _ => Err(Error::UnsupportedPredictor(predictor)),
+        None => Err(Error::UnsupportedPredictor(predictor)),
     }
 }
 

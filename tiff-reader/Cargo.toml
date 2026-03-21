@@ -13,6 +13,7 @@ keywords = ["tiff", "bigtiff", "decoder", "raster", "read-only"]
 categories = ["science", "parser-implementations"]
 
 [dependencies]
+tiff-core = { version = "0.1.0", path = "../tiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
 memmap2 = { workspace = true }

@@ -4,7 +4,15 @@ use crate::error::{Error, Result};
 use crate::header::{ByteOrder, TiffHeader};
 use crate::io::Cursor;
 use crate::source::TiffSource;
-use crate::tag::Tag;
+use crate::tag::{parse_tag_bigtiff, parse_tag_classic, Tag};
+
+pub use tiff_core::constants::{
+    TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH,
+    TAG_PHOTOMETRIC_INTERPRETATION, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
+    TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
+    TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH,
+};
+pub use tiff_core::RasterLayout;
 
 /// A parsed Image File Directory (IFD).
 #[derive(Debug, Clone)]
@@ -14,51 +22,6 @@ pub struct Ifd {
     /// Index of this IFD in the chain (0-based).
     pub index: usize,
 }
-
-/// Raster layout information normalized from TIFF tags.
-#[derive(Debug, Clone, Copy)]
-pub struct RasterLayout {
-    pub width: usize,
-    pub height: usize,
-    pub samples_per_pixel: usize,
-    pub bits_per_sample: u16,
-    pub bytes_per_sample: usize,
-    pub sample_format: u16,
-    pub planar_configuration: u16,
-    pub predictor: u16,
-}
-
-impl RasterLayout {
-    pub fn pixel_stride_bytes(&self) -> usize {
-        self.samples_per_pixel * self.bytes_per_sample
-    }
-
-    pub fn row_bytes(&self) -> usize {
-        self.width * self.pixel_stride_bytes()
-    }
-
-    pub fn sample_plane_row_bytes(&self) -> usize {
-        self.width * self.bytes_per_sample
-    }
-}
-
-// Well-known TIFF tag codes.
-pub const TAG_IMAGE_WIDTH: u16 = 256;
-pub const TAG_IMAGE_LENGTH: u16 = 257;
-pub const TAG_BITS_PER_SAMPLE: u16 = 258;
-pub const TAG_COMPRESSION: u16 = 259;
-pub const TAG_PHOTOMETRIC_INTERPRETATION: u16 = 262;
-pub const TAG_STRIP_OFFSETS: u16 = 273;
-pub const TAG_SAMPLES_PER_PIXEL: u16 = 277;
-pub const TAG_ROWS_PER_STRIP: u16 = 278;
-pub const TAG_STRIP_BYTE_COUNTS: u16 = 279;
-pub const TAG_PLANAR_CONFIGURATION: u16 = 284;
-pub const TAG_PREDICTOR: u16 = 317;
-pub const TAG_TILE_WIDTH: u16 = 322;
-pub const TAG_TILE_LENGTH: u16 = 323;
-pub const TAG_TILE_OFFSETS: u16 = 324;
-pub const TAG_TILE_BYTE_COUNTS: u16 = 325;
-pub const TAG_SAMPLE_FORMAT: u16 = 339;
 
 impl Ifd {
     /// Look up a tag by its code.
@@ -354,7 +317,7 @@ fn parse_tags_classic(
         let type_code = cursor.read_u16()?;
         let value_count = cursor.read_u32()? as u64;
         let value_offset_bytes = cursor.read_bytes(4)?;
-        let tag = Tag::parse_classic(
+        let tag = parse_tag_classic(
             code,
             type_code,
             value_count,
@@ -381,7 +344,7 @@ fn parse_tags_bigtiff(
         let type_code = cursor.read_u16()?;
         let value_count = cursor.read_u64()?;
         let value_offset_bytes = cursor.read_bytes(8)?;
-        let tag = Tag::parse_bigtiff(
+        let tag = parse_tag_bigtiff(
             code,
             type_code,
             value_count,

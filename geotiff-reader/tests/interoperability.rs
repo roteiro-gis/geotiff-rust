@@ -1,12 +1,20 @@
 #![cfg(feature = "local")]
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "cog")]
+use std::io::{Read, Write};
+#[cfg(feature = "cog")]
+use std::net::{SocketAddr, TcpListener};
+#[cfg(feature = "cog")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "cog")]
 use std::sync::Arc;
+#[cfg(feature = "cog")]
 use std::sync::Mutex;
+#[cfg(feature = "cog")]
 use std::thread;
+#[cfg(feature = "cog")]
 use std::time::Duration;
 
 use geotiff_reader::GeoTiffFile;

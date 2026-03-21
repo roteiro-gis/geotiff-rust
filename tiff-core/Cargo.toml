@@ -1,0 +1,16 @@
+[package]
+name = "tiff-core"
+description = "Shared TIFF/BigTIFF types: byte order, tag types, tag values, sample traits, and format constants"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/tiff-core"
+keywords = ["tiff", "bigtiff", "types", "raster"]
+categories = ["science", "data-structures"]
+
+[dependencies]
+thiserror = { workspace = true }

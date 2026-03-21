@@ -234,9 +234,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "geotiff-core"
+version = "0.1.0"
+
+[[package]]
 name = "geotiff-reader"
 version = "0.1.0"
 dependencies = [
+ "geotiff-core",
  "lru",
  "memmap2",
  "ndarray",
@@ -246,6 +251,19 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiff-reader",
+]
+
+[[package]]
+name = "geotiff-writer"
+version = "0.1.0"
+dependencies = [
+ "geotiff-core",
+ "geotiff-reader",
+ "ndarray",
+ "thiserror",
+ "tiff-core",
+ "tiff-reader",
+ "tiff-writer",
 ]
 
 [[package]]
@@ -1267,6 +1285,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiff-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "tiff-reader"
 version = "0.1.0"
 dependencies = [
@@ -1280,6 +1305,19 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror",
+ "tiff-core",
+ "weezl",
+ "zstd",
+]
+
+[[package]]
+name = "tiff-writer"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "thiserror",
+ "tiff-core",
+ "tiff-reader",
  "weezl",
  "zstd",
 ]

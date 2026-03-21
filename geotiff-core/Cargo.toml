@@ -1,0 +1,11 @@
+[package]
+name = "geotiff-core"
+description = "Shared GeoTIFF types: GeoKey directory, CRS, affine transforms, and tag constants"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]

@@ -3,251 +3,72 @@ use crate::header::ByteOrder;
 use crate::io::Cursor;
 use crate::source::TiffSource;
 
-/// TIFF data type codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TagType {
-    Byte,      // 1
-    Ascii,     // 2
-    Short,     // 3
-    Long,      // 4
-    Rational,  // 5
-    SByte,     // 6
-    Undefined, // 7
-    SShort,    // 8
-    SLong,     // 9
-    SRational, // 10
-    Float,     // 11
-    Double,    // 12
-    Long8,     // 16 (BigTIFF)
-    SLong8,    // 17 (BigTIFF)
-    Ifd8,      // 18 (BigTIFF)
-    Unknown(u16),
+pub use tiff_core::{Tag, TagType, TagValue};
+
+/// Parse a classic TIFF tag entry (12-byte IFD entry).
+pub fn parse_tag_classic(
+    code: u16,
+    type_code: u16,
+    count: u64,
+    value_offset_bytes: &[u8],
+    source: &dyn TiffSource,
+    byte_order: ByteOrder,
+) -> Result<Tag> {
+    let tag_type = TagType::from_code(type_code);
+    let total_size = value_len(code, count, tag_type.element_size())?;
+
+    let owned;
+    let value_bytes = if total_size <= 4 {
+        &value_offset_bytes[..total_size]
+    } else {
+        let offset = match byte_order {
+            ByteOrder::LittleEndian => u32::from_le_bytes(value_offset_bytes.try_into().unwrap()),
+            ByteOrder::BigEndian => u32::from_be_bytes(value_offset_bytes.try_into().unwrap()),
+        } as u64;
+        owned = read_value_bytes(source, offset, total_size)?;
+        owned.as_slice()
+    };
+
+    let value = decode_value(&tag_type, count, value_bytes, byte_order)?;
+    Ok(Tag {
+        code,
+        tag_type,
+        count,
+        value,
+    })
 }
 
-impl TagType {
-    pub fn from_code(code: u16) -> Self {
-        match code {
-            1 => Self::Byte,
-            2 => Self::Ascii,
-            3 => Self::Short,
-            4 => Self::Long,
-            5 => Self::Rational,
-            6 => Self::SByte,
-            7 => Self::Undefined,
-            8 => Self::SShort,
-            9 => Self::SLong,
-            10 => Self::SRational,
-            11 => Self::Float,
-            12 => Self::Double,
-            16 => Self::Long8,
-            17 => Self::SLong8,
-            18 => Self::Ifd8,
-            _ => Self::Unknown(code),
-        }
-    }
+/// Parse a BigTIFF tag entry (20-byte IFD entry).
+pub fn parse_tag_bigtiff(
+    code: u16,
+    type_code: u16,
+    count: u64,
+    value_offset_bytes: &[u8],
+    source: &dyn TiffSource,
+    byte_order: ByteOrder,
+) -> Result<Tag> {
+    let tag_type = TagType::from_code(type_code);
+    let total_size = value_len(code, count, tag_type.element_size())?;
 
-    /// Size in bytes of a single element of this type.
-    pub fn element_size(&self) -> usize {
-        match self {
-            Self::Byte | Self::Ascii | Self::SByte | Self::Undefined => 1,
-            Self::Short | Self::SShort => 2,
-            Self::Long | Self::SLong | Self::Float => 4,
-            Self::Rational
-            | Self::SRational
-            | Self::Double
-            | Self::Long8
-            | Self::SLong8
-            | Self::Ifd8 => 8,
-            Self::Unknown(_) => 1,
-        }
-    }
-}
-
-/// A parsed TIFF tag.
-#[derive(Debug, Clone)]
-pub struct Tag {
-    pub code: u16,
-    pub tag_type: TagType,
-    pub count: u64,
-    pub value: TagValue,
-}
-
-/// Decoded tag value.
-#[derive(Debug, Clone)]
-pub enum TagValue {
-    Byte(Vec<u8>),
-    Ascii(String),
-    Short(Vec<u16>),
-    Long(Vec<u32>),
-    Rational(Vec<[u32; 2]>),
-    SByte(Vec<i8>),
-    Undefined(Vec<u8>),
-    SShort(Vec<i16>),
-    SLong(Vec<i32>),
-    SRational(Vec<[i32; 2]>),
-    Float(Vec<f32>),
-    Double(Vec<f64>),
-    Long8(Vec<u64>),
-    SLong8(Vec<i64>),
-}
-
-impl TagValue {
-    /// Extract a single u16 value.
-    pub fn as_u16(&self) -> Option<u16> {
-        match self {
-            Self::Short(v) => v.first().copied(),
-            Self::Byte(v) => v.first().map(|&b| b as u16),
-            Self::Long(v) => v.first().map(|&l| l as u16),
-            _ => None,
-        }
-    }
-
-    /// Extract a single u32 value.
-    pub fn as_u32(&self) -> Option<u32> {
-        match self {
-            Self::Long(v) => v.first().copied(),
-            Self::Short(v) => v.first().map(|&s| s as u32),
-            Self::Long8(v) => v.first().map(|&l| l as u32),
-            _ => None,
-        }
-    }
-
-    /// Extract a single u64 value.
-    pub fn as_u64(&self) -> Option<u64> {
-        match self {
-            Self::Long8(v) => v.first().copied(),
-            Self::Long(v) => v.first().map(|&l| l as u64),
-            Self::Short(v) => v.first().map(|&s| s as u64),
-            _ => None,
-        }
-    }
-
-    /// Extract a single f64 value.
-    pub fn as_f64(&self) -> Option<f64> {
-        match self {
-            Self::Double(v) => v.first().copied(),
-            Self::Float(v) => v.first().map(|&f| f as f64),
-            Self::Long(v) => v.first().map(|&l| l as f64),
-            Self::Short(v) => v.first().map(|&s| s as f64),
-            _ => None,
-        }
-    }
-
-    /// Extract as a string.
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            Self::Ascii(s) => Some(s.as_str()),
-            _ => None,
-        }
-    }
-
-    /// Extract raw bytes for byte-oriented tag payloads.
-    pub fn as_bytes(&self) -> Option<&[u8]> {
-        match self {
-            Self::Byte(v) | Self::Undefined(v) => Some(v.as_slice()),
-            _ => None,
-        }
-    }
-
-    /// Extract as a slice of f64 values.
-    pub fn as_f64_vec(&self) -> Option<Vec<f64>> {
-        match self {
-            Self::Double(v) => Some(v.clone()),
-            Self::Float(v) => Some(v.iter().map(|&f| f as f64).collect()),
-            _ => None,
-        }
-    }
-
-    /// Extract a value list as unsigned offsets/counts.
-    pub fn as_u64_vec(&self) -> Option<Vec<u64>> {
-        match self {
-            Self::Byte(v) => Some(v.iter().map(|&x| x as u64).collect()),
-            Self::Short(v) => Some(v.iter().map(|&x| x as u64).collect()),
-            Self::Long(v) => Some(v.iter().map(|&x| x as u64).collect()),
-            Self::Long8(v) => Some(v.clone()),
-            _ => None,
-        }
-    }
-
-    /// Extract a SHORT array without cloning when possible.
-    pub fn as_u16_slice(&self) -> Option<&[u16]> {
-        match self {
-            Self::Short(v) => Some(v.as_slice()),
-            _ => None,
-        }
-    }
-}
-
-impl Tag {
-    /// Parse a classic TIFF tag entry (12-byte IFD entry).
-    pub fn parse_classic(
-        code: u16,
-        type_code: u16,
-        count: u64,
-        value_offset_bytes: &[u8],
-        source: &dyn TiffSource,
-        byte_order: ByteOrder,
-    ) -> Result<Self> {
-        let tag_type = TagType::from_code(type_code);
-        let total_size = value_len(code, count, tag_type.element_size())?;
-
-        let owned;
-        let value_bytes = if total_size <= 4 {
-            &value_offset_bytes[..total_size]
-        } else {
-            let offset = match byte_order {
-                ByteOrder::LittleEndian => {
-                    u32::from_le_bytes(value_offset_bytes.try_into().unwrap())
-                }
-                ByteOrder::BigEndian => u32::from_be_bytes(value_offset_bytes.try_into().unwrap()),
-            } as u64;
-            owned = read_value_bytes(source, offset, total_size)?;
-            owned.as_slice()
+    let owned;
+    let value_bytes = if total_size <= 8 {
+        &value_offset_bytes[..total_size]
+    } else {
+        let offset = match byte_order {
+            ByteOrder::LittleEndian => u64::from_le_bytes(value_offset_bytes.try_into().unwrap()),
+            ByteOrder::BigEndian => u64::from_be_bytes(value_offset_bytes.try_into().unwrap()),
         };
+        owned = read_value_bytes(source, offset, total_size)?;
+        owned.as_slice()
+    };
 
-        let value = decode_value(&tag_type, count, value_bytes, byte_order)?;
-        Ok(Self {
-            code,
-            tag_type,
-            count,
-            value,
-        })
-    }
-
-    /// Parse a BigTIFF tag entry (20-byte IFD entry).
-    pub fn parse_bigtiff(
-        code: u16,
-        type_code: u16,
-        count: u64,
-        value_offset_bytes: &[u8],
-        source: &dyn TiffSource,
-        byte_order: ByteOrder,
-    ) -> Result<Self> {
-        let tag_type = TagType::from_code(type_code);
-        let total_size = value_len(code, count, tag_type.element_size())?;
-
-        let owned;
-        let value_bytes = if total_size <= 8 {
-            &value_offset_bytes[..total_size]
-        } else {
-            let offset = match byte_order {
-                ByteOrder::LittleEndian => {
-                    u64::from_le_bytes(value_offset_bytes.try_into().unwrap())
-                }
-                ByteOrder::BigEndian => u64::from_be_bytes(value_offset_bytes.try_into().unwrap()),
-            };
-            owned = read_value_bytes(source, offset, total_size)?;
-            owned.as_slice()
-        };
-
-        let value = decode_value(&tag_type, count, value_bytes, byte_order)?;
-        Ok(Self {
-            code,
-            tag_type,
-            count,
-            value,
-        })
-    }
+    let value = decode_value(&tag_type, count, value_bytes, byte_order)?;
+    Ok(Tag {
+        code,
+        tag_type,
+        count,
+        value,
+    })
 }
 
 fn read_value_bytes(source: &dyn TiffSource, offset: u64, len: usize) -> Result<Vec<u8>> {

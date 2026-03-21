@@ -1,11 +1,6 @@
 use crate::error::{Error, Result};
 
-/// Byte order indicator from the TIFF header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ByteOrder {
-    LittleEndian,
-    BigEndian,
-}
+pub use tiff_core::ByteOrder;
 
 /// Parsed TIFF/BigTIFF file header.
 #[derive(Debug, Clone)]

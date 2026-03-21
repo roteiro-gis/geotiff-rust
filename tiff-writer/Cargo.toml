@@ -1,0 +1,27 @@
+[package]
+name = "tiff-writer"
+description = "Pure-Rust TIFF/BigTIFF encoder with compression, tiling, and streaming writes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+tiff-core = { version = "0.1.0", path = "../tiff-core" }
+thiserror = { workspace = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+weezl = "0.1"
+
+[features]
+default = ["zstd"]
+zstd = ["dep:zstd"]
+
+[dev-dependencies]
+tiff-reader = { version = "0.1.0", path = "../tiff-reader" }
+
+[dependencies.zstd]
+version = "0.13"
+default-features = false
+optional = true

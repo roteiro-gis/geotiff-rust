@@ -45,23 +45,11 @@ use tiff_reader::{OpenOptions as TiffOpenOptions, TagValue, TiffFile, TiffSample
 use transform::GeoTransform;
 
 #[cfg(feature = "local")]
-const TAG_MODEL_PIXEL_SCALE: u16 = 33550;
-#[cfg(feature = "local")]
-const TAG_MODEL_TIEPOINT: u16 = 33922;
-#[cfg(feature = "local")]
-const TAG_MODEL_TRANSFORMATION: u16 = 34264;
-#[cfg(feature = "local")]
-const TAG_GEO_KEY_DIRECTORY: u16 = 34735;
-#[cfg(feature = "local")]
-const TAG_GEO_DOUBLE_PARAMS: u16 = 34736;
-#[cfg(feature = "local")]
-const TAG_GEO_ASCII_PARAMS: u16 = 34737;
-#[cfg(feature = "local")]
-const TAG_GDAL_NODATA: u16 = 42113;
-#[cfg(feature = "local")]
-const TAG_NEW_SUBFILE_TYPE: u16 = 254;
-#[cfg(feature = "local")]
-const TAG_SUBFILE_TYPE: u16 = 255;
+use geotiff_core::tags::{
+    TAG_GDAL_NODATA, TAG_GEO_ASCII_PARAMS, TAG_GEO_DOUBLE_PARAMS, TAG_GEO_KEY_DIRECTORY,
+    TAG_MODEL_PIXEL_SCALE, TAG_MODEL_TIEPOINT, TAG_MODEL_TRANSFORMATION, TAG_NEW_SUBFILE_TYPE,
+    TAG_SUBFILE_TYPE,
+};
 
 /// A GeoTIFF file handle with geospatial metadata.
 #[cfg(feature = "local")]
@@ -77,28 +65,7 @@ pub struct GeoTiffFile {
 #[cfg(feature = "local")]
 pub use tiff_reader::OpenOptions as GeoTiffOpenOptions;
 
-/// Parsed geospatial metadata from GeoKeys and model tags.
-#[derive(Debug, Clone)]
-pub struct GeoMetadata {
-    /// EPSG code for the coordinate reference system, if present.
-    pub epsg: Option<u32>,
-    /// Model tiepoints: (I, J, K, X, Y, Z) tuples.
-    pub tiepoints: Vec<[f64; 6]>,
-    /// Pixel scale: (ScaleX, ScaleY, ScaleZ).
-    pub pixel_scale: Option<[f64; 3]>,
-    /// 4x4 model transformation matrix (row-major), if present.
-    pub transformation: Option<[f64; 16]>,
-    /// Nodata value as a string (parsed from GDAL_NODATA tag).
-    pub nodata: Option<String>,
-    /// Number of bands (samples per pixel).
-    pub band_count: u32,
-    /// Image width in pixels.
-    pub width: u32,
-    /// Image height in pixels.
-    pub height: u32,
-    /// Geographic bounds derived from the transform.
-    pub geo_bounds: Option<[f64; 4]>,
-}
+pub use geotiff_core::GeoMetadata;
 
 #[cfg(feature = "local")]
 impl GeoTiffFile {

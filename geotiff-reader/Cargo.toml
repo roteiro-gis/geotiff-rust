@@ -13,6 +13,7 @@ keywords = ["geotiff", "cog", "raster", "gis", "read-only"]
 categories = ["science", "parser-implementations"]
 
 [dependencies]
+geotiff-core = { version = "0.1.0", path = "../geotiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
 memmap2 = { workspace = true }

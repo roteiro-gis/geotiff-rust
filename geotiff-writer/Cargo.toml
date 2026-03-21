@@ -1,0 +1,20 @@
+[package]
+name = "geotiff-writer"
+description = "Pure-Rust GeoTIFF and COG writer with compression, tiling, and overview support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+geotiff-core = { version = "0.1.0", path = "../geotiff-core" }
+tiff-writer = { version = "0.1.0", path = "../tiff-writer" }
+tiff-core = { version = "0.1.0", path = "../tiff-core" }
+ndarray = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tiff-reader = { version = "0.1.0", path = "../tiff-reader" }
+geotiff-reader = { version = "0.1.0", path = "../geotiff-reader" }

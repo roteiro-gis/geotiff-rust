@@ -171,12 +171,10 @@ fn compress_lzw(data: &[u8], index: usize) -> Result<Vec<u8>> {
     use weezl::BitOrder;
 
     let mut encoder = Encoder::with_tiff_size_switch(BitOrder::Msb, 8);
-    encoder
-        .encode(data)
-        .map_err(|e| Error::CompressionFailed {
-            index,
-            reason: format!("LZW: {e}"),
-        })
+    encoder.encode(data).map_err(|e| Error::CompressionFailed {
+        index,
+        reason: format!("LZW: {e}"),
+    })
 }
 
 fn compress_deflate(data: &[u8], index: usize) -> Result<Vec<u8>> {
@@ -198,11 +196,9 @@ fn compress_deflate(data: &[u8], index: usize) -> Result<Vec<u8>> {
 
 #[cfg(feature = "zstd")]
 fn compress_zstd(data: &[u8], index: usize) -> Result<Vec<u8>> {
-    zstd::stream::encode_all(std::io::Cursor::new(data), 3).map_err(|e| {
-        Error::CompressionFailed {
-            index,
-            reason: format!("ZSTD: {e}"),
-        }
+    zstd::stream::encode_all(std::io::Cursor::new(data), 3).map_err(|e| Error::CompressionFailed {
+        index,
+        reason: format!("ZSTD: {e}"),
     })
 }
 
@@ -224,8 +220,7 @@ mod tests {
         assert!(compressed.len() < data.len());
 
         // Decompress with weezl to verify
-        let mut decoder =
-            weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
+        let mut decoder = weezl::decode::Decoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8);
         let decompressed = decoder.decode(&compressed).unwrap();
         assert_eq!(decompressed, data);
     }
@@ -249,8 +244,7 @@ mod tests {
     fn roundtrip_zstd() {
         let data: Vec<u8> = (0..256).map(|i| (i % 256) as u8).collect();
         let compressed = compress(&data, Compression::Zstd, 0).unwrap();
-        let decompressed =
-            zstd::stream::decode_all(std::io::Cursor::new(&compressed)).unwrap();
+        let decompressed = zstd::stream::decode_all(std::io::Cursor::new(&compressed)).unwrap();
         assert_eq!(decompressed, data);
     }
 

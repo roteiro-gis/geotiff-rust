@@ -45,9 +45,9 @@ pub use error::Error as TiffError;
 pub use header::ByteOrder;
 pub use ifd::{Ifd, RasterLayout};
 pub use tag::{Tag, TagValue};
-pub use tiff_core::TagType;
 pub use tiff_core::constants;
 pub use tiff_core::sample::TiffSample;
+pub use tiff_core::TagType;
 
 /// Configuration for opening a TIFF file.
 #[derive(Debug, Clone, Copy)]

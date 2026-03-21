@@ -159,10 +159,7 @@ impl ImageBuilder {
     /// Estimated uncompressed image bytes.
     pub fn estimated_uncompressed_bytes(&self) -> u64 {
         let bps = (self.bits_per_sample / 8).max(1) as u64;
-        self.width as u64
-            * self.height as u64
-            * self.samples_per_pixel as u64
-            * bps
+        self.width as u64 * self.height as u64 * self.samples_per_pixel as u64 * bps
     }
 
     /// The TIFF tag codes for offset and bytecount arrays.

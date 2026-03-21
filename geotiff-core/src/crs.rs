@@ -106,10 +106,7 @@ impl CrsInfo {
 
     /// Populate a GeoKeyDirectory from this CRS info.
     pub fn apply_to_geokeys(&self, geokeys: &mut GeoKeyDirectory) {
-        geokeys.set(
-            geokeys::GT_MODEL_TYPE,
-            GeoKeyValue::Short(self.model_type),
-        );
+        geokeys.set(geokeys::GT_MODEL_TYPE, GeoKeyValue::Short(self.model_type));
         geokeys.set(
             geokeys::GT_RASTER_TYPE,
             GeoKeyValue::Short(self.raster_type),
@@ -121,16 +118,10 @@ impl CrsInfo {
             geokeys.set(geokeys::GEOGRAPHIC_TYPE, GeoKeyValue::Short(epsg));
         }
         if let Some(ref citation) = self.projection_citation {
-            geokeys.set(
-                geokeys::PROJ_CITATION,
-                GeoKeyValue::Ascii(citation.clone()),
-            );
+            geokeys.set(geokeys::PROJ_CITATION, GeoKeyValue::Ascii(citation.clone()));
         }
         if let Some(ref citation) = self.geographic_citation {
-            geokeys.set(
-                geokeys::GEOG_CITATION,
-                GeoKeyValue::Ascii(citation.clone()),
-            );
+            geokeys.set(geokeys::GEOG_CITATION, GeoKeyValue::Ascii(citation.clone()));
         }
     }
 }

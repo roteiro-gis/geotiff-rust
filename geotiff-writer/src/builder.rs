@@ -220,10 +220,7 @@ impl GeoTiffBuilder {
 
         // NoData
         if let Some(ref nd) = self.nodata {
-            extra.push(Tag::new(
-                tags::TAG_GDAL_NODATA,
-                TagValue::Ascii(nd.clone()),
-            ));
+            extra.push(Tag::new(tags::TAG_GDAL_NODATA, TagValue::Ascii(nd.clone())));
         }
 
         extra
@@ -280,8 +277,7 @@ impl GeoTiffBuilder {
         let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
         let handle = writer.add_image(ib)?;
 
-        let block_count = self
-            .images_block_count::<T>();
+        let block_count = self.images_block_count::<T>();
 
         for block_idx in 0..block_count {
             let samples = self.extract_block_2d(&data, block_idx);
@@ -310,9 +306,7 @@ impl GeoTiffBuilder {
         data: ArrayView3<T>,
     ) -> Result<()> {
         let (height, width, bands) = data.dim();
-        if width as u32 != self.width
-            || height as u32 != self.height
-            || bands as u32 != self.bands
+        if width as u32 != self.width || height as u32 != self.height || bands as u32 != self.bands
         {
             return Err(Error::DataSizeMismatch {
                 expected: self.height as usize * self.width as usize * self.bands as usize,
@@ -356,11 +350,7 @@ impl GeoTiffBuilder {
         self.to_image_builder::<T>().block_count()
     }
 
-    fn extract_block_2d<T: WriteSample>(
-        &self,
-        data: &ArrayView2<T>,
-        block_idx: usize,
-    ) -> Vec<T> {
+    fn extract_block_2d<T: WriteSample>(&self, data: &ArrayView2<T>, block_idx: usize) -> Vec<T> {
         let zero = T::decode_many(&vec![0u8; T::BYTES_PER_SAMPLE])[0];
         if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {
             let tw = tw as usize;
@@ -402,11 +392,7 @@ impl GeoTiffBuilder {
         }
     }
 
-    fn extract_block_3d<T: WriteSample>(
-        &self,
-        data: &ArrayView3<T>,
-        block_idx: usize,
-    ) -> Vec<T> {
+    fn extract_block_3d<T: WriteSample>(&self, data: &ArrayView3<T>, block_idx: usize) -> Vec<T> {
         let zero = T::decode_many(&vec![0u8; T::BYTES_PER_SAMPLE])[0];
         let bands = self.bands as usize;
 
@@ -431,8 +417,7 @@ impl GeoTiffBuilder {
                         break;
                     }
                     for band in 0..bands {
-                        tile_data[(row * tw + col) * bands + band] =
-                            data[[src_row, src_col, band]];
+                        tile_data[(row * tw + col) * bands + band] = data[[src_row, src_col, band]];
                     }
                 }
             }
@@ -455,4 +440,3 @@ impl GeoTiffBuilder {
         }
     }
 }
-

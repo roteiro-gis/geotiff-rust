@@ -89,8 +89,7 @@ impl<W: Write + Seek> TiffWriter<W> {
     /// Use `WriteOptions::auto(estimated_bytes)` for automatic selection.
     pub fn new(mut sink: W, options: WriteOptions) -> Result<Self> {
         let is_bigtiff = matches!(options.variant, TiffVariant::BigTiff);
-        let header_offset =
-            encoder::write_header(&mut sink, options.byte_order, is_bigtiff)?;
+        let header_offset = encoder::write_header(&mut sink, options.byte_order, is_bigtiff)?;
         Ok(Self {
             sink,
             byte_order: options.byte_order,
@@ -243,10 +242,8 @@ impl<W: Write + Seek> TiffWriter<W> {
                 return Err(Error::IncompleteImage { written, total });
             }
 
-            let offsets: Vec<u64> =
-                state.block_records.iter().map(|r| r.unwrap().0).collect();
-            let byte_counts: Vec<u64> =
-                state.block_records.iter().map(|r| r.unwrap().1).collect();
+            let offsets: Vec<u64> = state.block_records.iter().map(|r| r.unwrap().0).collect();
+            let byte_counts: Vec<u64> = state.block_records.iter().map(|r| r.unwrap().1).collect();
 
             let (offsets_tag_code, byte_counts_tag_code) = state.builder.offset_tag_codes();
             let is_bigtiff = state.ifd_result.is_bigtiff;

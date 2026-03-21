@@ -22,9 +22,7 @@ pub fn parse_tag_classic(
         &value_offset_bytes[..total_size]
     } else {
         let offset = match byte_order {
-            ByteOrder::LittleEndian => {
-                u32::from_le_bytes(value_offset_bytes.try_into().unwrap())
-            }
+            ByteOrder::LittleEndian => u32::from_le_bytes(value_offset_bytes.try_into().unwrap()),
             ByteOrder::BigEndian => u32::from_be_bytes(value_offset_bytes.try_into().unwrap()),
         } as u64;
         owned = read_value_bytes(source, offset, total_size)?;
@@ -57,9 +55,7 @@ pub fn parse_tag_bigtiff(
         &value_offset_bytes[..total_size]
     } else {
         let offset = match byte_order {
-            ByteOrder::LittleEndian => {
-                u64::from_le_bytes(value_offset_bytes.try_into().unwrap())
-            }
+            ByteOrder::LittleEndian => u64::from_le_bytes(value_offset_bytes.try_into().unwrap()),
             ByteOrder::BigEndian => u64::from_be_bytes(value_offset_bytes.try_into().unwrap()),
         };
         owned = read_value_bytes(source, offset, total_size)?;

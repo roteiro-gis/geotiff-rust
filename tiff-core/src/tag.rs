@@ -188,14 +188,8 @@ impl TagValue {
                 })
                 .collect(),
             Self::SByte(v) => v.iter().map(|&x| x as u8).collect(),
-            Self::SShort(v) => v
-                .iter()
-                .flat_map(|&x| byte_order.write_i16(x))
-                .collect(),
-            Self::SLong(v) => v
-                .iter()
-                .flat_map(|&x| byte_order.write_i32(x))
-                .collect(),
+            Self::SShort(v) => v.iter().flat_map(|&x| byte_order.write_i16(x)).collect(),
+            Self::SLong(v) => v.iter().flat_map(|&x| byte_order.write_i32(x)).collect(),
             Self::SRational(v) => v
                 .iter()
                 .flat_map(|&[n, d]| {
@@ -205,19 +199,10 @@ impl TagValue {
                     bytes
                 })
                 .collect(),
-            Self::Float(v) => v
-                .iter()
-                .flat_map(|&x| byte_order.write_f32(x))
-                .collect(),
-            Self::Double(v) => v
-                .iter()
-                .flat_map(|&x| byte_order.write_f64(x))
-                .collect(),
+            Self::Float(v) => v.iter().flat_map(|&x| byte_order.write_f32(x)).collect(),
+            Self::Double(v) => v.iter().flat_map(|&x| byte_order.write_f64(x)).collect(),
             Self::Long8(v) => v.iter().flat_map(|&x| byte_order.write_u64(x)).collect(),
-            Self::SLong8(v) => v
-                .iter()
-                .flat_map(|&x| byte_order.write_i64(x))
-                .collect(),
+            Self::SLong8(v) => v.iter().flat_map(|&x| byte_order.write_i64(x)).collect(),
         }
     }
 

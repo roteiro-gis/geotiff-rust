@@ -17,7 +17,7 @@ use std::path::Path;
 
 use ndarray::{Array2, ArrayView2};
 use tiff_core::ByteOrder;
-use tiff_writer::{ImageBuilder, ImageHandle, TiffWriter, WriteOptions, TiffVariant};
+use tiff_writer::{ImageBuilder, ImageHandle, TiffVariant, TiffWriter, WriteOptions};
 
 use crate::builder::GeoTiffBuilder;
 use crate::error::{Error, Result};
@@ -120,10 +120,13 @@ impl CogBuilder {
         let overviews = self.generate_overviews(&data);
 
         // --- Phase 1: Write header + GDAL metadata + all IFDs (with placeholder offsets) ---
-        let mut writer = TiffWriter::new(sink, WriteOptions {
-            byte_order: ByteOrder::LittleEndian,
-            variant: TiffVariant::Classic,
-        })?;
+        let mut writer = TiffWriter::new(
+            sink,
+            WriteOptions {
+                byte_order: ByteOrder::LittleEndian,
+                variant: TiffVariant::Classic,
+            },
+        )?;
 
         // Write GDAL structural metadata as padding after header
         // (The TiffWriter already wrote the 8-byte header. We write the metadata
@@ -150,8 +153,7 @@ impl CogBuilder {
         let mut overview_handles: Vec<(ImageHandle, u32, u32)> = Vec::new();
         for &level in &sorted_levels {
             let ovr_w = ((self.inner.width as usize + level as usize - 1) / level as usize) as u32;
-            let ovr_h =
-                ((self.inner.height as usize + level as usize - 1) / level as usize) as u32;
+            let ovr_h = ((self.inner.height as usize + level as usize - 1) / level as usize) as u32;
 
             let mut ovr_ib = ImageBuilder::new(ovr_w, ovr_h)
                 .sample_type::<T>()
@@ -234,8 +236,7 @@ impl CogBuilder {
         let (height, width) = data.dim();
 
         let src_f64 = Array2::from_shape_fn((height, width), |(r, c)| {
-            let sample_bytes =
-                T::encode_slice(&[data[[r, c]]], tiff_core::ByteOrder::LittleEndian);
+            let sample_bytes = T::encode_slice(&[data[[r, c]]], tiff_core::ByteOrder::LittleEndian);
             to_f64_value(&sample_bytes, T::BITS_PER_SAMPLE, T::SAMPLE_FORMAT)
         });
 
@@ -334,10 +335,8 @@ impl<T: WriteSample, W: Write + Seek> CogTileWriter<T, W> {
 
         let mut overview_handles = Vec::new();
         for &level in &sorted_levels {
-            let ovr_w =
-                ((cog.inner.width as usize + level as usize - 1) / level as usize) as u32;
-            let ovr_h =
-                ((cog.inner.height as usize + level as usize - 1) / level as usize) as u32;
+            let ovr_w = ((cog.inner.width as usize + level as usize - 1) / level as usize) as u32;
+            let ovr_h = ((cog.inner.height as usize + level as usize - 1) / level as usize) as u32;
 
             let mut ovr_ib = ImageBuilder::new(ovr_w, ovr_h)
                 .sample_type::<T>()
@@ -432,8 +431,7 @@ impl<T: WriteSample, W: Write + Seek> CogTileWriter<T, W> {
         for i in 0..self.base_tiles.len() {
             if self.base_tiles[i].is_none() {
                 self.base_tiles[i] = Some(empty_tile.clone());
-                self.writer
-                    .write_block(&self.base_handle, i, &empty_tile)?;
+                self.writer.write_block(&self.base_handle, i, &empty_tile)?;
             }
         }
 
@@ -449,10 +447,8 @@ impl<T: WriteSample, W: Write + Seek> CogTileWriter<T, W> {
             let in_tile_r = r % th;
             let in_tile_c = c % tw;
             if let Some(ref tile) = self.base_tiles[tile_idx] {
-                let sample_bytes = T::encode_slice(
-                    &[tile[in_tile_r * tw + in_tile_c]],
-                    ByteOrder::LittleEndian,
-                );
+                let sample_bytes =
+                    T::encode_slice(&[tile[in_tile_r * tw + in_tile_c]], ByteOrder::LittleEndian);
                 to_f64_value(&sample_bytes, T::BITS_PER_SAMPLE, T::SAMPLE_FORMAT)
             } else {
                 0.0
@@ -467,13 +463,11 @@ impl<T: WriteSample, W: Write + Seek> CogTileWriter<T, W> {
             let ovr_h = ovr_h as usize;
 
             let overview = match self.resampling {
-                Resampling::NearestNeighbor => {
-                    Array2::from_shape_fn((ovr_h, ovr_w), |(r, c)| {
-                        let src_r = (r * level).min(full_h - 1);
-                        let src_c = (c * level).min(full_w - 1);
-                        full_f64[[src_r, src_c]]
-                    })
-                }
+                Resampling::NearestNeighbor => Array2::from_shape_fn((ovr_h, ovr_w), |(r, c)| {
+                    let src_r = (r * level).min(full_h - 1);
+                    let src_c = (c * level).min(full_w - 1);
+                    full_f64[[src_r, src_c]]
+                }),
                 Resampling::Average => Array2::from_shape_fn((ovr_h, ovr_w), |(r, c)| {
                     let start_r = r * level;
                     let start_c = c * level;
@@ -689,7 +683,11 @@ mod tests {
         assert_eq!(file.ifd_count(), 2);
 
         // Base is the larger one
-        let base_idx = if file.ifd(0).unwrap().width() == 32 { 0 } else { 1 };
+        let base_idx = if file.ifd(0).unwrap().width() == 32 {
+            0
+        } else {
+            1
+        };
         let img = file.read_image::<f32>(base_idx).unwrap();
         let (values, _) = img.into_raw_vec_and_offset();
         assert!(values.iter().all(|&v| (v - 42.0).abs() < 1e-6));
@@ -874,9 +872,7 @@ mod tests {
     #[test]
     fn cog_streaming_tile_writer() {
         let mut buf = Cursor::new(Vec::new());
-        let builder = GeoTiffBuilder::new(32, 32)
-            .tile_size(16, 16)
-            .epsg(4326);
+        let builder = GeoTiffBuilder::new(32, 32).tile_size(16, 16).epsg(4326);
 
         let mut tw = CogBuilder::new(builder)
             .overview_levels(vec![2])

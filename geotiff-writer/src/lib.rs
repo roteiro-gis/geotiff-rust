@@ -29,7 +29,9 @@ pub use sample::WriteSample;
 pub use tile_writer::StreamingTileWriter;
 
 // Re-export core types for convenience
-pub use geotiff_core::{CrsInfo, GeoKeyDirectory, GeoKeyValue, GeoTransform, ModelType, RasterType};
+pub use geotiff_core::{
+    CrsInfo, GeoKeyDirectory, GeoKeyValue, GeoTransform, ModelType, RasterType,
+};
 pub use tiff_core::{Compression, PhotometricInterpretation, Predictor};
 
 #[cfg(test)]
@@ -112,8 +114,7 @@ mod tests {
     #[test]
     fn write_with_transform() {
         let data = Array2::<u8>::from_elem((2, 2), 1);
-        let transform =
-            GeoTransform::from_origin_and_pixel_size(-180.0, 90.0, 0.5, -0.5);
+        let transform = GeoTransform::from_origin_and_pixel_size(-180.0, 90.0, 0.5, -0.5);
 
         let mut buf = Cursor::new(Vec::new());
         GeoTiffBuilder::new(2, 2)
@@ -137,9 +138,7 @@ mod tests {
     fn streaming_tile_writer() {
         let mut buf = Cursor::new(Vec::new());
 
-        let builder = GeoTiffBuilder::new(32, 32)
-            .tile_size(16, 16)
-            .epsg(4326);
+        let builder = GeoTiffBuilder::new(32, 32).tile_size(16, 16).epsg(4326);
 
         let mut tw = builder.tile_writer::<u8, _>(&mut buf).unwrap();
 
@@ -161,9 +160,9 @@ mod tests {
         assert_eq!(img.shape(), &[32, 32]);
 
         // Check corners of each tile
-        assert_eq!(img[[0, 0]], 1);   // top-left tile
-        assert_eq!(img[[0, 16]], 2);  // top-right tile
-        assert_eq!(img[[16, 0]], 3);  // bottom-left tile
+        assert_eq!(img[[0, 0]], 1); // top-left tile
+        assert_eq!(img[[0, 16]], 2); // top-right tile
+        assert_eq!(img[[16, 0]], 3); // bottom-left tile
         assert_eq!(img[[16, 16]], 4); // bottom-right tile
     }
 
@@ -200,10 +199,8 @@ mod tests {
         tw.finish().unwrap();
 
         // Read both and compare pixels
-        let oneshot_file =
-            tiff_reader::TiffFile::from_bytes(oneshot_buf.into_inner()).unwrap();
-        let streaming_file =
-            tiff_reader::TiffFile::from_bytes(streaming_buf.into_inner()).unwrap();
+        let oneshot_file = tiff_reader::TiffFile::from_bytes(oneshot_buf.into_inner()).unwrap();
+        let streaming_file = tiff_reader::TiffFile::from_bytes(streaming_buf.into_inner()).unwrap();
 
         let oneshot_img = oneshot_file.read_image::<u8>(0).unwrap();
         let streaming_img = streaming_file.read_image::<u8>(0).unwrap();
@@ -220,7 +217,7 @@ mod tests {
         for r in 0..4 {
             for c in 0..4 {
                 data[[r, c, 0]] = 255; // red
-                data[[r, c, 1]] = 0;   // green
+                data[[r, c, 1]] = 0; // green
                 data[[r, c, 2]] = (r * 64) as u8; // blue gradient
             }
         }

@@ -120,9 +120,7 @@ mod tests {
         writer.write_block(&handle, 0, &[1u8, 2, 3, 4]).unwrap();
         writer.write_block(&handle, 1, &[5u8, 6, 7, 8]).unwrap();
         writer.write_block(&handle, 2, &[9u8, 10, 11, 12]).unwrap();
-        writer
-            .write_block(&handle, 3, &[13u8, 14, 15, 16])
-            .unwrap();
+        writer.write_block(&handle, 3, &[13u8, 14, 15, 16]).unwrap();
         writer.finish().unwrap();
 
         let data = buf.into_inner();
@@ -157,7 +155,10 @@ mod tests {
         let img = file.read_image::<u8>(0).unwrap();
         assert_eq!(img.shape(), &[4, 4]);
         let (values, _) = img.into_raw_vec_and_offset();
-        assert_eq!(values, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(
+            values,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
     }
 
     #[test]
@@ -213,7 +214,10 @@ mod tests {
         writer.write_block(&h1, 0, &[10u8, 20, 30, 40]).unwrap();
 
         // Overview
-        let ovr = ImageBuilder::new(1, 1).sample_type::<u8>().strips(1).overview();
+        let ovr = ImageBuilder::new(1, 1)
+            .sample_type::<u8>()
+            .strips(1)
+            .overview();
         let h2 = writer.add_image(ovr).unwrap();
         writer.write_block(&h2, 0, &[99u8]).unwrap();
 
@@ -297,7 +301,9 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(2, 2).sample_type::<i16>().strips(2);
         let handle = writer.add_image(image).unwrap();
-        writer.write_block(&handle, 0, &[-100i16, 0, 100, 32000]).unwrap();
+        writer
+            .write_block(&handle, 0, &[-100i16, 0, 100, 32000])
+            .unwrap();
         writer.finish().unwrap();
         let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
         let img = file.read_image::<i16>(0).unwrap();
@@ -311,7 +317,9 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(2, 2).sample_type::<u32>().strips(2);
         let handle = writer.add_image(image).unwrap();
-        writer.write_block(&handle, 0, &[0u32, 1, 1000000, u32::MAX]).unwrap();
+        writer
+            .write_block(&handle, 0, &[0u32, 1, 1000000, u32::MAX])
+            .unwrap();
         writer.finish().unwrap();
         let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
         let img = file.read_image::<u32>(0).unwrap();
@@ -325,7 +333,9 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(2, 2).sample_type::<i32>().strips(2);
         let handle = writer.add_image(image).unwrap();
-        writer.write_block(&handle, 0, &[i32::MIN, -1, 0, i32::MAX]).unwrap();
+        writer
+            .write_block(&handle, 0, &[i32::MIN, -1, 0, i32::MAX])
+            .unwrap();
         writer.finish().unwrap();
         let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
         let img = file.read_image::<i32>(0).unwrap();
@@ -493,7 +503,9 @@ mod tests {
             .predictor(tiff_core::Predictor::Horizontal)
             .strips(1);
         let handle = writer.add_image(image).unwrap();
-        writer.write_block(&handle, 0, &[1.0f32, 2.0, 4.0, 8.0]).unwrap();
+        writer
+            .write_block(&handle, 0, &[1.0f32, 2.0, 4.0, 8.0])
+            .unwrap();
         writer.finish().unwrap();
 
         let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();

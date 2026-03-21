@@ -6,13 +6,13 @@ use crate::io::Cursor;
 use crate::source::TiffSource;
 use crate::tag::{parse_tag_bigtiff, parse_tag_classic, Tag};
 
-pub use tiff_core::RasterLayout;
 pub use tiff_core::constants::{
     TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH,
     TAG_PHOTOMETRIC_INTERPRETATION, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
     TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
     TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH,
 };
+pub use tiff_core::RasterLayout;
 
 /// A parsed Image File Directory (IFD).
 #[derive(Debug, Clone)]

@@ -29,6 +29,9 @@ pub enum Error {
     #[error("writer has already been finalized")]
     AlreadyFinalized,
 
+    #[error("classic TIFF offset {offset} exceeds 4 GiB limit; use TiffVariant::BigTiff")]
+    ClassicOffsetOverflow { offset: u64 },
+
     #[error("{0}")]
     Other(String),
 }

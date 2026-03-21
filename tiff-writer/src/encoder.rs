@@ -46,6 +46,7 @@ pub fn patch_first_ifd<W: Write + Seek>(
 }
 
 /// State returned after writing an IFD, used for patching.
+#[derive(Debug)]
 pub struct IfdWriteResult {
     /// File offset where this IFD starts.
     pub ifd_offset: u64,
@@ -178,6 +179,9 @@ pub fn patch_block_offsets<W: Write + Seek>(
         if is_bigtiff {
             sink.write_all(&byte_order.write_u64(offset))?;
         } else {
+            if offset > u32::MAX as u64 {
+                return Err(crate::error::Error::ClassicOffsetOverflow { offset });
+            }
             sink.write_all(&byte_order.write_u32(offset as u32))?;
         }
     }
@@ -221,6 +225,7 @@ pub fn patch_next_ifd<W: Write + Seek>(
 }
 
 /// Parameters for building image tags.
+#[derive(Debug)]
 pub struct ImageTagParams<'a> {
     pub width: u32,
     pub height: u32,

@@ -235,11 +235,11 @@ dependencies = [
 
 [[package]]
 name = "geotiff-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "geotiff-reader"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "geotiff-core",
  "lru",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "geotiff-writer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "geotiff-core",
  "geotiff-reader",
@@ -1286,14 +1286,14 @@ dependencies = [
 
 [[package]]
 name = "tiff-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "tiff-reader"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "jpeg-decoder",
@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-writer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "thiserror",

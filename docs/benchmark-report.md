@@ -2,14 +2,14 @@
 
 Date: 2026-03-21
 
-This document summarizes the current Dockerized reference parity and comparison
-benchmark suite for `geotiff-rust` against GDAL and libtiff. The goal is to
-capture the current performance shape for the reader comparison benches while
-recording the parity status against the reference stack.
+This report summarizes the current Dockerized parity and comparison benchmark
+suite for `geotiff-rust` against GDAL and libtiff. It captures the current
+reference-parity status and the performance shape of the reader comparison
+benches.
 
 ## System Under Test
 
-- Machine: same local Apple M1 host used for the current `netcdf-rust` report
+- Machine: Apple M1
 - CPU topology: 8 logical CPUs
 - Memory: 16 GiB
 - OS: macOS 13.0
@@ -18,16 +18,15 @@ recording the parity status against the reference stack.
 - Reference environment: Docker image with Rust 1.85, `gdal-bin`,
   `python3-gdal`, and `libtiff-tools`
 
-These numbers are local measurements for this machine. The GDAL/libtiff user
-space ran in Docker, but the timings still reflect the same host CPU and
-storage stack.
+These measurements reflect this machine. GDAL and libtiff ran in Docker, but
+the timings still reflect the same host CPU and storage stack.
 
 ## Scope
 
 - Dockerized parity run covering workspace tests plus GDAL/libtiff-backed
   reference parity tests
-- `tiff-reader` full decode comparison against the repo's GDAL helper
-- `geotiff-reader` open plus full decode comparison against the repo's GDAL helper
+- `tiff-reader` full-decode comparison against the repo's GDAL helper
+- `geotiff-reader` open-plus-full-decode comparison against the repo's GDAL helper
 
 ## Methodology
 
@@ -41,14 +40,13 @@ Commands used for this report:
 Notes:
 
 - The parity run completed cleanly inside Docker.
-- The `tiff-reader` benchmark uses a synthetic 2048x2048 tiled, Deflate-
-  compressed `u16` TIFF fixture generated at benchmark time.
+- The `tiff-reader` benchmark uses a synthetic 2048x2048 tiled,
+  Deflate-compressed `u16` TIFF fixture generated at benchmark time.
 - The `geotiff-reader` benchmark uses a matching synthetic GeoTIFF fixture with
-  EPSG:32615 metadata.
+  `EPSG:32615` metadata.
 - Both benches validate byte length and raster hash equality against the GDAL
   helper before timing.
-- The comparison target is the repo's Python GDAL helper, not a direct C API
-  benchmark.
+- The comparison target is the repo's Python GDAL helper, not a direct GDAL C API benchmark.
 
 ## Current Results
 
@@ -70,20 +68,19 @@ Notes:
 ## Interpretation
 
 - Both current reader comparison benches favor `geotiff-rust` on this host.
-- The GeoTIFF path remains slower than the raw TIFF path for both
-  implementations, which is consistent with the added metadata/open work.
-- The parity run confirms that the faster Rust timings here still correspond to
+- The GeoTIFF path is slower than the raw TIFF path for both implementations,
+  which is consistent with the additional open and metadata work.
+- The parity run confirms that the faster Rust timings still correspond to
   matching decoded raster content and metadata against the reference stack.
-- Because the benchmark target is the repo's Python GDAL helper, the numbers
-  should be read as "current end-to-end reference harness cost" rather than a
-  pure isolated GDAL C API ceiling.
+- Because the benchmark target is the repo's Python GDAL helper, these numbers
+  should be read as the current end-to-end reference-harness cost rather than a
+  direct GDAL C API ceiling.
 
 ## Limits
 
 - This report reflects one machine.
 - The benchmark fixtures are synthetic and intentionally narrow; they do not
   cover every real-world TIFF or GeoTIFF workload shape.
-- The parity suite uses real-world interoperability fixtures, but the benchmark
-  suite does not currently time that broader corpus.
-- Docker is appropriate here for reproducibility, but containerized results are
-  still host-specific.
+- The parity suite uses real interoperability fixtures, but the benchmark suite
+  does not currently time that broader corpus.
+- Docker improves reproducibility here, but containerized results remain host-specific.

@@ -112,8 +112,11 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Reference-library parity tests are included for `tiff-reader` and `geotiff-reader`. They compare this workspace against GDAL/libtiff when those tools are available locally; otherwise they self-skip.
-Lossless codecs use exact byte/hash parity. The JPEG fixture uses a strict bounded-delta comparison because compliant JPEG decoders can differ by +/-1 in a handful of samples while still decoding the same stream correctly.
+Reference-library parity tests are included for `tiff-reader` and
+`geotiff-reader`. They compare this workspace against GDAL/libtiff when those
+tools are available locally; otherwise they self-skip. Lossless codecs use
+exact byte and hash parity. The JPEG fixture uses a strict bounded-delta check
+because compliant decoders can differ by +/-1 in a small number of samples.
 
 For a reproducible reference environment, run the Docker harness:
 
@@ -121,22 +124,8 @@ For a reproducible reference environment, run the Docker harness:
 ./scripts/run-reference-parity.sh
 ```
 
-Criterion comparison benches against GDAL are available through a separate Docker entrypoint:
-
-```sh
-./scripts/run-reference-benchmarks.sh
-```
-
-That image installs Rust, GDAL Python bindings, and `libtiff-tools`, then runs the parity integration tests or Criterion comparison benches inside a standardized environment.
-
-The manual `reference-compat` workflow can run parity only, or parity plus the comparison benches, and uploads `target/criterion` artifacts for inspection. Treat benchmark numbers from shared CI runners as smoke signals, not authoritative performance claims.
-
-You can also run the bench targets directly if GDAL is available locally:
-
-```sh
-cargo bench -p tiff-reader --bench reference_compare_bench
-cargo bench -p geotiff-reader --bench reference_compare_bench
-```
+For reference comparisons and current benchmark results against GDAL/libtiff,
+see [docs/benchmark-report.md](docs/benchmark-report.md).
 
 ## License
 

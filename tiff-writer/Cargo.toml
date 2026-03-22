@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-tiff-core = { version = "0.2.0", path = "../tiff-core" }
+tiff-core = { version = "0.2.1", path = "../tiff-core" }
 thiserror = { workspace = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 weezl = "0.1"
@@ -19,7 +19,7 @@ default = ["zstd"]
 zstd = ["dep:zstd"]
 
 [dev-dependencies]
-tiff-reader = { version = "0.2.0", path = "../tiff-reader" }
+tiff-reader = { version = "0.2.1", path = "../tiff-reader" }
 
 [dependencies.zstd]
 version = "0.13"

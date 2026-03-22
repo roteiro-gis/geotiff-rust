@@ -1,6 +1,5 @@
 //! Compression filter pipeline for TIFF strip/tile decompression.
 
-#[cfg(feature = "jpeg")]
 use std::io::Cursor;
 use std::io::Read;
 
@@ -141,10 +140,8 @@ fn decompress_packbits(data: &[u8], index: usize) -> Result<Vec<u8>> {
 
 #[cfg(feature = "jpeg")]
 fn decompress_jpeg(data: &[u8], index: usize, jpeg_tables: Option<&[u8]>) -> Result<Vec<u8>> {
-    use jpeg_decoder::Decoder;
-
     let stream = merge_jpeg_stream(jpeg_tables, data);
-    let mut decoder = Decoder::new(Cursor::new(stream));
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(stream));
     decoder.decode().map_err(|e| Error::DecompressionFailed {
         index,
         reason: format!("JPEG: {e}"),

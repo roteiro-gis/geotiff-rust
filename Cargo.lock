@@ -248,9 +248,12 @@ dependencies = [
  "parking_lot",
  "rayon",
  "reqwest",
+ "serde_json",
  "tempfile",
  "thiserror",
+ "tiff-core",
  "tiff-reader",
+ "tiff-writer",
 ]
 
 [[package]]
@@ -1302,10 +1305,12 @@ dependencies = [
  "ndarray",
  "parking_lot",
  "rayon",
+ "serde_json",
  "smallvec",
  "tempfile",
  "thiserror",
  "tiff-core",
+ "tiff-writer",
  "weezl",
  "zstd",
 ]

@@ -275,7 +275,7 @@ fn matches_gdal_decoded_pixels_for_interoperability_corpus() {
         return;
     }
 
-    let mut cases = vec![
+    let cases = vec![
         (fixture("gdal/gcore/data/byte.tif"), 0usize, SampleKind::U8),
         (
             fixture("gdal/gcore/data/WGS_1984_Web_Mercator.tif"),
@@ -313,6 +313,9 @@ fn matches_gdal_decoded_pixels_for_interoperability_corpus() {
             SampleKind::U8,
         ),
     ];
+
+    #[cfg(feature = "zstd")]
+    let mut cases = cases;
 
     #[cfg(feature = "zstd")]
     cases.push((

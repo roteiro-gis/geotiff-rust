@@ -1,8 +1,8 @@
 //! Compression filter pipeline for TIFF strip/tile decompression.
 
-use std::io::Read;
 #[cfg(any(feature = "jpeg", feature = "zstd"))]
 use std::io::Cursor;
+use std::io::Read;
 
 use crate::error::{Error, Result};
 use crate::header::ByteOrder;

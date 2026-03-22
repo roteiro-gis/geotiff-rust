@@ -13,7 +13,7 @@ keywords = ["tiff", "bigtiff", "decoder", "raster", "read-only"]
 categories = ["science", "parser-implementations"]
 
 [dependencies]
-tiff-core = { version = "0.2.1", path = "../tiff-core" }
+tiff-core = { version = "0.2.2", path = "../tiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
 memmap2 = { workspace = true }
@@ -27,7 +27,7 @@ smallvec = "1"
 criterion = "0.5"
 tempfile = "3"
 serde_json = "1"
-tiff-writer = { version = "0.2.1", path = "../tiff-writer" }
+tiff-writer = { version = "0.2", path = "../tiff-writer" }
 
 [[bench]]
 name = "reference_compare_bench"

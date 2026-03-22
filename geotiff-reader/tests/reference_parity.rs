@@ -123,6 +123,8 @@ fn assert_gdal_u8_pixels_close(path: &std::path::Path, overview_index: Option<us
     let (actual, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0), "unexpected array offset for {path_str}");
 
+    // JPEG stays on a bounded-delta comparison because `jpeg-decoder` differs
+    // from GDAL/libjpeg on `byte_JPEG.tif` by 3 grayscale samples, each +1.
     let max_diff_pixels = (expected.len() / 100).max(4);
     reference::assert_u8_bytes_close(&actual, &expected, 1, max_diff_pixels, path_str);
 }

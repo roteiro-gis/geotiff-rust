@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-tiff-core = { version = "0.2.2", path = "../tiff-core" }
+tiff-core = { version = "0.2.3", path = "../tiff-core" }
 thiserror = { workspace = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 weezl = "0.1"

@@ -9,9 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-geotiff-core = { version = "0.2.2", path = "../geotiff-core" }
-tiff-writer = { version = "0.2", path = "../tiff-writer" }
-tiff-core = { version = "0.2.2", path = "../tiff-core" }
+geotiff-core = { version = "0.2.3", path = "../geotiff-core" }
+tiff-writer = { version = "0.2.3", path = "../tiff-writer" }
+tiff-core = { version = "0.2.3", path = "../tiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
 

@@ -281,7 +281,6 @@ fn read_tile_block(
     let jpeg_tables = ifd
         .tag(TAG_JPEG_TABLES)
         .and_then(|tag| tag.value.as_bytes());
-    let mut decoded = filters::decompress(ifd.compression(), &compressed, spec.index, jpeg_tables)?;
     let samples = if layout.planar_configuration == 1 {
         layout.samples_per_pixel
     } else {
@@ -292,6 +291,13 @@ fn read_tile_block(
         .tile_height
         .checked_mul(row_bytes)
         .ok_or_else(|| Error::InvalidImageLayout("tile size overflows usize".into()))?;
+    let mut decoded = filters::decompress(
+        ifd.compression(),
+        &compressed,
+        spec.index,
+        jpeg_tables,
+        expected_len,
+    )?;
     if decoded.len() < expected_len {
         return Err(Error::DecompressionFailed {
             index: spec.index,

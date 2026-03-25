@@ -16,6 +16,7 @@ pub fn decompress(
     data: &[u8],
     index: usize,
     _jpeg_tables: Option<&[u8]>,
+    _decoded_len_limit: usize,
 ) -> Result<Vec<u8>> {
     match Compression::from_code(compression) {
         Some(Compression::None) => Ok(data.to_vec()),
@@ -25,7 +26,7 @@ pub fn decompress(
         #[cfg(feature = "jpeg")]
         Some(Compression::OldJpeg) => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "jpeg")]
-        Some(Compression::Jpeg) => decompress_jpeg(data, index, _jpeg_tables),
+        Some(Compression::Jpeg) => decompress_jpeg(data, index, _jpeg_tables, _decoded_len_limit),
         #[cfg(not(feature = "jpeg"))]
         Some(Compression::OldJpeg | Compression::Jpeg) => {
             Err(Error::UnsupportedCompression(compression))
@@ -142,10 +143,18 @@ fn decompress_packbits(data: &[u8], index: usize) -> Result<Vec<u8>> {
 }
 
 #[cfg(feature = "jpeg")]
-fn decompress_jpeg(data: &[u8], index: usize, jpeg_tables: Option<&[u8]>) -> Result<Vec<u8>> {
+fn decompress_jpeg(
+    data: &[u8],
+    index: usize,
+    jpeg_tables: Option<&[u8]>,
+    decoded_len_limit: usize,
+) -> Result<Vec<u8>> {
     let stream = merge_jpeg_stream(jpeg_tables, data);
     panic::catch_unwind(AssertUnwindSafe(|| {
         let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(stream));
+        decoder.set_max_decoding_buffer_size(decoded_len_limit);
+        decoder.read_info()?;
+        validate_jpeg_metadata_budget(&decoder, decoded_len_limit)?;
         decoder.decode()
     }))
     .map_err(|payload| Error::DecompressionFailed {
@@ -159,6 +168,26 @@ fn decompress_jpeg(data: &[u8], index: usize, jpeg_tables: Option<&[u8]>) -> Res
         index,
         reason: format!("JPEG: {e}"),
     })
+}
+
+#[cfg(feature = "jpeg")]
+fn validate_jpeg_metadata_budget<R: std::io::Read>(
+    decoder: &jpeg_decoder::Decoder<R>,
+    decoded_len_limit: usize,
+) -> std::result::Result<(), jpeg_decoder::Error> {
+    let info = decoder.info().ok_or_else(|| {
+        jpeg_decoder::Error::Format("JPEG metadata missing after read_info".into())
+    })?;
+    let decoded_len = usize::from(info.width)
+        .checked_mul(usize::from(info.height))
+        .and_then(|pixels| pixels.checked_mul(info.pixel_format.pixel_bytes()))
+        .ok_or_else(|| jpeg_decoder::Error::Format("JPEG decoded size overflow".into()))?;
+    if decoded_len > decoded_len_limit {
+        return Err(jpeg_decoder::Error::Format(format!(
+            "JPEG decoded size {decoded_len} exceeds TIFF block budget {decoded_len_limit}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "zstd")]
@@ -338,9 +367,11 @@ mod tests {
     use std::path::Path;
 
     #[cfg(feature = "jpeg")]
-    use super::merge_jpeg_stream;
+    use super::{decompress, merge_jpeg_stream};
     use super::{decompress_lzw, decompress_packbits, fix_endianness_and_predict};
     use crate::header::ByteOrder;
+    #[cfg(feature = "jpeg")]
+    use tiff_core::Compression;
 
     #[test]
     fn horizontal_predictor_restores_u16_rows() {
@@ -377,5 +408,37 @@ mod tests {
         );
         assert_eq!(&merged[..6], &[0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43]);
         assert!(merged.ends_with(&[0xff, 0xd9]));
+    }
+
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn jpeg_decoder_rejects_frame_sizes_that_exceed_tiff_budget() {
+        let mut jpeg = vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x14, 0x00, 0x14, 0x01, 0x01, 0x11,
+            0x00, 0xff, 0xc4, 0x00, 0x17, 0x00, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x04, 0x06, 0xff, 0xc4,
+            0x00, 0x2a, 0x10, 0x00, 0x02, 0x01, 0x02, 0x04, 0x04, 0x05, 0x05, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x11, 0x03, 0x04, 0x00, 0x18, 0x31, 0x41,
+            0x13, 0x21, 0x51, 0x71, 0x05, 0x22, 0x61, 0x91, 0xb1, 0x14, 0x42, 0x62, 0xc1, 0xf0,
+            0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x75, 0xc5, 0xb7, 0xd2,
+            0x31, 0x4a, 0x75, 0x51, 0xe0, 0x65, 0xf2, 0x19, 0xd8, 0x8d, 0x7d, 0xfe, 0x71, 0x19,
+            0x2b, 0x94, 0x54, 0x2c, 0x33, 0x38, 0x20, 0x2f, 0x7d, 0xf5, 0xd2, 0x40, 0x18, 0x6b,
+            0xdc, 0x3d, 0xa0, 0x44, 0x15, 0xc9, 0x2c, 0xa1, 0xc8, 0x5c, 0xa4, 0x2c, 0xed, 0xcc,
+            0x74, 0x83, 0xcb, 0xaf, 0x59, 0xc2, 0xaf, 0x0f, 0x02, 0xb3, 0x2e, 0x57, 0xfc, 0x79,
+            0x15, 0x9f, 0x58, 0xee, 0x3f, 0x7b, 0xe0, 0x59, 0x95, 0x84, 0x26, 0x56, 0xac, 0xc2,
+            0x62, 0xa0, 0x8c, 0xa4, 0x91, 0xc9, 0x44, 0xed, 0xa4, 0x9e, 0x9a, 0x08, 0xc1, 0x8a,
+            0x54, 0x9d, 0x41, 0xe3, 0xa4, 0xe8, 0x65, 0x01, 0xe7, 0xdc, 0xff, 0x00, 0x6d, 0x8d,
+            0x2f, 0x89, 0x5b, 0x50, 0xbe, 0xb9, 0x4a, 0x0d, 0x4c, 0x53, 0x51, 0x01, 0x8a, 0x31,
+            0x9a, 0x92, 0x22, 0x5a, 0x49, 0xe7, 0xda, 0x37, 0xeb, 0x8c, 0xc5, 0xc7, 0x0a, 0xd5,
+            0x87, 0x0a, 0x85, 0x30, 0xc7, 0xee, 0x69, 0x27, 0x40, 0x77, 0x3e, 0xbf, 0x18, 0x99,
+            0xae, 0x1c, 0xb6, 0xc0, 0x0d, 0x02, 0xf9, 0x47, 0xb0, 0x81, 0x8f, 0xff, 0xd9,
+        ];
+        jpeg[7] = 0x9b;
+        jpeg[8] = 0x43;
+        jpeg[9] = 0xee;
+        jpeg[10] = 0x23;
+
+        let error = decompress(Compression::Jpeg.to_code(), &jpeg, 0, None, 20 * 20).unwrap_err();
+        assert!(error.to_string().contains("block budget"));
     }
 }

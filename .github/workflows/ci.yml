@@ -92,15 +92,34 @@ jobs:
   fuzz:
     name: Fuzz
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        fuzz_target: [tiff_open, geotiff_open]
+    env:
+      FUZZ_TIME: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
         with:
           components: clippy
+
+      - name: Cache cargo-fuzz
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-bin-v1-0.13.1
+
+      - name: Install cargo-fuzz
+        run: |
+          if ! command -v cargo-fuzz >/dev/null 2>&1; then
+            cargo install cargo-fuzz --version 0.13.1 --locked
+          fi
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -110,3 +129,19 @@ jobs:
 
       - name: Lint fuzz targets
         run: cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings
+
+      - name: Build fuzz target
+        working-directory: fuzz
+        run: cargo fuzz build ${{ matrix.fuzz_target }}
+
+      - name: Run fuzz target
+        working-directory: fuzz
+        run: cargo fuzz run ${{ matrix.fuzz_target }} corpus/${{ matrix.fuzz_target }} -- -max_total_time=${{ env.FUZZ_TIME }}
+
+      - name: Upload fuzz artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.fuzz_target }}-${{ github.sha }}
+          path: fuzz/artifacts
+          if-no-files-found: ignore

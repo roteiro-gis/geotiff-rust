@@ -39,6 +39,10 @@ GeoTiffBuilder::new(256, 256)
     .write_2d("output.tif", data.view())?;
 ```
 
+For separate-planar multiband output, set
+`planar_configuration(PlanarConfiguration::Planar)` on `ImageBuilder` or
+`GeoTiffBuilder`.
+
 ### Streaming tile writes
 
 ```rust
@@ -79,6 +83,7 @@ CogBuilder::new(
 - Classic TIFF and BigTIFF
 - Little-endian and big-endian byte orders
 - Strip and tile data access with windowed reads
+- Chunky and separate planar sample layouts
 - Compression: Deflate, LZW, PackBits, JPEG (optional), ZSTD (optional)
 - Parallel decompression via Rayon
 - Typed raster reads into `ndarray::ArrayD` (u8 through f64)
@@ -90,7 +95,7 @@ CogBuilder::new(
 - Strip and tile layouts
 - Compression: Deflate, LZW, ZSTD (optional)
 - Predictors: horizontal differencing, floating-point byte interleaving
-- Multi-band (RGB/RGBA) and all sample types (u8 through f64)
+- Chunky and separate planar multi-band layouts (RGB/RGBA) and all sample types (u8 through f64)
 - Streaming tile-by-tile writes for large rasters
 - GeoTIFF metadata: EPSG, pixel scale, origin, affine transforms, NoData
 - COG output with ghost IFD, overview generation (nearest-neighbor, average)

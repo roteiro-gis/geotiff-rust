@@ -1,8 +1,15 @@
 #![cfg(feature = "local")]
 
-use ndarray::ArrayD;
+use std::fs::File;
+use std::io::BufWriter;
 
-use geotiff_core::RasterType;
+use ndarray::ArrayD;
+use tempfile::NamedTempFile;
+use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration, Tag, TagValue};
+use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
+
+use geotiff_core::geokeys::{self, GeoKeyDirectory, GeoKeyValue};
+use geotiff_core::{tags, RasterType};
 use geotiff_reader::GeoTiffFile;
 
 #[path = "../../test-support/reference.rs"]
@@ -140,6 +147,83 @@ fn assert_shape<T>(array: &ArrayD<T>, width: u32, height: u32, band_count: u64) 
     }
 }
 
+fn build_geo_tags() -> Vec<Tag> {
+    let mut geokeys = GeoKeyDirectory::new();
+    geokeys.set(
+        geokeys::GT_MODEL_TYPE,
+        GeoKeyValue::Short(geotiff_core::ModelType::Projected.code()),
+    );
+    geokeys.set(
+        geokeys::GT_RASTER_TYPE,
+        GeoKeyValue::Short(geotiff_core::RasterType::PixelIsArea.code()),
+    );
+    geokeys.set(geokeys::PROJECTED_CS_TYPE, GeoKeyValue::Short(32615));
+    geokeys.set(geokeys::PROJ_LINEAR_UNITS, GeoKeyValue::Short(9001));
+
+    let (directory, double_params, ascii_params) = geokeys.serialize();
+    let mut tags_out = vec![
+        Tag::new(
+            tags::TAG_MODEL_PIXEL_SCALE,
+            TagValue::Double(vec![30.0, 30.0, 0.0]),
+        ),
+        Tag::new(
+            tags::TAG_MODEL_TIEPOINT,
+            TagValue::Double(vec![0.0, 0.0, 0.0, 500_000.0, 4_500_000.0, 0.0]),
+        ),
+        Tag::new(tags::TAG_GEO_KEY_DIRECTORY, TagValue::Short(directory)),
+    ];
+    if !double_params.is_empty() {
+        tags_out.push(Tag::new(
+            tags::TAG_GEO_DOUBLE_PARAMS,
+            TagValue::Double(double_params),
+        ));
+    }
+    if !ascii_params.is_empty() {
+        tags_out.push(Tag::new(
+            tags::TAG_GEO_ASCII_PARAMS,
+            TagValue::Ascii(ascii_params),
+        ));
+    }
+    tags_out
+}
+
+fn write_generated_planar_geotiff(path: &std::path::Path) {
+    let width = 16u32;
+    let height = 16u32;
+    let tile = 16u32;
+
+    let file = File::create(path).unwrap();
+    let writer = BufWriter::new(file);
+    let mut tiff_writer = TiffWriter::new(writer, WriteOptions::default()).unwrap();
+
+    let mut image = ImageBuilder::new(width, height)
+        .sample_type::<u8>()
+        .samples_per_pixel(3)
+        .photometric(PhotometricInterpretation::Rgb)
+        .planar_configuration(PlanarConfiguration::Planar)
+        .compression(Compression::Deflate)
+        .tiles(tile, tile);
+    for tag in build_geo_tags() {
+        image = image.tag(tag);
+    }
+
+    let handle = tiff_writer.add_image(image).unwrap();
+    for band in 0..3u8 {
+        let mut plane = vec![0u8; (tile * tile) as usize];
+        for row in 0..height as usize {
+            for col in 0..width as usize {
+                plane[row * tile as usize + col] =
+                    ((row * 13 + col * 5 + band as usize * 29) % 251) as u8;
+            }
+        }
+        tiff_writer
+            .write_block(&handle, band as usize, &plane)
+            .unwrap();
+    }
+
+    tiff_writer.finish().unwrap();
+}
+
 #[test]
 fn matches_gdal_geotiff_metadata_for_interoperability_corpus() {
     if !reference::python_gdal_available() {
@@ -272,4 +356,32 @@ fn matches_gdal_decoded_pixels_and_overviews() {
             assert_gdal_hash_matches(&path, overview_index, sample_kind);
         }
     }
+}
+
+#[test]
+fn matches_gdal_for_generated_planar_geotiff() {
+    if !reference::python_gdal_available() {
+        eprintln!(
+            "skipping GDAL planar GeoTIFF parity test because Python GDAL bindings are unavailable"
+        );
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_generated_planar_geotiff(fixture.path());
+
+    let path_str = fixture.path().to_str().unwrap();
+    let reference_json =
+        reference::run_reference_json(env!("CARGO_MANIFEST_DIR"), &["metadata", path_str]);
+    let file = GeoTiffFile::open(fixture.path()).unwrap();
+
+    assert_eq!(file.epsg(), Some(32615));
+    assert_eq!(file.width(), 16);
+    assert_eq!(file.height(), 16);
+    assert_eq!(file.band_count(), 3);
+    assert_eq!(file.tiff().ifd(0).unwrap().planar_configuration(), 2);
+    assert_eq!(reference_json["epsg"].as_u64(), Some(32615));
+    assert_eq!(reference_json["band_count"].as_u64(), Some(3));
+
+    assert_gdal_hash_matches(fixture.path(), None, SampleKind::U8);
 }

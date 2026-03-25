@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use ndarray::ArrayD;
 use tempfile::NamedTempFile;
-use tiff_core::Compression;
+use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration};
 use tiff_reader::TiffFile;
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
@@ -48,6 +48,51 @@ fn write_benchmark_fixture(path: &Path) {
                 .write_block(&handle, block_index, &block)
                 .unwrap();
             block_index += 1;
+        }
+    }
+
+    tiff_writer.finish().unwrap();
+}
+
+fn write_planar_benchmark_fixture(path: &Path) {
+    let width = 1024u32;
+    let height = 1024u32;
+    let tile = 256u32;
+
+    let file = File::create(path).unwrap();
+    let writer = BufWriter::new(file);
+    let mut tiff_writer = TiffWriter::new(writer, WriteOptions::default()).unwrap();
+    let image = ImageBuilder::new(width, height)
+        .sample_type::<u16>()
+        .samples_per_pixel(3)
+        .photometric(PhotometricInterpretation::Rgb)
+        .planar_configuration(PlanarConfiguration::Planar)
+        .compression(Compression::Deflate)
+        .tiles(tile, tile);
+    let handle = tiff_writer.add_image(image).unwrap();
+
+    let tiles_across = width / tile;
+    let tiles_down = height / tile;
+    let tiles_per_plane = (tiles_across * tiles_down) as usize;
+    for band in 0..3u32 {
+        for tile_row in 0..tiles_down {
+            for tile_col in 0..tiles_across {
+                let mut block = vec![0u16; (tile * tile) as usize];
+                for local_row in 0..tile {
+                    for local_col in 0..tile {
+                        let row = tile_row * tile + local_row;
+                        let col = tile_col * tile + local_col;
+                        let offset = (local_row * tile + local_col) as usize;
+                        block[offset] =
+                            ((row * 19 + col * 23 + band * 97) % u16::MAX as u32) as u16;
+                    }
+                }
+                let tile_index = (tile_row * tiles_across + tile_col) as usize;
+                let block_index = band as usize * tiles_per_plane + tile_index;
+                tiff_writer
+                    .write_block(&handle, block_index, &block)
+                    .unwrap();
+            }
         }
     }
 
@@ -129,5 +174,53 @@ fn bench_full_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_full_decode);
+fn bench_planar_full_decode(c: &mut Criterion) {
+    if !reference::python_gdal_available() {
+        eprintln!("skipping GDAL planar benchmark because Python GDAL bindings are unavailable");
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_planar_benchmark_fixture(fixture.path());
+
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture_path = fixture.path().to_str().unwrap().to_string();
+    let expected = rust_hash(fixture.path());
+    assert_eq!(gdal_hash(manifest_dir, &fixture_path), expected);
+
+    let mut group = c.benchmark_group("tiff-reader/planar-full-decode-vs-gdal");
+    group.throughput(Throughput::Bytes(expected.0 as u64));
+
+    group.bench_function(
+        BenchmarkId::new(RUST_IMPL_NAME, "tiff-reader-planar"),
+        |b| {
+            b.iter_custom(|iters| {
+                let iterations =
+                    usize::try_from(iters).expect("criterion iteration count overflowed");
+                let start = Instant::now();
+                for _ in 0..iterations {
+                    let file = TiffFile::open(fixture.path()).unwrap();
+                    let raster: ArrayD<u16> = file.read_image(0).unwrap();
+                    black_box(raster);
+                }
+                start.elapsed()
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new(REFERENCE_IMPL_NAME, "tiff-reader-planar"),
+        |b| {
+            b.iter_custom(|iters| {
+                let iterations =
+                    usize::try_from(iters).expect("criterion iteration count overflowed");
+                gdal_benchmark_duration(manifest_dir, &fixture_path, iterations, &expected)
+            });
+        },
+    );
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_full_decode, bench_planar_full_decode);
 criterion_main!(benches);

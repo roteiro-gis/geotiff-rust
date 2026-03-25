@@ -188,7 +188,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             self.byte_order,
             state.builder.compression,
             state.builder.predictor,
-            state.builder.samples_per_pixel,
+            state.builder.block_samples_per_pixel(),
             state.builder.block_row_width(),
             block_index,
         )?;

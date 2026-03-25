@@ -11,7 +11,7 @@ use geotiff_core::tags;
 use geotiff_reader::GeoTiffFile;
 use ndarray::ArrayD;
 use tempfile::NamedTempFile;
-use tiff_core::{Compression, Tag, TagValue};
+use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration, Tag, TagValue};
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
 #[path = "../../test-support/reference.rs"]
@@ -102,6 +102,55 @@ fn write_benchmark_fixture(path: &Path) {
     tiff_writer.finish().unwrap();
 }
 
+fn write_planar_benchmark_fixture(path: &Path) {
+    let width = 1024u32;
+    let height = 1024u32;
+    let tile = 256u32;
+
+    let file = File::create(path).unwrap();
+    let writer = BufWriter::new(file);
+    let mut tiff_writer = TiffWriter::new(writer, WriteOptions::default()).unwrap();
+
+    let mut image = ImageBuilder::new(width, height)
+        .sample_type::<u16>()
+        .samples_per_pixel(3)
+        .photometric(PhotometricInterpretation::Rgb)
+        .planar_configuration(PlanarConfiguration::Planar)
+        .compression(Compression::Deflate)
+        .tiles(tile, tile);
+    for tag in build_geo_tags() {
+        image = image.tag(tag);
+    }
+
+    let handle = tiff_writer.add_image(image).unwrap();
+    let tiles_across = width / tile;
+    let tiles_down = height / tile;
+    let tiles_per_plane = (tiles_across * tiles_down) as usize;
+    for band in 0..3u32 {
+        for tile_row in 0..tiles_down {
+            for tile_col in 0..tiles_across {
+                let mut block = vec![0u16; (tile * tile) as usize];
+                for local_row in 0..tile {
+                    for local_col in 0..tile {
+                        let row = tile_row * tile + local_row;
+                        let col = tile_col * tile + local_col;
+                        let offset = (local_row * tile + local_col) as usize;
+                        block[offset] =
+                            ((row * 41 + col * 17 + band * 101) % u16::MAX as u32) as u16;
+                    }
+                }
+                let tile_index = (tile_row * tiles_across + tile_col) as usize;
+                let block_index = band as usize * tiles_per_plane + tile_index;
+                tiff_writer
+                    .write_block(&handle, block_index, &block)
+                    .unwrap();
+            }
+        }
+    }
+
+    tiff_writer.finish().unwrap();
+}
+
 fn rust_hash(path: &Path) -> (usize, String) {
     let file = GeoTiffFile::open(path).unwrap();
     assert_eq!(file.epsg(), Some(32615));
@@ -183,5 +232,58 @@ fn bench_open_and_full_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_open_and_full_decode);
+fn bench_open_and_full_decode_planar(c: &mut Criterion) {
+    if !reference::python_gdal_available() {
+        eprintln!("skipping GDAL planar benchmark because Python GDAL bindings are unavailable");
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_planar_benchmark_fixture(fixture.path());
+
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture_path = fixture.path().to_str().unwrap().to_string();
+    let expected = rust_hash(fixture.path());
+    assert_eq!(gdal_hash(manifest_dir, &fixture_path), expected);
+
+    let mut group = c.benchmark_group("geotiff-reader/open-and-full-decode-planar-vs-gdal");
+    group.throughput(Throughput::Bytes(expected.0 as u64));
+
+    group.bench_function(
+        BenchmarkId::new(RUST_IMPL_NAME, "geotiff-reader-planar"),
+        |b| {
+            b.iter_custom(|iters| {
+                let iterations =
+                    usize::try_from(iters).expect("criterion iteration count overflowed");
+                let start = Instant::now();
+                for _ in 0..iterations {
+                    let file = GeoTiffFile::open(fixture.path()).unwrap();
+                    assert_eq!(file.epsg(), Some(32615));
+                    let raster: ArrayD<u16> = file.read_raster().unwrap();
+                    black_box(raster);
+                }
+                start.elapsed()
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new(REFERENCE_IMPL_NAME, "geotiff-reader-planar"),
+        |b| {
+            b.iter_custom(|iters| {
+                let iterations =
+                    usize::try_from(iters).expect("criterion iteration count overflowed");
+                gdal_benchmark_duration(manifest_dir, &fixture_path, iterations, &expected)
+            });
+        },
+    );
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_open_and_full_decode,
+    bench_open_and_full_decode_planar
+);
 criterion_main!(benches);

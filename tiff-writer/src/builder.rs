@@ -89,6 +89,7 @@ impl ImageBuilder {
         self
     }
 
+    /// Set chunky (interleaved) or separate planar sample layout for multi-band images.
     pub fn planar_configuration(mut self, p: PlanarConfiguration) -> Self {
         self.planar_configuration = p;
         self
@@ -123,7 +124,7 @@ impl ImageBuilder {
 
     /// Total number of blocks (strips or tiles) for this image configuration.
     pub fn block_count(&self) -> usize {
-        match self.layout {
+        let blocks_per_plane = match self.layout {
             DataLayout::Strips { rows_per_strip } => {
                 let rps = rows_per_strip.max(1) as usize;
                 (self.height as usize).div_ceil(rps)
@@ -135,23 +136,29 @@ impl ImageBuilder {
                 let tiles_down = (self.height as usize).div_ceil(th);
                 tiles_across * tiles_down
             }
+        };
+        if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
+            blocks_per_plane * self.samples_per_pixel as usize
+        } else {
+            blocks_per_plane
         }
     }
 
     /// Expected number of samples for the block at `index`.
     pub fn block_sample_count(&self, index: usize) -> usize {
-        let spp = self.samples_per_pixel as usize;
+        let samples_per_pixel = self.block_samples_per_pixel() as usize;
+        let plane_block_index = self.block_plane_index(index);
         match self.layout {
             DataLayout::Strips { rows_per_strip } => {
                 let rps = rows_per_strip.max(1) as usize;
-                let start_row = index * rps;
-                let end_row = ((index + 1) * rps).min(self.height as usize);
+                let start_row = plane_block_index * rps;
+                let end_row = ((plane_block_index + 1) * rps).min(self.height as usize);
                 let rows = end_row.saturating_sub(start_row);
-                rows * self.width as usize * spp
+                rows * self.width as usize * samples_per_pixel
             }
             DataLayout::Tiles { width, height } => {
                 // Tiles are always full-sized (padded at edges)
-                width as usize * height as usize * spp
+                width as usize * height as usize * samples_per_pixel
             }
         }
     }
@@ -193,6 +200,39 @@ impl ImageBuilder {
         match self.layout {
             DataLayout::Strips { .. } => self.width as usize,
             DataLayout::Tiles { width, .. } => width as usize,
+        }
+    }
+
+    /// Samples per pixel represented in a single block.
+    pub fn block_samples_per_pixel(&self) -> u16 {
+        if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
+            1
+        } else {
+            self.samples_per_pixel
+        }
+    }
+
+    fn block_plane_index(&self, index: usize) -> usize {
+        if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
+            index % self.blocks_per_plane()
+        } else {
+            index
+        }
+    }
+
+    fn blocks_per_plane(&self) -> usize {
+        match self.layout {
+            DataLayout::Strips { rows_per_strip } => {
+                let rps = rows_per_strip.max(1) as usize;
+                (self.height as usize).div_ceil(rps)
+            }
+            DataLayout::Tiles { width, height } => {
+                let tw = width.max(1) as usize;
+                let th = height.max(1) as usize;
+                let tiles_across = (self.width as usize).div_ceil(tw);
+                let tiles_down = (self.height as usize).div_ceil(th);
+                tiles_across * tiles_down
+            }
         }
     }
 

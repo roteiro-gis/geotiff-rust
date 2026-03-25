@@ -9,7 +9,9 @@ use geotiff_core::tags;
 use geotiff_core::transform::GeoTransform;
 use geotiff_core::{ModelType, RasterType};
 use ndarray::{ArrayView2, ArrayView3};
-use tiff_core::{Compression, PhotometricInterpretation, Predictor, Tag, TagValue};
+use tiff_core::{
+    Compression, PhotometricInterpretation, PlanarConfiguration, Predictor, Tag, TagValue,
+};
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
 use crate::error::{Error, Result};
@@ -29,6 +31,7 @@ pub struct GeoTiffBuilder {
     pub(crate) nodata: Option<String>,
     pub(crate) compression: Compression,
     pub(crate) predictor: Predictor,
+    pub(crate) planar_configuration: PlanarConfiguration,
     pub(crate) tile_width: Option<u32>,
     pub(crate) tile_height: Option<u32>,
     pub(crate) photometric: PhotometricInterpretation,
@@ -48,6 +51,7 @@ impl GeoTiffBuilder {
             nodata: None,
             compression: Compression::None,
             predictor: Predictor::None,
+            planar_configuration: PlanarConfiguration::Chunky,
             tile_width: None,
             tile_height: None,
             photometric: PhotometricInterpretation::MinIsBlack,
@@ -159,6 +163,12 @@ impl GeoTiffBuilder {
         self
     }
 
+    /// Set planar configuration for multi-band output.
+    pub fn planar_configuration(mut self, planar_configuration: PlanarConfiguration) -> Self {
+        self.planar_configuration = planar_configuration;
+        self
+    }
+
     /// Enable tiling with given tile dimensions (must be multiples of 16).
     pub fn tile_size(mut self, tile_width: u32, tile_height: u32) -> Self {
         self.tile_width = Some(tile_width);
@@ -233,6 +243,7 @@ impl GeoTiffBuilder {
             .samples_per_pixel(self.bands as u16)
             .compression(self.compression)
             .predictor(self.predictor)
+            .planar_configuration(self.planar_configuration)
             .photometric(self.photometric);
 
         if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {
@@ -400,43 +411,97 @@ impl GeoTiffBuilder {
             let tw = tw as usize;
             let th = th as usize;
             let tiles_across = (self.width as usize).div_ceil(tw);
-            let tile_row = block_idx / tiles_across;
-            let tile_col = block_idx % tiles_across;
+            let tiles_down = (self.height as usize).div_ceil(th);
+            let tiles_per_plane = tiles_across * tiles_down;
+            let (plane, plane_block_index) =
+                self.plane_and_block_index(block_idx, tiles_per_plane, bands);
+            let tile_row = plane_block_index / tiles_across;
+            let tile_col = plane_block_index % tiles_across;
             let start_row = tile_row * th;
             let start_col = tile_col * tw;
 
-            let mut tile_data = vec![zero; tw * th * bands];
-            for row in 0..th {
-                let src_row = start_row + row;
-                if src_row >= self.height as usize {
-                    break;
-                }
-                for col in 0..tw {
-                    let src_col = start_col + col;
-                    if src_col >= self.width as usize {
+            if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
+                let mut tile_data = vec![zero; tw * th];
+                for row in 0..th {
+                    let src_row = start_row + row;
+                    if src_row >= self.height as usize {
                         break;
                     }
-                    for band in 0..bands {
-                        tile_data[(row * tw + col) * bands + band] = data[[src_row, src_col, band]];
+                    for col in 0..tw {
+                        let src_col = start_col + col;
+                        if src_col >= self.width as usize {
+                            break;
+                        }
+                        tile_data[row * tw + col] = data[[src_row, src_col, plane]];
                     }
                 }
+                tile_data
+            } else {
+                let mut tile_data = vec![zero; tw * th * bands];
+                for row in 0..th {
+                    let src_row = start_row + row;
+                    if src_row >= self.height as usize {
+                        break;
+                    }
+                    for col in 0..tw {
+                        let src_col = start_col + col;
+                        if src_col >= self.width as usize {
+                            break;
+                        }
+                        for band in 0..bands {
+                            tile_data[(row * tw + col) * bands + band] =
+                                data[[src_row, src_col, band]];
+                        }
+                    }
+                }
+                tile_data
             }
-            tile_data
         } else {
-            let rps = self.height.min(256) as usize;
-            let start_row = block_idx * rps;
-            let end_row = ((block_idx + 1) * rps).min(self.height as usize);
+            let rps = self.rows_per_strip();
+            let strips_per_plane = (self.height as usize).div_ceil(rps);
+            let (plane, plane_block_index) =
+                self.plane_and_block_index(block_idx, strips_per_plane, bands);
+            let start_row = plane_block_index * rps;
+            let end_row = ((plane_block_index + 1) * rps).min(self.height as usize);
             let w = self.width as usize;
 
-            let mut samples = Vec::with_capacity((end_row - start_row) * w * bands);
-            for row in start_row..end_row {
-                for col in 0..w {
-                    for band in 0..bands {
-                        samples.push(data[[row, col, band]]);
+            if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
+                let mut samples = Vec::with_capacity((end_row - start_row) * w);
+                for row in start_row..end_row {
+                    for col in 0..w {
+                        samples.push(data[[row, col, plane]]);
                     }
                 }
+                samples
+            } else {
+                let mut samples = Vec::with_capacity((end_row - start_row) * w * bands);
+                for row in start_row..end_row {
+                    for col in 0..w {
+                        for band in 0..bands {
+                            samples.push(data[[row, col, band]]);
+                        }
+                    }
+                }
+                samples
             }
-            samples
         }
+    }
+
+    fn plane_and_block_index(
+        &self,
+        block_idx: usize,
+        blocks_per_plane: usize,
+        bands: usize,
+    ) -> (usize, usize) {
+        if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
+            let plane = (block_idx / blocks_per_plane).min(bands.saturating_sub(1));
+            (plane, block_idx % blocks_per_plane)
+        } else {
+            (0, block_idx)
+        }
+    }
+
+    fn rows_per_strip(&self) -> usize {
+        self.height.min(256) as usize
     }
 }

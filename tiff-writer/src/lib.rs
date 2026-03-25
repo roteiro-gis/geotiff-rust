@@ -443,6 +443,98 @@ mod tests {
         assert_eq!(v, expected);
     }
 
+    #[test]
+    fn write_and_read_planar_stripped_rgb() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(2, 2)
+            .sample_type::<u8>()
+            .samples_per_pixel(3)
+            .photometric(tiff_core::PhotometricInterpretation::Rgb)
+            .planar_configuration(tiff_core::PlanarConfiguration::Planar)
+            .strips(1);
+        let handle = writer.add_image(image).unwrap();
+
+        writer.write_block(&handle, 0, &[255u8, 1]).unwrap();
+        writer.write_block(&handle, 1, &[2u8, 3]).unwrap();
+        writer.write_block(&handle, 2, &[10u8, 20]).unwrap();
+        writer.write_block(&handle, 3, &[30u8, 40]).unwrap();
+        writer.write_block(&handle, 4, &[100u8, 101]).unwrap();
+        writer.write_block(&handle, 5, &[102u8, 103]).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        assert_eq!(file.ifd(0).unwrap().planar_configuration(), 2);
+        let img = file.read_image::<u8>(0).unwrap();
+        assert_eq!(img.shape(), &[2, 2, 3]);
+        let (v, _) = img.into_raw_vec_and_offset();
+        assert_eq!(v, vec![255, 10, 100, 1, 20, 101, 2, 30, 102, 3, 40, 103]);
+    }
+
+    #[test]
+    fn write_and_read_planar_tiled_rgb() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(2, 2)
+            .sample_type::<u8>()
+            .samples_per_pixel(3)
+            .photometric(tiff_core::PhotometricInterpretation::Rgb)
+            .planar_configuration(tiff_core::PlanarConfiguration::Planar)
+            .tiles(16, 16);
+        let handle = writer.add_image(image).unwrap();
+
+        let mut red = vec![0u8; 16 * 16];
+        let mut green = vec![0u8; 16 * 16];
+        let mut blue = vec![0u8; 16 * 16];
+        red[0] = 1;
+        red[1] = 2;
+        red[16] = 3;
+        red[17] = 4;
+        green[0] = 10;
+        green[1] = 20;
+        green[16] = 30;
+        green[17] = 40;
+        blue[0] = 100;
+        blue[1] = 110;
+        blue[16] = 120;
+        blue[17] = 130;
+
+        writer.write_block(&handle, 0, &red).unwrap();
+        writer.write_block(&handle, 1, &green).unwrap();
+        writer.write_block(&handle, 2, &blue).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        assert_eq!(file.ifd(0).unwrap().planar_configuration(), 2);
+        let img = file.read_image::<u8>(0).unwrap();
+        assert_eq!(img.shape(), &[2, 2, 3]);
+        let (v, _) = img.into_raw_vec_and_offset();
+        assert_eq!(v, vec![1, 10, 100, 2, 20, 110, 3, 30, 120, 4, 40, 130]);
+    }
+
+    #[test]
+    fn write_and_read_planar_horizontal_predictor_u16() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(3, 1)
+            .sample_type::<u16>()
+            .samples_per_pixel(2)
+            .planar_configuration(tiff_core::PlanarConfiguration::Planar)
+            .compression(tiff_core::Compression::Deflate)
+            .predictor(tiff_core::Predictor::Horizontal)
+            .strips(1);
+        let handle = writer.add_image(image).unwrap();
+        writer.write_block(&handle, 0, &[1u16, 2, 4]).unwrap();
+        writer.write_block(&handle, 1, &[100u16, 102, 105]).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<u16>(0).unwrap();
+        assert_eq!(img.shape(), &[1, 3, 2]);
+        let (v, _) = img.into_raw_vec_and_offset();
+        assert_eq!(v, vec![1, 100, 2, 102, 4, 105]);
+    }
+
     // -- BigTIFF --
 
     #[test]

@@ -32,7 +32,7 @@ pub use tile_writer::StreamingTileWriter;
 pub use geotiff_core::{
     CrsInfo, GeoKeyDirectory, GeoKeyValue, GeoTransform, ModelType, RasterType,
 };
-pub use tiff_core::{Compression, PhotometricInterpretation, Predictor};
+pub use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration, Predictor};
 
 #[cfg(test)]
 mod tests {
@@ -238,5 +238,96 @@ mod tests {
         assert_eq!(&values[0..3], &[255, 0, 0]);
         // Third row first pixel: R=255, G=0, B=128
         assert_eq!(&values[24..27], &[255, 0, 128]);
+    }
+
+    #[test]
+    fn write_and_read_multiband_rgb_planar() {
+        let mut data = ndarray::Array3::<u8>::zeros((2, 2, 3));
+        data[[0, 0, 0]] = 1;
+        data[[0, 1, 0]] = 2;
+        data[[1, 0, 0]] = 3;
+        data[[1, 1, 0]] = 4;
+        data[[0, 0, 1]] = 10;
+        data[[0, 1, 1]] = 20;
+        data[[1, 0, 1]] = 30;
+        data[[1, 1, 1]] = 40;
+        data[[0, 0, 2]] = 100;
+        data[[0, 1, 2]] = 110;
+        data[[1, 0, 2]] = 120;
+        data[[1, 1, 2]] = 130;
+
+        let mut buf = Cursor::new(Vec::new());
+        GeoTiffBuilder::new(2, 2)
+            .bands(3)
+            .photometric(PhotometricInterpretation::Rgb)
+            .planar_configuration(PlanarConfiguration::Planar)
+            .epsg(4326)
+            .write_3d_to(&mut buf, data.view())
+            .unwrap();
+
+        let bytes = buf.into_inner();
+        let tiff = tiff_reader::TiffFile::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(tiff.ifd(0).unwrap().planar_configuration(), 2);
+        let img = tiff.read_image::<u8>(0).unwrap();
+        assert_eq!(img.shape(), &[2, 2, 3]);
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, vec![1, 10, 100, 2, 20, 110, 3, 30, 120, 4, 40, 130]);
+
+        let geo = geotiff_reader::GeoTiffFile::from_bytes(bytes).unwrap();
+        assert_eq!(geo.epsg(), Some(4326));
+    }
+
+    #[test]
+    fn streaming_tile_writer_planar_matches_oneshot() {
+        let mut data = ndarray::Array3::<u8>::zeros((32, 32, 3));
+        for r in 0..32 {
+            for c in 0..32 {
+                data[[r, c, 0]] = ((r * 32 + c) % 256) as u8;
+                data[[r, c, 1]] = ((r * 7 + c * 5) % 256) as u8;
+                data[[r, c, 2]] = ((r * 11 + c * 3) % 256) as u8;
+            }
+        }
+
+        let mut oneshot_buf = Cursor::new(Vec::new());
+        GeoTiffBuilder::new(32, 32)
+            .bands(3)
+            .tile_size(16, 16)
+            .photometric(PhotometricInterpretation::Rgb)
+            .planar_configuration(PlanarConfiguration::Planar)
+            .write_3d_to(&mut oneshot_buf, data.view())
+            .unwrap();
+
+        let mut streaming_buf = Cursor::new(Vec::new());
+        let builder = GeoTiffBuilder::new(32, 32)
+            .bands(3)
+            .tile_size(16, 16)
+            .photometric(PhotometricInterpretation::Rgb)
+            .planar_configuration(PlanarConfiguration::Planar);
+        let mut tw = builder.tile_writer::<u8, _>(&mut streaming_buf).unwrap();
+        for tile_row in 0..2usize {
+            for tile_col in 0..2usize {
+                let y_off = tile_row * 16;
+                let x_off = tile_col * 16;
+                let tile = data
+                    .slice(ndarray::s![y_off..y_off + 16, x_off..x_off + 16, ..])
+                    .to_owned();
+                tw.write_tile_3d(x_off, y_off, &tile.view()).unwrap();
+            }
+        }
+        tw.finish().unwrap();
+
+        let oneshot_file = tiff_reader::TiffFile::from_bytes(oneshot_buf.into_inner()).unwrap();
+        let streaming_file = tiff_reader::TiffFile::from_bytes(streaming_buf.into_inner()).unwrap();
+
+        assert_eq!(oneshot_file.ifd(0).unwrap().planar_configuration(), 2);
+        assert_eq!(streaming_file.ifd(0).unwrap().planar_configuration(), 2);
+
+        let oneshot_img = oneshot_file.read_image::<u8>(0).unwrap();
+        let streaming_img = streaming_file.read_image::<u8>(0).unwrap();
+
+        assert_eq!(oneshot_img.shape(), streaming_img.shape());
+        let (ov, _) = oneshot_img.into_raw_vec_and_offset();
+        let (sv, _) = streaming_img.into_raw_vec_and_offset();
+        assert_eq!(ov, sv);
     }
 }

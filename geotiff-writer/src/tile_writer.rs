@@ -4,6 +4,7 @@ use std::io::{Seek, Write};
 use std::marker::PhantomData;
 
 use ndarray::ArrayView2;
+use tiff_core::PlanarConfiguration;
 use tiff_writer::{ImageHandle, TiffWriter, WriteOptions};
 
 use crate::builder::GeoTiffBuilder;
@@ -24,6 +25,7 @@ pub struct StreamingTileWriter<T: WriteSample, W: Write + Seek> {
     width: u32,
     height: u32,
     bands: u32,
+    planar_configuration: PlanarConfiguration,
     fill_value: T,
     written: Vec<bool>,
     _phantom: PhantomData<T>,
@@ -88,6 +90,7 @@ impl<T: WriteSample, W: Write + Seek> StreamingTileWriter<T, W> {
             width: builder.width,
             height: builder.height,
             bands: builder.bands,
+            planar_configuration: builder.planar_configuration,
             fill_value,
             written: vec![false; num_blocks],
             _phantom: PhantomData,
@@ -152,20 +155,35 @@ impl<T: WriteSample, W: Write + Seek> StreamingTileWriter<T, W> {
         let tile_index = tile_row * self.tiles_across as usize + tile_col;
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
+        let tiles_per_plane = self.tiles_across as usize * self.tiles_down as usize;
         let (data_h, data_w, data_b) = data.dim();
         let spp = self.bands as usize;
-
-        let mut padded = vec![self.fill_value; tw * th * spp];
-        for row in 0..data_h.min(th) {
-            for col in 0..data_w.min(tw) {
-                for band in 0..data_b.min(spp) {
-                    padded[(row * tw + col) * spp + band] = data[[row, col, band]];
+        if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
+            for band in 0..data_b.min(spp) {
+                let mut padded = vec![self.fill_value; tw * th];
+                for row in 0..data_h.min(th) {
+                    for col in 0..data_w.min(tw) {
+                        padded[row * tw + col] = data[[row, col, band]];
+                    }
+                }
+                let block_index = band * tiles_per_plane + tile_index;
+                self.writer
+                    .write_block(&self.handle, block_index, &padded)?;
+                self.written[block_index] = true;
+            }
+        } else {
+            let mut padded = vec![self.fill_value; tw * th * spp];
+            for row in 0..data_h.min(th) {
+                for col in 0..data_w.min(tw) {
+                    for band in 0..data_b.min(spp) {
+                        padded[(row * tw + col) * spp + band] = data[[row, col, band]];
+                    }
                 }
             }
-        }
 
-        self.writer.write_block(&self.handle, tile_index, &padded)?;
-        self.written[tile_index] = true;
+            self.writer.write_block(&self.handle, tile_index, &padded)?;
+            self.written[tile_index] = true;
+        }
         Ok(())
     }
 
@@ -173,7 +191,11 @@ impl<T: WriteSample, W: Write + Seek> StreamingTileWriter<T, W> {
     pub fn finish(mut self) -> Result<W> {
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
-        let spp = self.bands as usize;
+        let spp = if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
+            1
+        } else {
+            self.bands as usize
+        };
         let empty_tile = vec![self.fill_value; tw * th * spp];
 
         for (i, written) in self.written.iter().enumerate() {

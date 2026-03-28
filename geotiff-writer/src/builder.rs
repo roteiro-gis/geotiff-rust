@@ -15,7 +15,7 @@ use tiff_core::{
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
 use crate::error::{Error, Result};
-use crate::sample::WriteSample;
+use crate::sample::{NumericSample, WriteSample};
 use crate::tile_writer::StreamingTileWriter;
 
 /// Builder for constructing GeoTIFF files with metadata.
@@ -340,7 +340,7 @@ impl GeoTiffBuilder {
     }
 
     /// Create a streaming tile writer for incremental writes.
-    pub fn tile_writer<T: WriteSample, W: Write + Seek>(
+    pub fn tile_writer<T: NumericSample, W: Write + Seek>(
         &self,
         sink: W,
     ) -> Result<StreamingTileWriter<T, W>> {
@@ -348,7 +348,7 @@ impl GeoTiffBuilder {
     }
 
     /// Create a streaming tile writer that writes to a file path.
-    pub fn tile_writer_file<T: WriteSample, P: AsRef<Path>>(
+    pub fn tile_writer_file<T: NumericSample, P: AsRef<Path>>(
         &self,
         path: P,
     ) -> Result<StreamingTileWriter<T, BufWriter<File>>> {

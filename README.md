@@ -77,6 +77,10 @@ CogBuilder::new(
 .write_2d("output.tif", data.view())?;
 ```
 
+For multi-band COG output, use `write_3d`/`write_3d_to` or `write_tile_3d`
+with `bands(...)` and optional
+`planar_configuration(PlanarConfiguration::Planar)`.
+
 ## Features
 
 **Read**
@@ -98,7 +102,7 @@ CogBuilder::new(
 - Chunky and separate planar multi-band layouts (RGB/RGBA) and all sample types (u8 through f64)
 - Streaming tile-by-tile writes for large rasters
 - GeoTIFF metadata: EPSG, pixel scale, origin, affine transforms, NoData
-- COG output with ghost IFD, overview generation (nearest-neighbor, average)
+- COG output with ghost IFD, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
 
 ## Feature flags
 

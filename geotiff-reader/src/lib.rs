@@ -59,6 +59,7 @@ pub struct GeoTiffFile {
     crs: CrsInfo,
     geokeys: GeoKeyDirectory,
     transform: Option<GeoTransform>,
+    base_ifd_index: usize,
     overview_ifds: Vec<usize>,
 }
 
@@ -92,15 +93,21 @@ impl GeoTiffFile {
     }
 
     pub(crate) fn from_tiff(tiff: TiffFile) -> Result<Self> {
-        let ifd = tiff.ifd(0)?;
-        let geokeys = parse_geokey_directory(ifd)?;
+        let metadata_ifd_index = find_metadata_ifd_index(tiff.ifds())?;
+        let metadata_ifd = tiff.ifd(metadata_ifd_index)?;
+        let geokeys = parse_geokey_directory(metadata_ifd)?;
         let crs = CrsInfo::from_geokeys(&geokeys);
         let epsg = crs.epsg();
-        let tiepoints = parse_tiepoints(ifd);
-        let pixel_scale =
-            parse_fixed_len_double_tag::<3>(ifd.tag(TAG_MODEL_PIXEL_SCALE).map(|tag| &tag.value));
+        let tiepoints = parse_tiepoints(metadata_ifd);
+        let pixel_scale = parse_fixed_len_double_tag::<3>(
+            metadata_ifd
+                .tag(TAG_MODEL_PIXEL_SCALE)
+                .map(|tag| &tag.value),
+        );
         let transformation = parse_fixed_len_double_tag::<16>(
-            ifd.tag(TAG_MODEL_TRANSFORMATION).map(|tag| &tag.value),
+            metadata_ifd
+                .tag(TAG_MODEL_TRANSFORMATION)
+                .map(|tag| &tag.value),
         );
         let transform = transformation
             .as_ref()
@@ -114,15 +121,21 @@ impl GeoTiffFile {
                     crs.raster_type_enum(),
                 ))
             });
+        let base_ifd_index = find_base_ifd_index(tiff.ifds(), metadata_ifd_index);
+        let base_ifd = tiff.ifd(base_ifd_index)?;
         let geo_bounds = transform
             .as_ref()
-            .map(|gt| gt.bounds(ifd.width(), ifd.height()));
+            .map(|gt| gt.bounds(base_ifd.width(), base_ifd.height()));
         let overview_ifds = tiff
             .ifds()
             .iter()
             .enumerate()
-            .skip(1)
-            .filter_map(|(index, candidate)| is_overview_ifd(ifd, candidate).then_some(index))
+            .filter_map(|(index, candidate)| {
+                (index != base_ifd_index
+                    && index != metadata_ifd_index
+                    && is_overview_ifd(base_ifd, candidate))
+                .then_some(index)
+            })
             .collect();
 
         let geo_metadata = GeoMetadata {
@@ -130,10 +143,10 @@ impl GeoTiffFile {
             tiepoints,
             pixel_scale,
             transformation,
-            nodata: parse_nodata(ifd),
-            band_count: ifd.samples_per_pixel() as u32,
-            width: ifd.width(),
-            height: ifd.height(),
+            nodata: parse_nodata(metadata_ifd),
+            band_count: base_ifd.samples_per_pixel() as u32,
+            width: base_ifd.width(),
+            height: base_ifd.height(),
             geo_bounds,
         };
 
@@ -143,6 +156,7 @@ impl GeoTiffFile {
             crs,
             geokeys,
             transform,
+            base_ifd_index,
             overview_ifds,
         })
     }
@@ -227,9 +241,16 @@ impl GeoTiffFile {
             .ok_or(Error::OverviewNotFound(overview_index))
     }
 
+    /// Returns the TIFF IFD index of the base-resolution image.
+    pub fn base_ifd_index(&self) -> usize {
+        self.base_ifd_index
+    }
+
     /// Decode the base-resolution raster into a typed ndarray.
     pub fn read_raster<T: TiffSample>(&self) -> Result<ArrayD<T>> {
-        self.tiff.read_image::<T>(0).map_err(Into::into)
+        self.tiff
+            .read_image::<T>(self.base_ifd_index)
+            .map_err(Into::into)
     }
 
     /// Decode a base-resolution pixel window into a typed ndarray.
@@ -241,7 +262,7 @@ impl GeoTiffFile {
         cols: usize,
     ) -> Result<ArrayD<T>> {
         self.tiff
-            .read_window::<T>(0, row_off, col_off, rows, cols)
+            .read_window::<T>(self.base_ifd_index, row_off, col_off, rows, cols)
             .map_err(Into::into)
     }
 
@@ -282,17 +303,42 @@ fn is_overview_ifd(base: &tiff_reader::Ifd, candidate: &tiff_reader::Ifd) -> boo
         return false;
     }
 
-    candidate
-        .tag(TAG_NEW_SUBFILE_TYPE)
+    has_reduced_resolution_flag(candidate)
+        || (candidate.tag(TAG_NEW_SUBFILE_TYPE).is_none() && candidate.tag(TAG_SUBFILE_TYPE).is_none())
+}
+
+#[cfg(feature = "local")]
+fn find_metadata_ifd_index(ifds: &[tiff_reader::Ifd]) -> Result<usize> {
+    ifds.iter()
+        .position(|ifd| ifd.tag(TAG_GEO_KEY_DIRECTORY).is_some())
+        .ok_or(Error::NotGeoTiff)
+}
+
+#[cfg(feature = "local")]
+fn find_base_ifd_index(ifds: &[tiff_reader::Ifd], metadata_ifd_index: usize) -> usize {
+    let metadata_ifd = &ifds[metadata_ifd_index];
+    if !has_reduced_resolution_flag(metadata_ifd) {
+        return metadata_ifd_index;
+    }
+
+    ifds.iter()
+        .enumerate()
+        .skip(metadata_ifd_index + 1)
+        .find_map(|(index, ifd)| (!has_reduced_resolution_flag(ifd)).then_some(index))
+        .unwrap_or(metadata_ifd_index)
+}
+
+#[cfg(feature = "local")]
+fn has_reduced_resolution_flag(ifd: &tiff_reader::Ifd) -> bool {
+    ifd.tag(TAG_NEW_SUBFILE_TYPE)
         .and_then(|tag| tag.value.as_u64())
         .map(|flags| flags & 0x1 != 0)
         .or_else(|| {
-            candidate
-                .tag(TAG_SUBFILE_TYPE)
+            ifd.tag(TAG_SUBFILE_TYPE)
                 .and_then(|tag| tag.value.as_u16())
                 .map(|value| value == 2)
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 #[cfg(feature = "local")]
@@ -555,6 +601,77 @@ mod tests {
         build_classic_tiff(&[base, overview])
     }
 
+    fn build_cog_like_geotiff_with_ghost_ifd() -> Vec<u8> {
+        let geo_keys = [1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326];
+        let ghost = TestIfdSpec {
+            image_data: vec![0u8],
+            entries: vec![
+                (254u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (256u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (
+                    33550u16,
+                    12u16,
+                    3u32,
+                    [2.0, 2.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    33922u16,
+                    12u16,
+                    6u32,
+                    [0.0, 0.0, 0.0, 100.0, 200.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    34735u16,
+                    3u16,
+                    geo_keys.len() as u32,
+                    geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
+                ),
+            ],
+        };
+        let overview = TestIfdSpec {
+            image_data: vec![50u8, 60, 70, 80],
+            entries: vec![
+                (254u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (256u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(4).to_vec()),
+            ],
+        };
+        let base = TestIfdSpec {
+            image_data: (1u8..=16).collect(),
+            entries: vec![
+                (256u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(16).to_vec()),
+            ],
+        };
+
+        build_classic_tiff(&[ghost, overview, base])
+    }
+
     #[test]
     fn parses_geotiff_metadata_and_reads_raster() {
         let file = GeoTiffFile::from_bytes(build_simple_geotiff(false)).unwrap();
@@ -613,6 +730,29 @@ mod tests {
         let (values, offset) = window.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![99]);
+    }
+
+    #[test]
+    fn prefers_non_ghost_base_ifd_for_cog_like_layouts() {
+        let file = GeoTiffFile::from_bytes(build_cog_like_geotiff_with_ghost_ifd()).unwrap();
+        assert_eq!(file.base_ifd_index(), 2);
+        assert_eq!(file.width(), 4);
+        assert_eq!(file.height(), 4);
+        assert_eq!(file.geo_bounds(), Some([100.0, 192.0, 108.0, 200.0]));
+        assert_eq!(file.overview_count(), 1);
+        assert_eq!(file.overview_ifd_index(0).unwrap(), 1);
+
+        let base = file.read_raster::<u8>().unwrap();
+        assert_eq!(base.shape(), &[4, 4]);
+        let (values, offset) = base.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, (1u8..=16).collect::<Vec<_>>());
+
+        let overview = file.read_overview::<u8>(0).unwrap();
+        assert_eq!(overview.shape(), &[2, 2]);
+        let (values, offset) = overview.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![50, 60, 70, 80]);
     }
 
     #[test]

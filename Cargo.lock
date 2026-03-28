@@ -388,9 +388,12 @@ dependencies = [
 name = "geotiff-writer"
 version = "0.2.4"
 dependencies = [
+ "criterion",
  "geotiff-core",
  "geotiff-reader",
  "ndarray",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tiff-core",
  "tiff-reader",

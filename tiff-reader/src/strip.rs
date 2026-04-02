@@ -251,15 +251,15 @@ fn read_strip_block(
     let jpeg_tables = ifd
         .tag(TAG_JPEG_TABLES)
         .and_then(|tag| tag.value.as_bytes());
-    let decoded = block_decode::decode_compressed_block(
+    let decoded = block_decode::decode_compressed_block(block_decode::BlockDecodeRequest {
         ifd,
-        *layout,
+        layout: *layout,
         byte_order,
-        &compressed,
-        spec.index,
+        compressed: &compressed,
+        index: spec.index,
         jpeg_tables,
-        layout.width,
-        spec.rows_in_strip,
-    )?;
+        block_width: layout.width,
+        block_height: spec.rows_in_strip,
+    })?;
     Ok(cache.insert(cache_key, decoded))
 }

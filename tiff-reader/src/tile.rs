@@ -281,15 +281,15 @@ fn read_tile_block(
     let jpeg_tables = ifd
         .tag(TAG_JPEG_TABLES)
         .and_then(|tag| tag.value.as_bytes());
-    let decoded = block_decode::decode_compressed_block(
+    let decoded = block_decode::decode_compressed_block(block_decode::BlockDecodeRequest {
         ifd,
-        *layout,
+        layout: *layout,
         byte_order,
-        &compressed,
-        spec.index,
+        compressed: &compressed,
+        index: spec.index,
         jpeg_tables,
-        spec.tile_width,
-        spec.tile_height,
-    )?;
+        block_width: spec.tile_width,
+        block_height: spec.tile_height,
+    })?;
     Ok(cache.insert(cache_key, decoded))
 }

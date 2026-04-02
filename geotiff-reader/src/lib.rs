@@ -304,7 +304,8 @@ fn is_overview_ifd(base: &tiff_reader::Ifd, candidate: &tiff_reader::Ifd) -> boo
     }
 
     has_reduced_resolution_flag(candidate)
-        || (candidate.tag(TAG_NEW_SUBFILE_TYPE).is_none() && candidate.tag(TAG_SUBFILE_TYPE).is_none())
+        || (candidate.tag(TAG_NEW_SUBFILE_TYPE).is_none()
+            && candidate.tag(TAG_SUBFILE_TYPE).is_none())
 }
 
 #[cfg(feature = "local")]
@@ -413,6 +414,39 @@ mod tests {
 
     fn le_f64(value: f64) -> [u8; 8] {
         value.to_le_bytes()
+    }
+
+    fn inline_short(value: u16) -> Vec<u8> {
+        let mut bytes = [0u8; 4];
+        bytes[..2].copy_from_slice(&le_u16(value));
+        bytes.to_vec()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_lerc2_header_v2(
+        width: u32,
+        height: u32,
+        valid_pixel_count: u32,
+        image_type: i32,
+        max_z_error: f64,
+        z_min: f64,
+        z_max: f64,
+        payload_len: usize,
+    ) -> Vec<u8> {
+        let blob_size = 58 + 4 + payload_len;
+        let mut bytes = Vec::with_capacity(blob_size);
+        bytes.extend_from_slice(b"Lerc2 ");
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&valid_pixel_count.to_le_bytes());
+        bytes.extend_from_slice(&8i32.to_le_bytes());
+        bytes.extend_from_slice(&(blob_size as i32).to_le_bytes());
+        bytes.extend_from_slice(&image_type.to_le_bytes());
+        bytes.extend_from_slice(&max_z_error.to_le_bytes());
+        bytes.extend_from_slice(&z_min.to_le_bytes());
+        bytes.extend_from_slice(&z_max.to_le_bytes());
+        bytes
     }
 
     fn build_classic_tiff(ifds: &[TestIfdSpec]) -> Vec<u8> {
@@ -524,6 +558,57 @@ mod tests {
                     geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
                 ),
                 (42113u16, 2u16, nodata.len() as u32, nodata),
+            ],
+        }])
+    }
+
+    fn build_simple_lerc_geotiff() -> Vec<u8> {
+        let tiepoints = [0.0, 0.0, 0.0, 100.0, 200.0, 0.0];
+        let scales = [2.0, 2.0, 0.0];
+        let geo_keys = vec![
+            1, 1, 0, 2, // header
+            1024, 0, 1, 2, // model type = Geographic
+            2048, 0, 1, 4326, // EPSG:4326
+        ];
+
+        let mut image_data = build_lerc2_header_v2(2, 2, 4, 6, 0.0, 1.0, 4.0, 1 + 16);
+        image_data.extend_from_slice(&0u32.to_le_bytes());
+        image_data.push(1);
+        for value in [1.0f32, 2.0, 3.0, 4.0] {
+            image_data.extend_from_slice(&value.to_le_bytes());
+        }
+        let image_len = image_data.len() as u32;
+
+        build_classic_tiff(&[TestIfdSpec {
+            image_data,
+            entries: vec![
+                (256u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (258u16, 3u16, 1u32, inline_short(32)),
+                (259u16, 3u16, 1u32, inline_short(34887)),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, inline_short(1)),
+                (278u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(image_len).to_vec()),
+                (339u16, 3u16, 1u32, inline_short(3)),
+                (
+                    33550u16,
+                    12u16,
+                    3u32,
+                    scales.iter().flat_map(|value| le_f64(*value)).collect(),
+                ),
+                (
+                    33922u16,
+                    12u16,
+                    6u32,
+                    tiepoints.iter().flat_map(|value| le_f64(*value)).collect(),
+                ),
+                (
+                    34735u16,
+                    3u16,
+                    geo_keys.len() as u32,
+                    geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
+                ),
             ],
         }])
     }
@@ -687,6 +772,20 @@ mod tests {
         let (values, offset) = raster.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn parses_geotiff_metadata_and_reads_lerc_raster() {
+        let file = GeoTiffFile::from_bytes(build_simple_lerc_geotiff()).unwrap();
+        assert_eq!(file.epsg(), Some(4326));
+        assert_eq!(file.width(), 2);
+        assert_eq!(file.height(), 2);
+
+        let raster = file.read_raster::<f32>().unwrap();
+        assert_eq!(raster.shape(), &[2, 2]);
+        let (values, offset) = raster.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

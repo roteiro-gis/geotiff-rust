@@ -88,7 +88,7 @@ with `bands(...)` and optional
 - Little-endian and big-endian byte orders
 - Strip and tile data access with windowed reads
 - Chunky and separate planar sample layouts
-- Compression: Deflate, LZW, PackBits, JPEG (optional), ZSTD (optional)
+- Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional)
 - Parallel decompression via Rayon
 - Typed raster reads into `ndarray::ArrayD` (u8 through f64)
 - GeoKey directory, CRS/EPSG, transforms, NoData, overview discovery
@@ -103,6 +103,13 @@ with `bands(...)` and optional
 - Streaming tile-by-tile writes for large rasters
 - GeoTIFF metadata: EPSG, pixel scale, origin, affine transforms, NoData
 - COG output with ghost IFD, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
+
+## Codec Priorities
+
+`LERC` read support is in place, including TIFF-side additional `DEFLATE` and
+`ZSTD` wrappers used by libtiff/GDAL. The next codec priority is still
+`JPEG`-in-TIFF write, with TIFF-side `LERC` write following once encode support
+exists in `lerc-rust`.
 
 ## Feature flags
 

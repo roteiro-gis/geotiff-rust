@@ -7,12 +7,38 @@ use crate::source::TiffSource;
 use crate::tag::{parse_tag_bigtiff, parse_tag_classic, Tag};
 
 pub use tiff_core::constants::{
-    TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH,
+    TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_LERC_PARAMETERS,
     TAG_PHOTOMETRIC_INTERPRETATION, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
     TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
     TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH,
 };
 pub use tiff_core::RasterLayout;
+
+/// TIFF-side LERC additional compression mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LercAdditionalCompression {
+    None,
+    Deflate,
+    Zstd,
+}
+
+impl LercAdditionalCompression {
+    fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::None),
+            1 => Some(Self::Deflate),
+            2 => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+}
+
+/// Parsed TIFF `LercParameters` tag payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LercParameters {
+    pub version: u32,
+    pub additional_compression: LercAdditionalCompression,
+}
 
 /// A parsed Image File Directory (IFD).
 #[derive(Debug, Clone)]
@@ -107,6 +133,34 @@ impl Ifd {
     /// Predictor. Defaults to no predictor (1).
     pub fn predictor(&self) -> u16 {
         self.tag_u16(TAG_PREDICTOR).unwrap_or(1)
+    }
+
+    /// TIFF-side LERC parameters, when present.
+    pub fn lerc_parameters(&self) -> Result<Option<LercParameters>> {
+        let Some(tag) = self.tag(TAG_LERC_PARAMETERS) else {
+            return Ok(None);
+        };
+        let values = tag.value.as_u32_slice().ok_or(Error::UnexpectedTagType {
+            tag: TAG_LERC_PARAMETERS,
+            expected: "LONG",
+            actual: tag.tag_type.to_code(),
+        })?;
+        if values.len() < 2 {
+            return Err(Error::InvalidTagValue {
+                tag: TAG_LERC_PARAMETERS,
+                reason: "LercParameters must contain at least version and additional compression"
+                    .into(),
+            });
+        }
+        let additional_compression =
+            LercAdditionalCompression::from_code(values[1]).ok_or(Error::InvalidTagValue {
+                tag: TAG_LERC_PARAMETERS,
+                reason: format!("unsupported LERC additional compression code {}", values[1]),
+            })?;
+        Ok(Some(LercParameters {
+            version: values[0],
+            additional_compression,
+        }))
     }
 
     /// Strip offsets as normalized `u64`s.
@@ -361,8 +415,8 @@ fn parse_tags_bigtiff(
 #[cfg(test)]
 mod tests {
     use super::{
-        Ifd, RasterLayout, TAG_BITS_PER_SAMPLE, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH,
-        TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
+        Ifd, LercAdditionalCompression, RasterLayout, TAG_BITS_PER_SAMPLE, TAG_IMAGE_LENGTH,
+        TAG_IMAGE_WIDTH, TAG_LERC_PARAMETERS, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
     };
     use crate::tag::{Tag, TagType, TagValue};
 
@@ -467,5 +521,22 @@ mod tests {
         assert_eq!(layout.pixel_stride_bytes(), 4);
         assert_eq!(layout.row_bytes(), 16);
         assert_eq!(layout.sample_plane_row_bytes(), 8);
+    }
+
+    #[test]
+    fn parses_lerc_parameters() {
+        let ifd = make_ifd(vec![Tag {
+            code: TAG_LERC_PARAMETERS,
+            tag_type: TagType::Long,
+            count: 2,
+            value: TagValue::Long(vec![4, 2]),
+        }]);
+
+        let params = ifd.lerc_parameters().unwrap().unwrap();
+        assert_eq!(params.version, 4);
+        assert_eq!(
+            params.additional_compression,
+            LercAdditionalCompression::Zstd
+        );
     }
 }

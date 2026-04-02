@@ -22,6 +22,7 @@
 //! let pixels: ndarray::ArrayD<u16> = file.read_image(0).unwrap();
 //! ```
 
+mod block_decode;
 pub mod cache;
 pub mod error;
 pub mod filters;
@@ -439,6 +440,7 @@ mod tests {
         TiffFile, GDAL_STRUCTURAL_METADATA_PREFIX,
     };
     use crate::source::{BytesSource, TiffSource};
+    use flate2::{write::ZlibEncoder, Compression as FlateCompression};
 
     fn le_u16(value: u16) -> [u8; 2] {
         value.to_le_bytes()
@@ -446,6 +448,12 @@ mod tests {
 
     fn le_u32(value: u32) -> [u8; 4] {
         value.to_le_bytes()
+    }
+
+    fn inline_short(value: u16) -> Vec<u8> {
+        let mut bytes = [0u8; 4];
+        bytes[..2].copy_from_slice(&le_u16(value));
+        bytes.to_vec()
     }
 
     fn build_stripped_tiff(
@@ -503,6 +511,149 @@ mod tests {
             data.extend_from_slice(&value);
         }
         data
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_lerc2_header_v2(
+        width: u32,
+        height: u32,
+        valid_pixel_count: u32,
+        image_type: i32,
+        max_z_error: f64,
+        z_min: f64,
+        z_max: f64,
+        payload_len: usize,
+    ) -> Vec<u8> {
+        let blob_size = 58 + 4 + payload_len;
+        let mut bytes = Vec::with_capacity(blob_size);
+        bytes.extend_from_slice(b"Lerc2 ");
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&valid_pixel_count.to_le_bytes());
+        bytes.extend_from_slice(&8i32.to_le_bytes());
+        bytes.extend_from_slice(&(blob_size as i32).to_le_bytes());
+        bytes.extend_from_slice(&image_type.to_le_bytes());
+        bytes.extend_from_slice(&max_z_error.to_le_bytes());
+        bytes.extend_from_slice(&z_min.to_le_bytes());
+        bytes.extend_from_slice(&z_max.to_le_bytes());
+        bytes
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_lerc2_header_v4(
+        width: u32,
+        height: u32,
+        depth: u32,
+        valid_pixel_count: u32,
+        image_type: i32,
+        max_z_error: f64,
+        z_min: f64,
+        z_max: f64,
+        payload_len: usize,
+    ) -> Vec<u8> {
+        let blob_size = 66 + 4 + payload_len;
+        let mut bytes = Vec::with_capacity(blob_size);
+        bytes.extend_from_slice(b"Lerc2 ");
+        bytes.extend_from_slice(&4i32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&depth.to_le_bytes());
+        bytes.extend_from_slice(&valid_pixel_count.to_le_bytes());
+        bytes.extend_from_slice(&8i32.to_le_bytes());
+        bytes.extend_from_slice(&(blob_size as i32).to_le_bytes());
+        bytes.extend_from_slice(&image_type.to_le_bytes());
+        bytes.extend_from_slice(&max_z_error.to_le_bytes());
+        bytes.extend_from_slice(&z_min.to_le_bytes());
+        bytes.extend_from_slice(&z_max.to_le_bytes());
+        bytes
+    }
+
+    fn finalize_lerc2_v4_with_checksum(mut bytes: Vec<u8>) -> Vec<u8> {
+        let blob_size = bytes.len() as i32;
+        bytes[34..38].copy_from_slice(&blob_size.to_le_bytes());
+        let checksum = fletcher32(&bytes[14..blob_size as usize]);
+        bytes[10..14].copy_from_slice(&checksum.to_le_bytes());
+        bytes
+    }
+
+    fn fletcher32(bytes: &[u8]) -> u32 {
+        let mut sum1 = 0xffffu32;
+        let mut sum2 = 0xffffu32;
+        let mut words = bytes.len() / 2;
+        let mut index = 0usize;
+
+        while words > 0 {
+            let chunk = words.min(359);
+            words -= chunk;
+            for _ in 0..chunk {
+                sum1 += (bytes[index] as u32) << 8;
+                index += 1;
+                sum2 += sum1 + bytes[index] as u32;
+                sum1 += bytes[index] as u32;
+                index += 1;
+            }
+            sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+            sum2 = (sum2 & 0xffff) + (sum2 >> 16);
+        }
+
+        if bytes.len() & 1 != 0 {
+            sum1 += (bytes[index] as u32) << 8;
+            sum2 += sum1;
+        }
+
+        sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+        sum2 = (sum2 & 0xffff) + (sum2 >> 16);
+        (sum2 << 16) | (sum1 & 0xffff)
+    }
+
+    fn encode_mask_rle(mask: &[u8]) -> Vec<u8> {
+        let bitset_len = mask.len().div_ceil(8);
+        let mut bitset = vec![0u8; bitset_len];
+        for (index, &value) in mask.iter().enumerate() {
+            if value != 0 {
+                bitset[index >> 3] |= 1 << (7 - (index & 7));
+            }
+        }
+
+        let mut encoded = Vec::with_capacity(bitset_len + 4);
+        encoded.extend_from_slice(&(bitset_len as i16).to_le_bytes());
+        encoded.extend_from_slice(&bitset);
+        encoded.extend_from_slice(&i16::MIN.to_le_bytes());
+        encoded
+    }
+
+    fn build_lerc_tiff(
+        width: u32,
+        height: u32,
+        image_data: &[u8],
+        bits_per_sample: u16,
+        sample_format: u16,
+        samples_per_pixel: u16,
+        lerc_parameters: Option<[u32; 2]>,
+    ) -> Vec<u8> {
+        let mut overrides = vec![
+            (258u16, 3u16, 1u32, inline_short(bits_per_sample)),
+            (259u16, 3u16, 1u32, inline_short(34887)),
+            (277u16, 3u16, 1u32, inline_short(samples_per_pixel)),
+            (279u16, 4u16, 1u32, le_u32(image_data.len() as u32).to_vec()),
+        ];
+        if sample_format != 1 {
+            overrides.push((339u16, 3u16, 1u32, inline_short(sample_format)));
+        }
+        if let Some([version, additional_compression]) = lerc_parameters {
+            overrides.push((
+                50674u16,
+                4u16,
+                2u32,
+                [version, additional_compression]
+                    .into_iter()
+                    .flat_map(le_u32)
+                    .collect(),
+            ));
+        }
+        build_stripped_tiff(width, height, image_data, &overrides)
     }
 
     fn build_tiled_tiff(
@@ -745,6 +896,132 @@ mod tests {
         let (values, offset) = image.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn reads_lerc_f32_strip() {
+        let mut blob = build_lerc2_header_v2(2, 2, 4, 6, 0.0, 1.0, 4.0, 1 + 16);
+        blob.extend_from_slice(&0u32.to_le_bytes());
+        blob.push(1);
+        for value in [1.0f32, 2.0, 3.0, 4.0] {
+            blob.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let data = build_lerc_tiff(2, 2, &blob, 32, 3, 1, None);
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<f32>(0).unwrap();
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn reads_lerc_masked_f32_strip_as_nan() {
+        let mask = [1u8, 0, 1, 1];
+        let encoded_mask = encode_mask_rle(&mask);
+        let mut blob =
+            build_lerc2_header_v2(2, 2, 3, 6, 0.0, 1.0, 4.0, encoded_mask.len() + 1 + 12);
+        blob.extend_from_slice(&(encoded_mask.len() as u32).to_le_bytes());
+        blob.extend_from_slice(&encoded_mask);
+        blob.push(1);
+        for value in [1.0f32, 3.0, 4.0] {
+            blob.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let data = build_lerc_tiff(2, 2, &blob, 32, 3, 1, None);
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<f32>(0).unwrap();
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values[0], 1.0);
+        assert!(values[1].is_nan());
+        assert_eq!(values[2], 3.0);
+        assert_eq!(values[3], 4.0);
+    }
+
+    #[test]
+    fn reads_lerc_chunky_rgb_band_set_strip() {
+        let mut red = build_lerc2_header_v2(2, 1, 2, 1, 0.0, 1.0, 1.0, 0);
+        red.extend_from_slice(&0u32.to_le_bytes());
+        let mut green = build_lerc2_header_v2(2, 1, 2, 1, 0.0, 2.0, 2.0, 0);
+        green.extend_from_slice(&0u32.to_le_bytes());
+        let mut blue = build_lerc2_header_v2(2, 1, 2, 1, 0.0, 3.0, 3.0, 0);
+        blue.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut blob = red;
+        blob.extend_from_slice(&green);
+        blob.extend_from_slice(&blue);
+
+        let data = build_lerc_tiff(2, 1, &blob, 8, 1, 3, None);
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<u8>(0).unwrap();
+        assert_eq!(image.shape(), &[1, 2, 3]);
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![1, 2, 3, 1, 2, 3]);
+    }
+
+    #[test]
+    fn reads_lerc_chunky_rgb_depth_blob_strip() {
+        let mut blob = build_lerc2_header_v4(2, 1, 3, 2, 1, 0.0, 1.0, 6.0, 6 + 6 + 1 + 6);
+        blob.extend_from_slice(&0u32.to_le_bytes());
+        for value in [1u8, 2, 3] {
+            blob.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [4u8, 5, 6] {
+            blob.extend_from_slice(&value.to_le_bytes());
+        }
+        blob.push(1);
+        blob.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
+        let blob = finalize_lerc2_v4_with_checksum(blob);
+
+        let data = build_lerc_tiff(2, 1, &blob, 8, 1, 3, Some([4, 0]));
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<u8>(0).unwrap();
+        assert_eq!(image.shape(), &[1, 2, 3]);
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn reads_lerc_deflate_f32_strip() {
+        let mut blob = build_lerc2_header_v2(2, 2, 4, 6, 0.0, 1.0, 4.0, 1 + 16);
+        blob.extend_from_slice(&0u32.to_le_bytes());
+        blob.push(1);
+        for value in [1.0f32, 2.0, 3.0, 4.0] {
+            blob.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), FlateCompression::default());
+        std::io::Write::write_all(&mut encoder, &blob).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let data = build_lerc_tiff(2, 2, &compressed, 32, 3, 1, Some([2, 1]));
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<f32>(0).unwrap();
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn reads_lerc_zstd_f32_strip() {
+        let mut blob = build_lerc2_header_v2(2, 2, 4, 6, 0.0, 1.0, 4.0, 1 + 16);
+        blob.extend_from_slice(&0u32.to_le_bytes());
+        blob.push(1);
+        for value in [1.0f32, 2.0, 3.0, 4.0] {
+            blob.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let compressed = zstd::stream::encode_all(std::io::Cursor::new(blob), 0).unwrap();
+        let data = build_lerc_tiff(2, 2, &compressed, 32, 3, 1, Some([2, 2]));
+        let file = TiffFile::from_bytes(data).unwrap();
+        let image = file.read_image::<f32>(0).unwrap();
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

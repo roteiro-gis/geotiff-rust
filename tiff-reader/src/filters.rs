@@ -23,6 +23,7 @@ pub fn decompress(
         Some(Compression::Deflate | Compression::DeflateOld) => decompress_deflate(data, index),
         Some(Compression::Lzw) => decompress_lzw(data, index),
         Some(Compression::PackBits) => decompress_packbits(data, index),
+        Some(Compression::Lerc) => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "jpeg")]
         Some(Compression::OldJpeg) => Err(Error::UnsupportedCompression(compression)),
         #[cfg(feature = "jpeg")]

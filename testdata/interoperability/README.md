@@ -16,6 +16,7 @@ The checked-in corpus is intentionally small and targeted. It covers the decoder
 - BigTIFF parsing
 - signed 8-bit samples
 - JPEG-in-TIFF compression 7
+- LERC, LERC+DEFLATE, and LERC+ZSTD TIFF decode
 - ZSTD compression
 - COG-style local layout suitable for HTTP range tests
 

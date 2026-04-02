@@ -290,4 +290,12 @@ impl TagValue {
             _ => None,
         }
     }
+
+    /// Extract a LONG array without cloning when possible.
+    pub fn as_u32_slice(&self) -> Option<&[u32]> {
+        match self {
+            Self::Long(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
 }

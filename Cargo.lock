@@ -781,6 +781,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
+name = "lerc-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc7df3fad506e021661f335523c67662a231d171fefb2cd72cebabeca38323fe"
+dependencies = [
+ "ndarray",
+]
+
+[[package]]
+name = "lerc-reader"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "904173fc73e9575ae9037a9712743f8692737e087ce803cd6302f20864a70cf9"
+dependencies = [
+ "lerc-core",
+ "ndarray",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1544,6 +1563,8 @@ dependencies = [
  "criterion",
  "flate2",
  "jpeg-decoder",
+ "lerc-core",
+ "lerc-reader",
  "lru",
  "memmap2",
  "ndarray",

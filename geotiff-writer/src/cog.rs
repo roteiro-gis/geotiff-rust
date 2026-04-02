@@ -75,18 +75,19 @@ pub struct CogBuilder {
     resampling: Resampling,
 }
 
-fn wrap_gdal_block(bytes: &[u8], byte_order: ByteOrder) -> Vec<u8> {
-    let mut wrapped = Vec::with_capacity(bytes.len() + 8);
-    let block_len = u32::try_from(bytes.len()).expect("COG block payload exceeds u32::MAX");
-    wrapped.extend_from_slice(&byte_order.write_u32(block_len));
-    wrapped.extend_from_slice(bytes);
-    let trailer = if bytes.len() >= 4 {
-        &bytes[bytes.len() - 4..]
+fn gdal_block_leader(payload_len: usize, byte_order: ByteOrder) -> Vec<u8> {
+    let mut leader = Vec::with_capacity(4);
+    let block_len = u32::try_from(payload_len).expect("COG block payload exceeds u32::MAX");
+    leader.extend_from_slice(&byte_order.write_u32(block_len));
+    leader
+}
+
+fn gdal_block_trailer(bytes: &[u8]) -> Vec<u8> {
+    if bytes.len() >= 4 {
+        bytes[bytes.len() - 4..].to_vec()
     } else {
-        bytes
-    };
-    wrapped.extend_from_slice(trailer);
-    wrapped
+        bytes.to_vec()
+    }
 }
 
 fn write_cog_block<T: NumericSample, W: Write + Seek>(
@@ -105,8 +106,9 @@ fn write_cog_block<T: NumericSample, W: Write + Seek>(
         encoding.row_width_pixels,
         block_index,
     )?;
-    let wrapped = wrap_gdal_block(&compressed, ByteOrder::LittleEndian);
-    writer.write_block_raw(handle, block_index, &wrapped)?;
+    let leader = gdal_block_leader(compressed.len(), ByteOrder::LittleEndian);
+    let trailer = gdal_block_trailer(&compressed);
+    writer.write_block_raw_segmented(handle, block_index, &leader, &compressed, &trailer)?;
     Ok(())
 }
 
@@ -378,10 +380,9 @@ impl CogBuilder {
 
 /// Streaming COG tile writer.
 ///
-/// Base tiles are written incrementally. Overview tiles are generated during
-/// `finish()`, and the file-level COG ghost area is handled automatically.
-/// During `finish()`, overview rasters are
-/// generated from the accumulated base tile data.
+/// Base tiles are accumulated in memory. Overview and base blocks are emitted
+/// during `finish()` in canonical COG order, and the file-level COG ghost area
+/// is handled automatically.
 pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     writer: TiffWriter<W>,
     overview_handles: Vec<(ImageHandle, u32, u32)>, // (handle, width, height)
@@ -397,10 +398,8 @@ pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     planar_configuration: tiff_core::PlanarConfiguration,
     compression: Compression,
     predictor: Predictor,
-    written: Vec<bool>,
     overview_levels: Vec<u32>,
     resampling: Resampling,
-    fill_value: T,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -410,7 +409,6 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let th = cog.inner.tile_height.unwrap_or(256);
         let tiles_across = (cog.inner.width as usize).div_ceil(tw as usize);
         let tiles_down = (cog.inner.height as usize).div_ceil(th as usize);
-        let num_base_tiles = tiles_across * tiles_down;
         let fill_value = T::zero();
 
         let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
@@ -447,15 +445,6 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             let handle = writer.add_image(ovr_ib)?;
             overview_handles.push((handle, ovr_w, ovr_h));
         }
-        let num_blocks = if matches!(
-            cog.inner.planar_configuration,
-            tiff_core::PlanarConfiguration::Planar
-        ) {
-            num_base_tiles * cog.inner.bands as usize
-        } else {
-            num_base_tiles
-        };
-
         Ok(Self {
             writer,
             overview_handles,
@@ -476,10 +465,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             planar_configuration: cog.inner.planar_configuration,
             compression: cog.inner.compression,
             predictor: cog.inner.predictor,
-            written: vec![false; num_blocks],
             overview_levels: sorted_levels,
             resampling: cog.resampling,
-            fill_value,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -509,18 +496,13 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             });
         }
 
-        let tile_index = tile_row * self.tiles_across as usize + tile_col;
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
         let (data_h, data_w) = data.dim();
 
-        // Pad to full tile
-        let mut padded = vec![self.fill_value; tw * th];
         for row in 0..data_h.min(th) {
             for col in 0..data_w.min(tw) {
                 let value = data[[row, col]];
-                padded[row * tw + col] = value;
-
                 let dst_row = y_off + row;
                 let dst_col = x_off + col;
                 if dst_row < self.height as usize && dst_col < self.width as usize {
@@ -530,19 +512,6 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             }
         }
 
-        write_cog_block(
-            &mut self.writer,
-            &self.base_handle,
-            tile_index,
-            &padded,
-            CogBlockEncoding {
-                compression: self.compression,
-                predictor: self.predictor,
-                samples_per_pixel: 1,
-                row_width_pixels: tw,
-            },
-        )?;
-        self.written[tile_index] = true;
         Ok(())
     }
 
@@ -566,10 +535,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             });
         }
 
-        let tile_index = tile_row * self.tiles_across as usize + tile_col;
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
-        let tiles_per_plane = self.tiles_across as usize * self.tiles_down as usize;
         let (data_h, data_w, data_b) = data.dim();
         let bands = self.bands as usize;
         if data_b != bands {
@@ -593,57 +560,6 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             }
         }
 
-        if matches!(
-            self.planar_configuration,
-            tiff_core::PlanarConfiguration::Planar
-        ) {
-            for band in 0..bands {
-                let mut padded = vec![self.fill_value; tw * th];
-                for row in 0..data_h.min(th) {
-                    for col in 0..data_w.min(tw) {
-                        padded[row * tw + col] = data[[row, col, band]];
-                    }
-                }
-                let block_index = band * tiles_per_plane + tile_index;
-                write_cog_block(
-                    &mut self.writer,
-                    &self.base_handle,
-                    block_index,
-                    &padded,
-                    CogBlockEncoding {
-                        compression: self.compression,
-                        predictor: self.predictor,
-                        samples_per_pixel: 1,
-                        row_width_pixels: tw,
-                    },
-                )?;
-                self.written[block_index] = true;
-            }
-        } else {
-            let mut padded = vec![self.fill_value; tw * th * bands];
-            for row in 0..data_h.min(th) {
-                for col in 0..data_w.min(tw) {
-                    for band in 0..bands {
-                        padded[(row * tw + col) * bands + band] = data[[row, col, band]];
-                    }
-                }
-            }
-
-            write_cog_block(
-                &mut self.writer,
-                &self.base_handle,
-                tile_index,
-                &padded,
-                CogBlockEncoding {
-                    compression: self.compression,
-                    predictor: self.predictor,
-                    samples_per_pixel: self.bands as u16,
-                    row_width_pixels: tw,
-                },
-            )?;
-            self.written[tile_index] = true;
-        }
-
         Ok(())
     }
 
@@ -654,47 +570,6 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let full_w = self.width as usize;
         let full_h = self.height as usize;
         let bands = self.bands as usize;
-
-        if matches!(
-            self.planar_configuration,
-            tiff_core::PlanarConfiguration::Planar
-        ) {
-            let empty_tile = vec![self.fill_value; tw * th];
-            for (index, written) in self.written.iter().enumerate() {
-                if !*written {
-                    write_cog_block(
-                        &mut self.writer,
-                        &self.base_handle,
-                        index,
-                        &empty_tile,
-                        CogBlockEncoding {
-                            compression: self.compression,
-                            predictor: self.predictor,
-                            samples_per_pixel: 1,
-                            row_width_pixels: tw,
-                        },
-                    )?;
-                }
-            }
-        } else {
-            let empty_tile = vec![self.fill_value; tw * th * bands];
-            for (index, written) in self.written.iter().enumerate() {
-                if !*written {
-                    write_cog_block(
-                        &mut self.writer,
-                        &self.base_handle,
-                        index,
-                        &empty_tile,
-                        CogBlockEncoding {
-                            compression: self.compression,
-                            predictor: self.predictor,
-                            samples_per_pixel: self.bands as u16,
-                            row_width_pixels: tw,
-                        },
-                    )?;
-                }
-            }
-        }
 
         let full = Array3::from_shape_vec((full_h, full_w, bands), self.base_pixels)
             .map_err(|err| Error::Other(format!("invalid streaming COG raster shape: {err}")))?;
@@ -723,6 +598,19 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                 },
             )?;
         }
+
+        write_tiled_data_3d::<T, W>(
+            &mut self.writer,
+            &self.base_handle,
+            full.view(),
+            TileWritePlan {
+                tile_width: tw,
+                tile_height: th,
+                planar_configuration: self.planar_configuration,
+                compression: self.compression,
+                predictor: self.predictor,
+            },
+        )?;
 
         Ok(self.writer.finish()?)
     }
@@ -864,6 +752,15 @@ mod tests {
     use ndarray::{Array2, Array3};
     use std::io::Cursor;
     use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration};
+
+    fn assert_strictly_increasing_offsets(offsets: &[u64], context: &str) {
+        for window in offsets.windows(2) {
+            assert!(
+                window[0] < window[1],
+                "{context}: offsets are not strictly increasing: {offsets:?}"
+            );
+        }
+    }
 
     #[test]
     fn cog_write_with_overviews() {
@@ -1217,6 +1114,14 @@ mod tests {
             .unwrap();
         assert_eq!(tiff.ifd(base_idx).unwrap().planar_configuration(), 2);
         assert_eq!(tiff.ifd(overview_idx).unwrap().planar_configuration(), 2);
+        assert_strictly_increasing_offsets(
+            &tiff.ifd(base_idx).unwrap().tile_offsets().unwrap(),
+            "planar COG base image",
+        );
+        assert_strictly_increasing_offsets(
+            &tiff.ifd(overview_idx).unwrap().tile_offsets().unwrap(),
+            "planar COG overview",
+        );
 
         let base = tiff.read_image::<u8>(base_idx).unwrap();
         assert_eq!(base.shape(), &[32, 32, 3]);
@@ -1274,6 +1179,15 @@ mod tests {
         let oneshot = geotiff_reader::GeoTiffFile::from_bytes(oneshot_buf.into_inner()).unwrap();
         let streaming =
             geotiff_reader::GeoTiffFile::from_bytes(streaming_buf.into_inner()).unwrap();
+
+        assert_strictly_increasing_offsets(
+            &oneshot.tiff().ifd(0).unwrap().tile_offsets().unwrap(),
+            "oneshot planar COG base image",
+        );
+        assert_strictly_increasing_offsets(
+            &streaming.tiff().ifd(0).unwrap().tile_offsets().unwrap(),
+            "streaming planar COG base image",
+        );
 
         let oneshot_base = oneshot.read_raster::<u8>().unwrap();
         let streaming_base = streaming.read_raster::<u8>().unwrap();

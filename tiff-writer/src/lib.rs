@@ -237,6 +237,28 @@ mod tests {
     }
 
     #[test]
+    fn writes_header_prefix_before_first_ifd() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        writer
+            .write_header_prefix(b"GDAL_STRUCTURAL_METADATA")
+            .unwrap();
+
+        let image = ImageBuilder::new(2, 2).sample_type::<u8>().strips(2);
+        let handle = writer.add_image(image).unwrap();
+        writer.write_block(&handle, 0, &[1u8, 2, 3, 4]).unwrap();
+        writer.finish().unwrap();
+
+        let data = buf.into_inner();
+        assert_eq!(&data[8..32], b"GDAL_STRUCTURAL_METADATA");
+
+        let file = tiff_reader::TiffFile::from_bytes(data).unwrap();
+        let img = file.read_image::<u8>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
     fn write_and_read_horizontal_predictor_u16() {
         let mut buf = Cursor::new(Vec::new());
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();

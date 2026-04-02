@@ -16,7 +16,7 @@ use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
 use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
-use tiff_core::ByteOrder;
+use tiff_core::{ByteOrder, Compression, Predictor};
 use tiff_writer::{ImageBuilder, ImageHandle, TiffVariant, TiffWriter, WriteOptions};
 
 use crate::builder::GeoTiffBuilder;
@@ -30,15 +30,38 @@ pub enum Resampling {
     Average,
 }
 
-/// GDAL structural metadata string for COG files.
-#[allow(dead_code)]
-const GDAL_STRUCTURAL_METADATA: &str = "\
-GDAL_STRUCTURAL_METADATA_SIZE=000140 bytes\n\
+const GDAL_STRUCTURAL_METADATA_PAYLOAD: &str = "\
 LAYOUT=IFDS_BEFORE_DATA\n\
 BLOCK_ORDER=ROW_MAJOR\n\
 BLOCK_LEADER=SIZE_AS_UINT4\n\
 BLOCK_TRAILER=LAST_4_BYTES_REPEATED\n\
 KNOWN_INCOMPATIBLE_EDITION=NO\n";
+
+fn gdal_structural_metadata_bytes() -> Vec<u8> {
+    format!(
+        "GDAL_STRUCTURAL_METADATA_SIZE={:06} bytes\n{}",
+        GDAL_STRUCTURAL_METADATA_PAYLOAD.len(),
+        GDAL_STRUCTURAL_METADATA_PAYLOAD
+    )
+    .into_bytes()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CogBlockEncoding {
+    compression: Compression,
+    predictor: Predictor,
+    samples_per_pixel: u16,
+    row_width_pixels: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TileWritePlan {
+    tile_width: usize,
+    tile_height: usize,
+    planar_configuration: tiff_core::PlanarConfiguration,
+    compression: Compression,
+    predictor: Predictor,
+}
 
 /// Configuration for COG writing.
 #[derive(Debug, Clone)]
@@ -46,6 +69,41 @@ pub struct CogBuilder {
     inner: GeoTiffBuilder,
     overview_levels: Vec<u32>,
     resampling: Resampling,
+}
+
+fn wrap_gdal_block(bytes: &[u8], byte_order: ByteOrder) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(bytes.len() + 8);
+    let block_len = u32::try_from(bytes.len()).expect("COG block payload exceeds u32::MAX");
+    wrapped.extend_from_slice(&byte_order.write_u32(block_len));
+    wrapped.extend_from_slice(bytes);
+    let trailer = if bytes.len() >= 4 {
+        &bytes[bytes.len() - 4..]
+    } else {
+        bytes
+    };
+    wrapped.extend_from_slice(trailer);
+    wrapped
+}
+
+fn write_cog_block<T: NumericSample, W: Write + Seek>(
+    writer: &mut TiffWriter<W>,
+    handle: &ImageHandle,
+    block_index: usize,
+    samples: &[T],
+    encoding: CogBlockEncoding,
+) -> Result<()> {
+    let compressed = tiff_writer::compress::compress_block(
+        samples,
+        ByteOrder::LittleEndian,
+        encoding.compression,
+        encoding.predictor,
+        encoding.samples_per_pixel,
+        encoding.row_width_pixels,
+        block_index,
+    )?;
+    let wrapped = wrap_gdal_block(&compressed, ByteOrder::LittleEndian);
+    writer.write_block_raw(handle, block_index, &wrapped)?;
+    Ok(())
 }
 
 impl CogBuilder {
@@ -167,13 +225,7 @@ impl CogBuilder {
                 variant: TiffVariant::Classic,
             },
         )?;
-
-        // Write GDAL structural metadata as padding after header
-        // (The TiffWriter already wrote the 8-byte header. We write the metadata
-        // block between header and first IFD. The IFDs will follow immediately.)
-        // NOTE: We can't insert raw bytes via TiffWriter, so we embed the GDAL
-        // structural metadata as part of the ghost IFD's extra tags instead.
-        // This is a practical compromise — the IFDs are still before data.
+        writer.write_header_prefix(&gdal_structural_metadata_bytes())?;
 
         // Ghost IFD (1x1, NewSubfileType=1) — carries GeoTIFF metadata so
         // readers that inspect IFD 0 can find the CRS/transform.
@@ -221,7 +273,18 @@ impl CogBuilder {
 
         // Ghost tile (1x1 padded to 16x16)
         let ghost_tile = vec![0u8; 16 * 16];
-        writer.write_block(&ghost_handle, 0, &ghost_tile)?;
+        write_cog_block(
+            &mut writer,
+            &ghost_handle,
+            0,
+            &ghost_tile,
+            CogBlockEncoding {
+                compression: Compression::None,
+                predictor: Predictor::None,
+                samples_per_pixel: 1,
+                row_width_pixels: 16,
+            },
+        )?;
 
         // Overview tiles (smallest overview first)
         for (idx, &level) in sorted_levels.iter().enumerate() {
@@ -237,9 +300,13 @@ impl CogBuilder {
                 &mut writer,
                 handle,
                 overview.view(),
-                tw,
-                th,
-                self.inner.planar_configuration,
+                TileWritePlan {
+                    tile_width: tw,
+                    tile_height: th,
+                    planar_configuration: self.inner.planar_configuration,
+                    compression: self.inner.compression,
+                    predictor: self.inner.predictor,
+                },
             )?;
         }
 
@@ -248,9 +315,13 @@ impl CogBuilder {
             &mut writer,
             &base_handle,
             data,
-            tw,
-            th,
-            self.inner.planar_configuration,
+            TileWritePlan {
+                tile_width: tw,
+                tile_height: th,
+                planar_configuration: self.inner.planar_configuration,
+                compression: self.inner.compression,
+                predictor: self.inner.predictor,
+            },
         )?;
 
         writer.finish()?;
@@ -341,6 +412,8 @@ pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     height: u32,
     bands: u32,
     planar_configuration: tiff_core::PlanarConfiguration,
+    compression: Compression,
+    predictor: Predictor,
     written: Vec<bool>,
     overview_levels: Vec<u32>,
     resampling: Resampling,
@@ -358,6 +431,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let fill_value = T::zero();
 
         let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
+        writer.write_header_prefix(&gdal_structural_metadata_bytes())?;
 
         // Ghost IFD — carries GeoTIFF metadata
         let mut ghost_ib = ImageBuilder::new(1, 1)
@@ -410,7 +484,18 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
 
         // Write ghost tile immediately
         let ghost_tile = vec![0u8; 16 * 16];
-        writer.write_block(&ghost_handle, 0, &ghost_tile)?;
+        write_cog_block(
+            &mut writer,
+            &ghost_handle,
+            0,
+            &ghost_tile,
+            CogBlockEncoding {
+                compression: Compression::None,
+                predictor: Predictor::None,
+                samples_per_pixel: 1,
+                row_width_pixels: 16,
+            },
+        )?;
 
         Ok(Self {
             writer,
@@ -431,6 +516,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             height: cog.inner.height,
             bands: cog.inner.bands,
             planar_configuration: cog.inner.planar_configuration,
+            compression: cog.inner.compression,
+            predictor: cog.inner.predictor,
             written: vec![false; num_blocks],
             overview_levels: sorted_levels,
             resampling: cog.resampling,
@@ -485,8 +572,18 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             }
         }
 
-        self.writer
-            .write_block(&self.base_handle, tile_index, &padded)?;
+        write_cog_block(
+            &mut self.writer,
+            &self.base_handle,
+            tile_index,
+            &padded,
+            CogBlockEncoding {
+                compression: self.compression,
+                predictor: self.predictor,
+                samples_per_pixel: 1,
+                row_width_pixels: tw,
+            },
+        )?;
         self.written[tile_index] = true;
         Ok(())
     }
@@ -550,8 +647,18 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                     }
                 }
                 let block_index = band * tiles_per_plane + tile_index;
-                self.writer
-                    .write_block(&self.base_handle, block_index, &padded)?;
+                write_cog_block(
+                    &mut self.writer,
+                    &self.base_handle,
+                    block_index,
+                    &padded,
+                    CogBlockEncoding {
+                        compression: self.compression,
+                        predictor: self.predictor,
+                        samples_per_pixel: 1,
+                        row_width_pixels: tw,
+                    },
+                )?;
                 self.written[block_index] = true;
             }
         } else {
@@ -564,8 +671,18 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                 }
             }
 
-            self.writer
-                .write_block(&self.base_handle, tile_index, &padded)?;
+            write_cog_block(
+                &mut self.writer,
+                &self.base_handle,
+                tile_index,
+                &padded,
+                CogBlockEncoding {
+                    compression: self.compression,
+                    predictor: self.predictor,
+                    samples_per_pixel: self.bands as u16,
+                    row_width_pixels: tw,
+                },
+            )?;
             self.written[tile_index] = true;
         }
 
@@ -587,16 +704,36 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             let empty_tile = vec![self.fill_value; tw * th];
             for (index, written) in self.written.iter().enumerate() {
                 if !*written {
-                    self.writer
-                        .write_block(&self.base_handle, index, &empty_tile)?;
+                    write_cog_block(
+                        &mut self.writer,
+                        &self.base_handle,
+                        index,
+                        &empty_tile,
+                        CogBlockEncoding {
+                            compression: self.compression,
+                            predictor: self.predictor,
+                            samples_per_pixel: 1,
+                            row_width_pixels: tw,
+                        },
+                    )?;
                 }
             }
         } else {
             let empty_tile = vec![self.fill_value; tw * th * bands];
             for (index, written) in self.written.iter().enumerate() {
                 if !*written {
-                    self.writer
-                        .write_block(&self.base_handle, index, &empty_tile)?;
+                    write_cog_block(
+                        &mut self.writer,
+                        &self.base_handle,
+                        index,
+                        &empty_tile,
+                        CogBlockEncoding {
+                            compression: self.compression,
+                            predictor: self.predictor,
+                            samples_per_pixel: self.bands as u16,
+                            row_width_pixels: tw,
+                        },
+                    )?;
                 }
             }
         }
@@ -614,9 +751,13 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                 &mut self.writer,
                 handle,
                 overview.view(),
-                tw,
-                th,
-                self.planar_configuration,
+                TileWritePlan {
+                    tile_width: tw,
+                    tile_height: th,
+                    planar_configuration: self.planar_configuration,
+                    compression: self.compression,
+                    predictor: self.predictor,
+                },
             )?;
         }
 
@@ -667,18 +808,21 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
     writer: &mut TiffWriter<W>,
     handle: &ImageHandle,
     data: ArrayView3<T>,
-    tw: usize,
-    th: usize,
-    planar_configuration: tiff_core::PlanarConfiguration,
+    plan: TileWritePlan,
 ) -> Result<()> {
     let (height, width, bands) = data.dim();
+    let tw = plan.tile_width;
+    let th = plan.tile_height;
     let tiles_across = width.div_ceil(tw);
     let tiles_down = height.div_ceil(th);
 
     for tile_row in 0..tiles_down {
         for tile_col in 0..tiles_across {
             let tile_index = tile_row * tiles_across + tile_col;
-            if matches!(planar_configuration, tiff_core::PlanarConfiguration::Planar) {
+            if matches!(
+                plan.planar_configuration,
+                tiff_core::PlanarConfiguration::Planar
+            ) {
                 let tiles_per_plane = tiles_across * tiles_down;
                 for band in 0..bands {
                     let mut tile_data = vec![T::zero(); tw * th];
@@ -696,7 +840,18 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
                         }
                     }
                     let block_index = band * tiles_per_plane + tile_index;
-                    writer.write_block(handle, block_index, &tile_data)?;
+                    write_cog_block(
+                        writer,
+                        handle,
+                        block_index,
+                        &tile_data,
+                        CogBlockEncoding {
+                            compression: plan.compression,
+                            predictor: plan.predictor,
+                            samples_per_pixel: 1,
+                            row_width_pixels: tw,
+                        },
+                    )?;
                 }
             } else {
                 let mut tile_data = vec![T::zero(); tw * th * bands];
@@ -716,7 +871,18 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
                         }
                     }
                 }
-                writer.write_block(handle, tile_index, &tile_data)?;
+                write_cog_block(
+                    writer,
+                    handle,
+                    tile_index,
+                    &tile_data,
+                    CogBlockEncoding {
+                        compression: plan.compression,
+                        predictor: plan.predictor,
+                        samples_per_pixel: bands as u16,
+                        row_width_pixels: tw,
+                    },
+                )?;
             }
         }
     }
@@ -912,6 +1078,23 @@ mod tests {
         let first = file.ifd(0).unwrap();
         assert_eq!(first.width(), 1);
         assert_eq!(first.height(), 1);
+    }
+
+    #[test]
+    fn cog_writes_gdal_structural_metadata_after_header() {
+        let data = Array2::<u8>::from_elem((32, 32), 1);
+
+        let mut buf = Cursor::new(Vec::new());
+        let builder = GeoTiffBuilder::new(32, 32).tile_size(16, 16);
+
+        CogBuilder::new(builder)
+            .overview_levels(vec![2])
+            .write_2d_to(&mut buf, data.view())
+            .unwrap();
+
+        let bytes = buf.into_inner();
+        let prefix = gdal_structural_metadata_bytes();
+        assert_eq!(&bytes[8..8 + prefix.len()], prefix.as_slice());
     }
 
     #[test]

@@ -151,6 +151,26 @@ impl<W: Write + Seek> TiffWriter<W> {
         Ok(ImageHandle { index })
     }
 
+    /// Write raw bytes between the TIFF header and the first IFD.
+    ///
+    /// This is intended for file-level prefix data such as GDAL structural
+    /// metadata in Cloud Optimized GeoTIFFs. Prefix bytes must be written
+    /// before the first image is added.
+    pub fn write_header_prefix(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.finalized {
+            return Err(Error::AlreadyFinalized);
+        }
+        if !self.images.is_empty() {
+            return Err(Error::Other(
+                "header prefix bytes must be written before adding images".into(),
+            ));
+        }
+
+        self.sink.seek(SeekFrom::End(0))?;
+        self.sink.write_all(bytes)?;
+        Ok(())
+    }
+
     /// Write a single strip or tile for the given image.
     pub fn write_block<T: TiffWriteSample>(
         &mut self,

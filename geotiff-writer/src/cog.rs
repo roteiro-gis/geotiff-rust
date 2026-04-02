@@ -779,15 +779,15 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
     let tiles_across = width.div_ceil(tw);
     let tiles_down = height.div_ceil(th);
 
-    for tile_row in 0..tiles_down {
-        for tile_col in 0..tiles_across {
-            let tile_index = tile_row * tiles_across + tile_col;
-            if matches!(
-                plan.planar_configuration,
-                tiff_core::PlanarConfiguration::Planar
-            ) {
-                let tiles_per_plane = tiles_across * tiles_down;
-                for band in 0..bands {
+    if matches!(
+        plan.planar_configuration,
+        tiff_core::PlanarConfiguration::Planar
+    ) {
+        let tiles_per_plane = tiles_across * tiles_down;
+        for band in 0..bands {
+            for tile_row in 0..tiles_down {
+                for tile_col in 0..tiles_across {
+                    let tile_index = tile_row * tiles_across + tile_col;
                     let mut tile_data = vec![T::zero(); tw * th];
                     for row in 0..th {
                         let src_row = tile_row * th + row;
@@ -816,7 +816,12 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
                         },
                     )?;
                 }
-            } else {
+            }
+        }
+    } else {
+        for tile_row in 0..tiles_down {
+            for tile_col in 0..tiles_across {
+                let tile_index = tile_row * tiles_across + tile_col;
                 let mut tile_data = vec![T::zero(); tw * th * bands];
                 for row in 0..th {
                     let src_row = tile_row * th + row;

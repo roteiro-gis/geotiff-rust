@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
-use crate::{GdalStructuralMetadata, Window};
+use crate::{read_gdal_block_payload, GdalStructuralMetadata, Window};
 
 const TAG_JPEG_TABLES: u16 = 347;
 
@@ -238,7 +238,9 @@ fn read_tile_block(
         return Ok(cached);
     }
 
-    let compressed = if let Some(bytes) = source.as_slice() {
+    let compressed = if gdal_structural_metadata.is_some() {
+        Vec::new()
+    } else if let Some(bytes) = source.as_slice() {
         let start = usize::try_from(spec.offset).map_err(|_| Error::OffsetOutOfBounds {
             offset: spec.offset,
             length: spec.byte_count,
@@ -272,9 +274,9 @@ fn read_tile_block(
     };
 
     let compressed = match gdal_structural_metadata {
-        Some(metadata) => metadata
-            .unwrap_block(&compressed, byte_order, spec.offset)?
-            .to_vec(),
+        Some(metadata) => {
+            read_gdal_block_payload(source, metadata, byte_order, spec.offset, spec.byte_count)?
+        }
         None => compressed,
     };
 

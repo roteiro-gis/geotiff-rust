@@ -176,6 +176,71 @@ impl GdalStructuralMetadata {
     }
 }
 
+pub(crate) fn read_gdal_block_payload(
+    source: &dyn TiffSource,
+    metadata: &GdalStructuralMetadata,
+    byte_order: ByteOrder,
+    offset: u64,
+    byte_count: u64,
+) -> Result<Vec<u8>> {
+    let wrapped_extra = 4u64
+        .checked_add(if metadata.block_trailer_repeats_last_4_bytes {
+            4
+        } else {
+            0
+        })
+        .ok_or_else(|| Error::InvalidImageLayout("GDAL block wrapper overflows u64".into()))?;
+
+    let mut candidates = Vec::with_capacity(2);
+    if metadata.block_leader_size_as_u32 && offset >= 4 {
+        candidates.push((
+            offset - 4,
+            byte_count.checked_add(wrapped_extra).ok_or_else(|| {
+                Error::InvalidImageLayout("GDAL wrapped block length overflows u64".into())
+            })?,
+        ));
+    }
+    candidates.push((offset, byte_count));
+
+    let mut fallback: Option<Result<Vec<u8>>> = None;
+    for (candidate_offset, candidate_len) in candidates {
+        let len = usize::try_from(candidate_len).map_err(|_| Error::OffsetOutOfBounds {
+            offset: candidate_offset,
+            length: candidate_len,
+            data_len: source.len(),
+        })?;
+        let raw = match source.read_exact_at(candidate_offset, len) {
+            Ok(raw) => raw,
+            Err(err) => {
+                if fallback.is_none() {
+                    fallback = Some(Err(err));
+                }
+                continue;
+            }
+        };
+        match metadata.unwrap_block(&raw, byte_order, candidate_offset) {
+            Ok(payload) => {
+                if candidate_offset != offset
+                    && payload.len() == usize::try_from(byte_count).unwrap_or(usize::MAX)
+                {
+                    return Ok(payload.to_vec());
+                }
+                fallback = Some(Ok(payload.to_vec()));
+            }
+            Err(err) => {
+                if fallback.is_none() {
+                    fallback = Some(Err(err));
+                }
+            }
+        }
+    }
+
+    match fallback {
+        Some(result) => result,
+        None => Ok(Vec::new()),
+    }
+}
+
 const GDAL_STRUCTURAL_METADATA_PREFIX: &str = "GDAL_STRUCTURAL_METADATA_SIZE=";
 
 // TiffSample trait and impls are provided by tiff-core and re-exported above.

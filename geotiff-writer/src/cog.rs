@@ -419,7 +419,9 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             base_handle,
             base_pixels: vec![
                 fill_value;
-                cog.inner.width as usize * cog.inner.height as usize * cog.inner.bands as usize
+                cog.inner.width as usize
+                    * cog.inner.height as usize
+                    * cog.inner.bands as usize
             ],
             tile_width: tw,
             tile_height: th,
@@ -536,7 +538,10 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             }
         }
 
-        if matches!(self.planar_configuration, tiff_core::PlanarConfiguration::Planar) {
+        if matches!(
+            self.planar_configuration,
+            tiff_core::PlanarConfiguration::Planar
+        ) {
             for band in 0..bands {
                 let mut padded = vec![self.fill_value; tw * th];
                 for row in 0..data_h.min(th) {
@@ -559,7 +564,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                 }
             }
 
-            self.writer.write_block(&self.base_handle, tile_index, &padded)?;
+            self.writer
+                .write_block(&self.base_handle, tile_index, &padded)?;
             self.written[tile_index] = true;
         }
 
@@ -574,18 +580,23 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let full_h = self.height as usize;
         let bands = self.bands as usize;
 
-        if matches!(self.planar_configuration, tiff_core::PlanarConfiguration::Planar) {
+        if matches!(
+            self.planar_configuration,
+            tiff_core::PlanarConfiguration::Planar
+        ) {
             let empty_tile = vec![self.fill_value; tw * th];
             for (index, written) in self.written.iter().enumerate() {
                 if !*written {
-                    self.writer.write_block(&self.base_handle, index, &empty_tile)?;
+                    self.writer
+                        .write_block(&self.base_handle, index, &empty_tile)?;
                 }
             }
         } else {
             let empty_tile = vec![self.fill_value; tw * th * bands];
             for (index, written) in self.written.iter().enumerate() {
                 if !*written {
-                    self.writer.write_block(&self.base_handle, index, &empty_tile)?;
+                    self.writer
+                        .write_block(&self.base_handle, index, &empty_tile)?;
                 }
             }
         }

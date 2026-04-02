@@ -75,7 +75,10 @@ fn assert_gdal_hash_matches(path: &Path, overview_index: Option<usize>) {
     assert_shape(&raster, width, height, band_count);
     let (actual_len, actual_hash) = reference::array_hash(&raster);
     assert_eq!(actual_len, byte_len, "byte length mismatch for {path_str}");
-    assert_eq!(actual_hash, expected_hash, "pixel hash mismatch for {path_str}");
+    assert_eq!(
+        actual_hash, expected_hash,
+        "pixel hash mismatch for {path_str}"
+    );
 }
 
 #[test]
@@ -94,8 +97,14 @@ fn matches_gdal_for_generated_planar_multiband_cog() {
     let file = GeoTiffFile::open(fixture.path()).unwrap();
 
     assert_eq!(file.epsg(), Some(4326));
-    assert_eq!(file.width() as u64, reference_json["width"].as_u64().unwrap());
-    assert_eq!(file.height() as u64, reference_json["height"].as_u64().unwrap());
+    assert_eq!(
+        file.width() as u64,
+        reference_json["width"].as_u64().unwrap()
+    );
+    assert_eq!(
+        file.height() as u64,
+        reference_json["height"].as_u64().unwrap()
+    );
     assert_eq!(
         file.band_count() as u64,
         reference_json["band_count"].as_u64().unwrap()

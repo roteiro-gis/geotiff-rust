@@ -118,7 +118,7 @@ exists in `lerc-rust`.
 | `local` | yes | Local file reading via `tiff-reader` (geotiff-reader) |
 | `rayon` | yes | Parallel strip/tile decompression (tiff-reader, geotiff-reader) |
 | `jpeg` | yes | JPEG-in-TIFF support (tiff-reader) |
-| `zstd` | yes | ZSTD compression (tiff-reader, tiff-writer) |
+| `zstd` | yes | ZSTD compression, including TIFF `LERC+ZSTD` read support (tiff-reader, tiff-writer) |
 | `cog` | no | HTTP range-backed remote COG open (geotiff-reader) |
 
 ## Testing

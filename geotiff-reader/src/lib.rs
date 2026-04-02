@@ -3,6 +3,8 @@
 //! Supports:
 //! - **GeoTIFF**: TIFF files with GeoKey metadata (EPSG codes, CRS, tiepoints, pixel scale)
 //! - **COG**: overview discovery plus optional remote open via HTTP range requests
+//! - **Compression passthrough**: any compression supported by `tiff-reader`, including TIFF
+//!   `LERC`, `LERC+DEFLATE`, and, with the `zstd` feature enabled on `tiff-reader`, `LERC+ZSTD`
 //!
 //! # Example
 //!

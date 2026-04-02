@@ -4,6 +4,10 @@
 //! - **TIFF** (classic): `II`/`MM` byte order mark + version 42
 //! - **BigTIFF**: `II`/`MM` byte order mark + version 43
 //! - **Sources**: mmap, in-memory bytes, or any custom random-access source
+//! - **Compression**: None, Deflate, LZW, PackBits, LERC, JPEG (feature), ZSTD (feature)
+//!
+//! TIFF-side `LERC+DEFLATE` is supported unconditionally. TIFF-side
+//! `LERC+ZSTD` requires the default `zstd` feature.
 //!
 //! # Example
 //!

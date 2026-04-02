@@ -18,6 +18,7 @@ pub const TAG_TILE_OFFSETS: u16 = 324;
 pub const TAG_TILE_BYTE_COUNTS: u16 = 325;
 pub const TAG_SAMPLE_FORMAT: u16 = 339;
 pub const TAG_JPEG_TABLES: u16 = 347;
+pub const TAG_LERC_PARAMETERS: u16 = 50674;
 
 /// TIFF compression scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,6 +30,7 @@ pub enum Compression {
     Deflate,
     PackBits,
     DeflateOld,
+    Lerc,
     Zstd,
 }
 
@@ -42,6 +44,7 @@ impl Compression {
             8 => Some(Self::Deflate),
             32773 => Some(Self::PackBits),
             32946 => Some(Self::DeflateOld),
+            34887 => Some(Self::Lerc),
             50000 => Some(Self::Zstd),
             _ => None,
         }
@@ -56,7 +59,22 @@ impl Compression {
             Self::Deflate => 8,
             Self::PackBits => 32773,
             Self::DeflateOld => 32946,
+            Self::Lerc => 34887,
             Self::Zstd => 50000,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Lzw => "LZW",
+            Self::OldJpeg => "OldJpeg",
+            Self::Jpeg => "JPEG",
+            Self::Deflate => "Deflate",
+            Self::PackBits => "PackBits",
+            Self::DeflateOld => "DeflateOld",
+            Self::Lerc => "LERC",
+            Self::Zstd => "ZSTD",
         }
     }
 }
@@ -169,5 +187,22 @@ impl PlanarConfiguration {
             Self::Chunky => 1,
             Self::Planar => 2,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Compression, TAG_LERC_PARAMETERS};
+
+    #[test]
+    fn compression_roundtrips_lerc() {
+        assert_eq!(Compression::from_code(34887), Some(Compression::Lerc));
+        assert_eq!(Compression::Lerc.to_code(), 34887);
+        assert_eq!(Compression::Lerc.name(), "LERC");
+    }
+
+    #[test]
+    fn lerc_parameters_tag_matches_registered_value() {
+        assert_eq!(TAG_LERC_PARAMETERS, 50674);
     }
 }

@@ -151,6 +151,26 @@ impl<W: Write + Seek> TiffWriter<W> {
         Ok(ImageHandle { index })
     }
 
+    /// Write raw bytes between the TIFF header and the first IFD.
+    ///
+    /// This is intended for file-level prefix data such as GDAL structural
+    /// metadata in Cloud Optimized GeoTIFFs. Prefix bytes must be written
+    /// before the first image is added.
+    pub fn write_header_prefix(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.finalized {
+            return Err(Error::AlreadyFinalized);
+        }
+        if !self.images.is_empty() {
+            return Err(Error::Other(
+                "header prefix bytes must be written before adding images".into(),
+            ));
+        }
+
+        self.sink.seek(SeekFrom::End(0))?;
+        self.sink.write_all(bytes)?;
+        Ok(())
+    }
+
     /// Write a single strip or tile for the given image.
     pub fn write_block<T: TiffWriteSample>(
         &mut self,
@@ -210,6 +230,49 @@ impl<W: Write + Seek> TiffWriter<W> {
         let offset = self.sink.seek(SeekFrom::End(0))?;
         self.sink.write_all(compressed_bytes)?;
         let byte_count = compressed_bytes.len() as u64;
+
+        let state = self
+            .images
+            .get_mut(handle.index)
+            .ok_or(Error::Other("invalid image handle".into()))?;
+
+        let total = state.builder.block_count();
+        if block_index >= total {
+            return Err(Error::BlockIndexOutOfRange {
+                index: block_index,
+                total,
+            });
+        }
+
+        state.block_records[block_index] = Some((offset, byte_count));
+        Ok(())
+    }
+
+    /// Write a block whose on-disk bytes include a prefix and/or suffix that
+    /// must not be reflected in the TIFF block offset/byte-count arrays.
+    ///
+    /// This is used for formats like GDAL-compatible COGs where the logical
+    /// TIFF block payload is wrapped by out-of-band structural metadata.
+    pub fn write_block_raw_segmented(
+        &mut self,
+        handle: &ImageHandle,
+        block_index: usize,
+        prefix: &[u8],
+        payload: &[u8],
+        suffix: &[u8],
+    ) -> Result<()> {
+        if self.finalized {
+            return Err(Error::AlreadyFinalized);
+        }
+
+        let start = self.sink.seek(SeekFrom::End(0))?;
+        self.sink.write_all(prefix)?;
+        let offset = start
+            .checked_add(prefix.len() as u64)
+            .ok_or(Error::Other("block offset overflow".into()))?;
+        self.sink.write_all(payload)?;
+        self.sink.write_all(suffix)?;
+        let byte_count = payload.len() as u64;
 
         let state = self
             .images

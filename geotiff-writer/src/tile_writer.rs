@@ -9,7 +9,7 @@ use tiff_writer::{ImageHandle, TiffWriter, WriteOptions};
 
 use crate::builder::GeoTiffBuilder;
 use crate::error::{Error, Result};
-use crate::sample::WriteSample;
+use crate::sample::{NumericSample, WriteSample};
 
 /// Streaming tile-by-tile GeoTIFF writer.
 ///
@@ -32,34 +32,17 @@ pub struct StreamingTileWriter<T: WriteSample, W: Write + Seek> {
 }
 
 /// Parse a nodata string into a fill value for the given sample type.
-fn parse_nodata_fill<T: WriteSample>(nodata: &Option<String>) -> T {
-    let zero_bytes = vec![0u8; T::BYTES_PER_SAMPLE];
-    let zero = T::decode_many(&zero_bytes)[0];
+fn parse_nodata_fill<T: NumericSample>(nodata: &Option<String>) -> T {
+    let zero = T::zero();
     let Some(nd) = nodata else { return zero };
 
-    // Try to parse as f64, then convert to the target type via the cog helper
     let Ok(val) = nd.trim().parse::<f64>() else {
         return zero;
     };
-
-    // Convert f64 → target type bytes → decode
-    let bytes = match (T::SAMPLE_FORMAT, T::BITS_PER_SAMPLE) {
-        (1, 8) => vec![val as u8],
-        (2, 8) => vec![val as i8 as u8],
-        (1, 16) => (val as u16).to_ne_bytes().to_vec(),
-        (2, 16) => (val as i16).to_ne_bytes().to_vec(),
-        (1, 32) => (val as u32).to_ne_bytes().to_vec(),
-        (2, 32) => (val as i32).to_ne_bytes().to_vec(),
-        (3, 32) => (val as f32).to_ne_bytes().to_vec(),
-        (1, 64) => (val as u64).to_ne_bytes().to_vec(),
-        (2, 64) => (val as i64).to_ne_bytes().to_vec(),
-        (3, 64) => val.to_ne_bytes().to_vec(),
-        _ => return zero,
-    };
-    T::decode_many(&bytes)[0]
+    T::from_f64(val)
 }
 
-impl<T: WriteSample, W: Write + Seek> StreamingTileWriter<T, W> {
+impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
     pub(crate) fn new(builder: GeoTiffBuilder, sink: W) -> Result<Self> {
         let tw = builder.tile_width.unwrap_or(256);
         let th = builder.tile_height.unwrap_or(256);
@@ -102,6 +85,12 @@ impl<T: WriteSample, W: Write + Seek> StreamingTileWriter<T, W> {
     /// The data shape should match the actual tile size (may be smaller at edges).
     /// The tile is automatically padded to the full tile dimensions with the NoData fill value.
     pub fn write_tile(&mut self, x_off: usize, y_off: usize, data: &ArrayView2<T>) -> Result<()> {
+        if self.bands != 1 {
+            return Err(Error::Other(
+                "write_tile only supports single-band output; use write_tile_3d for multi-band tiles".into(),
+            ));
+        }
+
         let tile_col = x_off / self.tile_width as usize;
         let tile_row = y_off / self.tile_height as usize;
 
@@ -118,12 +107,10 @@ impl<T: WriteSample, W: Write + Seek> StreamingTileWriter<T, W> {
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
         let (data_h, data_w) = data.dim();
-        let spp = self.bands as usize;
-
-        let mut padded = vec![self.fill_value; tw * th * spp];
+        let mut padded = vec![self.fill_value; tw * th];
         for row in 0..data_h.min(th) {
             for col in 0..data_w.min(tw) {
-                padded[row * tw * spp + col * spp] = data[[row, col]];
+                padded[row * tw + col] = data[[row, col]];
             }
         }
 

@@ -77,6 +77,10 @@ CogBuilder::new(
 .write_2d("output.tif", data.view())?;
 ```
 
+For multi-band COG output, use `write_3d`/`write_3d_to` or `write_tile_3d`
+with `bands(...)` and optional
+`planar_configuration(PlanarConfiguration::Planar)`.
+
 ## Features
 
 **Read**
@@ -84,7 +88,7 @@ CogBuilder::new(
 - Little-endian and big-endian byte orders
 - Strip and tile data access with windowed reads
 - Chunky and separate planar sample layouts
-- Compression: Deflate, LZW, PackBits, JPEG (optional), ZSTD (optional)
+- Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional)
 - Parallel decompression via Rayon
 - Typed raster reads into `ndarray::ArrayD` (u8 through f64)
 - GeoKey directory, CRS/EPSG, transforms, NoData, overview discovery
@@ -98,7 +102,14 @@ CogBuilder::new(
 - Chunky and separate planar multi-band layouts (RGB/RGBA) and all sample types (u8 through f64)
 - Streaming tile-by-tile writes for large rasters
 - GeoTIFF metadata: EPSG, pixel scale, origin, affine transforms, NoData
-- COG output with ghost IFD, overview generation (nearest-neighbor, average)
+- COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
+
+## Codec Priorities
+
+`LERC` read support is in place, including TIFF-side additional `DEFLATE` and
+`ZSTD` wrappers used by libtiff/GDAL. The next codec priority is still
+`JPEG`-in-TIFF write, with TIFF-side `LERC` write following once encode support
+exists in `lerc-rust`.
 
 ## Feature flags
 
@@ -107,7 +118,7 @@ CogBuilder::new(
 | `local` | yes | Local file reading via `tiff-reader` (geotiff-reader) |
 | `rayon` | yes | Parallel strip/tile decompression (tiff-reader, geotiff-reader) |
 | `jpeg` | yes | JPEG-in-TIFF support (tiff-reader) |
-| `zstd` | yes | ZSTD compression (tiff-reader, tiff-writer) |
+| `zstd` | yes | ZSTD compression, including TIFF `LERC+ZSTD` read support (tiff-reader, tiff-writer) |
 | `cog` | no | HTTP range-backed remote COG open (geotiff-reader) |
 
 ## Testing

@@ -79,8 +79,30 @@ fn reads_real_world_signed_and_compressed_geotiffs() {
     let raster: ArrayD<u8> = jpeg.read_raster().unwrap();
     assert_eq!(raster.shape(), &[20, 20]);
 
+    let lerc = GeoTiffFile::open(fixture("gdal/gcore/data/gtiff/byte_LERC.tif")).unwrap();
+    let raster: ArrayD<u8> = lerc.read_raster().unwrap();
+    assert_eq!(raster.shape(), &[20, 20]);
+
+    let lerc_deflate =
+        GeoTiffFile::open(fixture("gdal/gcore/data/gtiff/byte_LERC_DEFLATE.tif")).unwrap();
+    let raster: ArrayD<u8> = lerc_deflate.read_raster().unwrap();
+    assert_eq!(raster.shape(), &[20, 20]);
+
+    let lerc_rgb = GeoTiffFile::open(fixture(
+        "gdal/gcore/data/gtiff/rgbsmall_LERC_tiled_separate.tif",
+    ))
+    .unwrap();
+    assert_eq!(lerc_rgb.band_count(), 3);
+    let raster: ArrayD<u8> = lerc_rgb.read_raster().unwrap();
+    assert_eq!(raster.ndim(), 3);
+    assert_eq!(raster.shape()[2], 3);
+
     let zstd = GeoTiffFile::open(fixture("gdal/gcore/data/byte_zstd.tif")).unwrap();
     let raster: ArrayD<u8> = zstd.read_raster().unwrap();
+    assert_eq!(raster.shape(), &[20, 20]);
+
+    let lerc_zstd = GeoTiffFile::open(fixture("gdal/gcore/data/gtiff/byte_LERC_ZSTD.tif")).unwrap();
+    let raster: ArrayD<u8> = lerc_zstd.read_raster().unwrap();
     assert_eq!(raster.shape(), &[20, 20]);
 }
 

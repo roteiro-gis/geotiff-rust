@@ -237,6 +237,51 @@ mod tests {
     }
 
     #[test]
+    fn writes_header_prefix_before_first_ifd() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        writer
+            .write_header_prefix(b"GDAL_STRUCTURAL_METADATA")
+            .unwrap();
+
+        let image = ImageBuilder::new(2, 2).sample_type::<u8>().strips(2);
+        let handle = writer.add_image(image).unwrap();
+        writer.write_block(&handle, 0, &[1u8, 2, 3, 4]).unwrap();
+        writer.finish().unwrap();
+
+        let data = buf.into_inner();
+        assert_eq!(&data[8..32], b"GDAL_STRUCTURAL_METADATA");
+
+        let file = tiff_reader::TiffFile::from_bytes(data).unwrap();
+        let img = file.read_image::<u8>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn segmented_raw_block_records_payload_offset_and_len() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+
+        let image = ImageBuilder::new(2, 2).sample_type::<u8>().tiles(16, 16);
+        let handle = writer.add_image(image).unwrap();
+        let payload = vec![1u8, 2, 3, 4];
+        writer
+            .write_block_raw_segmented(&handle, 0, &[9, 9, 9, 9], &payload, &[8, 8, 8, 8])
+            .unwrap();
+        writer.finish().unwrap();
+
+        let data = buf.into_inner();
+        let file = tiff_reader::TiffFile::from_bytes(data.clone()).unwrap();
+        let ifd = file.ifd(0).unwrap();
+        let offset = ifd.tile_offsets().unwrap()[0] as usize;
+        let count = ifd.tile_byte_counts().unwrap()[0] as usize;
+        assert_eq!(&data[offset..offset + count], payload.as_slice());
+        assert_eq!(&data[offset - 4..offset], &[9, 9, 9, 9]);
+        assert_eq!(&data[offset + count..offset + count + 4], &[8, 8, 8, 8]);
+    }
+
+    #[test]
     fn write_and_read_horizontal_predictor_u16() {
         let mut buf = Cursor::new(Vec::new());
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();

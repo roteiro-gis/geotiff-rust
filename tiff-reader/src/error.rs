@@ -1,4 +1,5 @@
 use thiserror::Error;
+use tiff_core::Compression;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -26,7 +27,10 @@ pub enum Error {
         actual: u16,
     },
 
-    #[error("unsupported compression: {0}")]
+    #[error(
+        "unsupported compression: {name} ({0})",
+        name = unsupported_compression_name(*.0)
+    )]
     UnsupportedCompression(u16),
 
     #[error("unsupported predictor: {0}")]
@@ -72,4 +76,10 @@ pub enum Error {
 
     #[error("{0}")]
     Other(String),
+}
+
+fn unsupported_compression_name(code: u16) -> &'static str {
+    Compression::from_code(code)
+        .map(Compression::name)
+        .unwrap_or("unknown")
 }

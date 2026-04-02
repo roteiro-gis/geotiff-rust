@@ -5,13 +5,13 @@ use std::sync::Arc;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
+use crate::block_decode;
 use crate::cache::{BlockCache, BlockKey, BlockKind};
 use crate::error::{Error, Result};
-use crate::filters;
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
-use crate::{GdalStructuralMetadata, Window};
+use crate::{read_gdal_block_payload, GdalStructuralMetadata, Window};
 
 const TAG_JPEG_TABLES: u16 = 347;
 
@@ -208,7 +208,9 @@ fn read_strip_block(
         return Ok(cached);
     }
 
-    let compressed = if let Some(bytes) = source.as_slice() {
+    let compressed = if gdal_structural_metadata.is_some() {
+        Vec::new()
+    } else if let Some(bytes) = source.as_slice() {
         let start = usize::try_from(spec.offset).map_err(|_| Error::OffsetOutOfBounds {
             offset: spec.offset,
             length: spec.byte_count,
@@ -242,54 +244,24 @@ fn read_strip_block(
     };
 
     let compressed = match gdal_structural_metadata {
-        Some(metadata) => metadata
-            .unwrap_block(&compressed, byte_order, spec.offset)?
-            .to_vec(),
+        Some(metadata) => {
+            read_gdal_block_payload(source, metadata, byte_order, spec.offset, spec.byte_count)?
+        }
         None => compressed,
     };
 
     let jpeg_tables = ifd
         .tag(TAG_JPEG_TABLES)
         .and_then(|tag| tag.value.as_bytes());
-    let samples = if layout.planar_configuration == 1 {
-        layout.samples_per_pixel
-    } else {
-        1
-    };
-    let expected_row_bytes = layout.width * samples * layout.bytes_per_sample;
-    let expected_len = spec
-        .rows_in_strip
-        .checked_mul(expected_row_bytes)
-        .ok_or_else(|| Error::InvalidImageLayout("strip size overflows usize".into()))?;
-    let mut decoded = filters::decompress(
-        ifd.compression(),
-        &compressed,
-        spec.index,
+    let decoded = block_decode::decode_compressed_block(block_decode::BlockDecodeRequest {
+        ifd,
+        layout: *layout,
+        byte_order,
+        compressed: &compressed,
+        index: spec.index,
         jpeg_tables,
-        expected_len,
-    )?;
-    if decoded.len() < expected_len {
-        return Err(Error::DecompressionFailed {
-            index: spec.index,
-            reason: format!(
-                "decoded strip is too small: expected at least {expected_len} bytes, found {}",
-                decoded.len()
-            ),
-        });
-    }
-    if decoded.len() > expected_len {
-        decoded.truncate(expected_len);
-    }
-
-    for row in decoded.chunks_exact_mut(expected_row_bytes) {
-        filters::fix_endianness_and_predict(
-            row,
-            layout.bits_per_sample,
-            samples as u16,
-            byte_order,
-            layout.predictor,
-        )?;
-    }
-
+        block_width: layout.width,
+        block_height: spec.rows_in_strip,
+    })?;
     Ok(cache.insert(cache_key, decoded))
 }

@@ -102,7 +102,7 @@ with `bands(...)` and optional
 - Chunky and separate planar multi-band layouts (RGB/RGBA) and all sample types (u8 through f64)
 - Streaming tile-by-tile writes for large rasters
 - GeoTIFF metadata: EPSG, pixel scale, origin, affine transforms, NoData
-- COG output with ghost IFD, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
+- COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
 
 ## Codec Priorities
 

@@ -2,10 +2,10 @@
 //!
 //! COG files have a specific byte layout:
 //! 1. TIFF header (8 bytes)
-//! 2. GDAL structural metadata block (describes COG layout)
-//! 3. Ghost IFD (1x1 image, NewSubfileType=1, marks the file as COG)
-//! 4. Overview IFDs (smallest → largest), each with NewSubfileType=1
-//! 5. Base image IFD (full resolution)
+//! 2. GDAL structural metadata block (the COG "ghost area")
+//! 3. Base image IFD (full resolution)
+//! 4. Overview IFDs (largest → smallest)
+//! 5. Tile offset/byte-count arrays
 //! 6. Tile data: overviews (smallest first), then base image
 //!
 //! The IFDs-before-data layout allows HTTP range-request readers to fetch
@@ -30,18 +30,22 @@ pub enum Resampling {
     Average,
 }
 
-const GDAL_STRUCTURAL_METADATA_PAYLOAD: &str = "\
-LAYOUT=IFDS_BEFORE_DATA\n\
+fn gdal_structural_metadata_bytes(planar_configuration: tiff_core::PlanarConfiguration) -> Vec<u8> {
+    let mut payload = String::from(
+        "LAYOUT=IFDS_BEFORE_DATA\n\
 BLOCK_ORDER=ROW_MAJOR\n\
 BLOCK_LEADER=SIZE_AS_UINT4\n\
 BLOCK_TRAILER=LAST_4_BYTES_REPEATED\n\
-KNOWN_INCOMPATIBLE_EDITION=NO\n";
-
-fn gdal_structural_metadata_bytes() -> Vec<u8> {
+KNOWN_INCOMPATIBLE_EDITION=NO\n",
+    );
+    if matches!(planar_configuration, tiff_core::PlanarConfiguration::Planar) {
+        payload.push_str("INTERLEAVE=BAND\n");
+    }
+    payload.push(' ');
     format!(
         "GDAL_STRUCTURAL_METADATA_SIZE={:06} bytes\n{}",
-        GDAL_STRUCTURAL_METADATA_PAYLOAD.len(),
-        GDAL_STRUCTURAL_METADATA_PAYLOAD
+        payload.len(),
+        payload
     )
     .into_bytes()
 }
@@ -164,10 +168,10 @@ impl CogBuilder {
     ///
     /// The file layout is:
     /// 1. TIFF header
-    /// 2. GDAL structural metadata (padded)
-    /// 3. Ghost IFD (1x1)
-    /// 4. Overview IFDs (smallest → largest)
-    /// 5. Base image IFD
+    /// 2. GDAL structural metadata ghost area
+    /// 3. Base image IFD
+    /// 4. Overview IFDs (largest → smallest)
+    /// 5. Tile offset/byte-count arrays
     /// 6. Tile data (overview tiles smallest first, then base tiles)
     pub fn write_2d_to<T: NumericSample, W: Write + Seek>(
         &self,
@@ -225,22 +229,17 @@ impl CogBuilder {
                 variant: TiffVariant::Classic,
             },
         )?;
-        writer.write_header_prefix(&gdal_structural_metadata_bytes())?;
+        writer.write_header_prefix(&gdal_structural_metadata_bytes(
+            self.inner.planar_configuration,
+        ))?;
 
-        // Ghost IFD (1x1, NewSubfileType=1) — carries GeoTIFF metadata so
-        // readers that inspect IFD 0 can find the CRS/transform.
-        let mut ghost_ib = ImageBuilder::new(1, 1)
-            .sample_type::<u8>()
-            .tiles(16, 16)
-            .overview();
-        for tag in self.inner.build_extra_tags() {
-            ghost_ib = ghost_ib.tag(tag);
-        }
-        let ghost_handle = writer.add_image(ghost_ib)?;
+        // Base image IFD first, per GDAL COG layout.
+        let base_ib = self.inner.to_image_builder::<T>();
+        let base_handle = writer.add_image(base_ib)?;
 
-        // Overview IFDs (smallest to largest for COG ordering)
+        // Overview IFDs follow from largest to smallest in dimensions.
         let mut sorted_levels = self.overview_levels.clone();
-        sorted_levels.sort_unstable_by(|a, b| b.cmp(a)); // largest factor first = smallest image first
+        sorted_levels.sort_unstable();
 
         let mut overview_handles: Vec<(ImageHandle, u32, u32)> = Vec::new();
         for &level in &sorted_levels {
@@ -265,29 +264,14 @@ impl CogBuilder {
             overview_handles.push((handle, ovr_w, ovr_h));
         }
 
-        // Base image IFD
-        let base_ib = self.inner.to_image_builder::<T>();
-        let base_handle = writer.add_image(base_ib)?;
-
         // --- Phase 2: Write tile data ---
 
-        // Ghost tile (1x1 padded to 16x16)
-        let ghost_tile = vec![0u8; 16 * 16];
-        write_cog_block(
-            &mut writer,
-            &ghost_handle,
-            0,
-            &ghost_tile,
-            CogBlockEncoding {
-                compression: Compression::None,
-                predictor: Predictor::None,
-                samples_per_pixel: 1,
-                row_width_pixels: 16,
-            },
-        )?;
-
         // Overview tiles (smallest overview first)
-        for (idx, &level) in sorted_levels.iter().enumerate() {
+        for &level in sorted_levels.iter().rev() {
+            let idx = sorted_levels
+                .iter()
+                .position(|&candidate| candidate == level)
+                .unwrap();
             let (ref handle, _, _) = overview_handles[idx];
             // Find the matching overview array (overviews are stored in original order)
             let level_idx = self
@@ -330,7 +314,7 @@ impl CogBuilder {
 
     /// Create a streaming COG tile writer.
     ///
-    /// The writer creates the ghost IFD and overview IFD placeholders immediately.
+    /// The writer creates the base IFD and overview IFD placeholders immediately.
     /// Base tiles are written incrementally via `write_tile`. Overview tiles are
     /// generated from the base tiles during `finish()`.
     pub fn tile_writer<T: NumericSample, W: Write + Seek>(
@@ -394,13 +378,12 @@ impl CogBuilder {
 
 /// Streaming COG tile writer.
 ///
-/// Base tiles are written incrementally. Overview tiles and the ghost IFD
-/// are handled automatically. During `finish()`, overview rasters are
+/// Base tiles are written incrementally. Overview tiles are generated during
+/// `finish()`, and the file-level COG ghost area is handled automatically.
+/// During `finish()`, overview rasters are
 /// generated from the accumulated base tile data.
 pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     writer: TiffWriter<W>,
-    #[allow(dead_code)]
-    ghost_handle: ImageHandle,
     overview_handles: Vec<(ImageHandle, u32, u32)>, // (handle, width, height)
     base_handle: ImageHandle,
     base_pixels: Vec<T>,
@@ -431,21 +414,16 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let fill_value = T::zero();
 
         let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
-        writer.write_header_prefix(&gdal_structural_metadata_bytes())?;
+        writer.write_header_prefix(&gdal_structural_metadata_bytes(
+            cog.inner.planar_configuration,
+        ))?;
 
-        // Ghost IFD — carries GeoTIFF metadata
-        let mut ghost_ib = ImageBuilder::new(1, 1)
-            .sample_type::<u8>()
-            .tiles(16, 16)
-            .overview();
-        for tag in cog.inner.build_extra_tags() {
-            ghost_ib = ghost_ib.tag(tag);
-        }
-        let ghost_handle = writer.add_image(ghost_ib)?;
+        // Base image IFD first, followed by overview IFDs from largest to smallest.
+        let base_ib = cog.inner.to_image_builder::<T>();
+        let base_handle = writer.add_image(base_ib)?;
 
-        // Overview IFDs (smallest first)
         let mut sorted_levels = cog.overview_levels.clone();
-        sorted_levels.sort_unstable_by(|a, b| b.cmp(a));
+        sorted_levels.sort_unstable();
 
         let mut overview_handles = Vec::new();
         for &level in &sorted_levels {
@@ -469,10 +447,6 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             let handle = writer.add_image(ovr_ib)?;
             overview_handles.push((handle, ovr_w, ovr_h));
         }
-
-        // Base image IFD
-        let base_ib = cog.inner.to_image_builder::<T>();
-        let base_handle = writer.add_image(base_ib)?;
         let num_blocks = if matches!(
             cog.inner.planar_configuration,
             tiff_core::PlanarConfiguration::Planar
@@ -482,24 +456,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             num_base_tiles
         };
 
-        // Write ghost tile immediately
-        let ghost_tile = vec![0u8; 16 * 16];
-        write_cog_block(
-            &mut writer,
-            &ghost_handle,
-            0,
-            &ghost_tile,
-            CogBlockEncoding {
-                compression: Compression::None,
-                predictor: Predictor::None,
-                samples_per_pixel: 1,
-                row_width_pixels: 16,
-            },
-        )?;
-
         Ok(Self {
             writer,
-            ghost_handle,
             overview_handles,
             base_handle,
             base_pixels: vec![
@@ -742,7 +700,12 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             .map_err(|err| Error::Other(format!("invalid streaming COG raster shape: {err}")))?;
 
         // Generate and write overview tiles
-        for (idx, &level) in self.overview_levels.iter().enumerate() {
+        for &level in self.overview_levels.iter().rev() {
+            let idx = self
+                .overview_levels
+                .iter()
+                .position(|&candidate| candidate == level)
+                .unwrap();
             let (ref handle, _, _) = self.overview_handles[idx];
 
             let overview = generate_overview_3d(full.view(), level as usize, self.resampling);
@@ -922,18 +885,12 @@ mod tests {
         let bytes = buf.into_inner();
         let file = tiff_reader::TiffFile::from_bytes(bytes).unwrap();
 
-        // Ghost IFD + base + 2 overviews = 4 IFDs
-        assert_eq!(file.ifd_count(), 4);
+        // Base + 2 overviews = 3 IFDs
+        assert_eq!(file.ifd_count(), 3);
 
-        // IFD 0 is ghost (1x1)
-        assert_eq!(file.ifd(0).unwrap().width(), 1);
-
-        // Base image (IFD with full resolution)
-        // Find the 32x32 IFD
-        let base_idx = (0..file.ifd_count())
-            .find(|&i| file.ifd(i).unwrap().width() == 32)
-            .unwrap();
-        let base = file.read_image::<u8>(base_idx).unwrap();
+        // IFD 0 is the base image.
+        assert_eq!(file.ifd(0).unwrap().width(), 32);
+        let base = file.read_image::<u8>(0).unwrap();
         assert_eq!(base.shape(), &[32, 32]);
         assert_eq!(base[[0, 0]], 0);
         assert_eq!(base[[1, 1]], 2);
@@ -953,16 +910,8 @@ mod tests {
 
         let bytes = buf.into_inner();
         let file = tiff_reader::TiffFile::from_bytes(bytes).unwrap();
-        // Ghost + base = 2 IFDs
-        assert_eq!(file.ifd_count(), 2);
-
-        // Base is the larger one
-        let base_idx = if file.ifd(0).unwrap().width() == 32 {
-            0
-        } else {
-            1
-        };
-        let img = file.read_image::<f32>(base_idx).unwrap();
+        assert_eq!(file.ifd_count(), 1);
+        let img = file.read_image::<f32>(0).unwrap();
         let (values, _) = img.into_raw_vec_and_offset();
         assert!(values.iter().all(|&v| (v - 42.0).abs() < 1e-6));
     }
@@ -982,8 +931,7 @@ mod tests {
 
         let bytes = buf.into_inner();
         let file = tiff_reader::TiffFile::from_bytes(bytes).unwrap();
-        // Ghost + base + 1 overview = 3 IFDs
-        assert_eq!(file.ifd_count(), 3);
+        assert_eq!(file.ifd_count(), 2);
 
         // Find the 16x16 overview
         let ovr_idx = (0..file.ifd_count())
@@ -1038,12 +986,12 @@ mod tests {
 
         // Verify structure via tiff-reader
         let file = tiff_reader::TiffFile::from_bytes(bytes.clone()).unwrap();
-        assert_eq!(file.ifd(0).unwrap().width(), 1); // ghost IFD
-        assert!(file.ifd_count() >= 4); // ghost + 2 overviews + base
+        assert_eq!(file.ifd(0).unwrap().width(), 64); // base IFD
+        assert!(file.ifd_count() >= 3); // base + 2 overviews
 
         let geo = geotiff_reader::GeoTiffFile::from_bytes(bytes).unwrap();
         assert_eq!(geo.epsg(), Some(4326));
-        assert_eq!(geo.base_ifd_index(), 3);
+        assert_eq!(geo.base_ifd_index(), 0);
         assert_eq!(geo.width(), 64);
         assert_eq!(geo.height(), 64);
         assert_eq!(geo.overview_count(), 2);
@@ -1052,15 +1000,15 @@ mod tests {
         assert_eq!(base.shape(), &[64, 64]);
         assert_eq!(base[[0, 0]], 42);
 
-        let ovr16 = geo.read_overview::<u8>(0).unwrap();
-        assert_eq!(ovr16.shape(), &[16, 16]);
-
-        let ovr32 = geo.read_overview::<u8>(1).unwrap();
+        let ovr32 = geo.read_overview::<u8>(0).unwrap();
         assert_eq!(ovr32.shape(), &[32, 32]);
+
+        let ovr16 = geo.read_overview::<u8>(1).unwrap();
+        assert_eq!(ovr16.shape(), &[16, 16]);
     }
 
     #[test]
-    fn cog_ghost_ifd_is_first() {
+    fn cog_base_ifd_is_first() {
         let data = Array2::<u8>::from_elem((32, 32), 1);
 
         let mut buf = Cursor::new(Vec::new());
@@ -1074,10 +1022,10 @@ mod tests {
         let bytes = buf.into_inner();
         let file = tiff_reader::TiffFile::from_bytes(bytes).unwrap();
 
-        // First IFD should be the ghost (1x1)
+        // First IFD should be the base image
         let first = file.ifd(0).unwrap();
-        assert_eq!(first.width(), 1);
-        assert_eq!(first.height(), 1);
+        assert_eq!(first.width(), 32);
+        assert_eq!(first.height(), 32);
     }
 
     #[test]
@@ -1093,7 +1041,7 @@ mod tests {
             .unwrap();
 
         let bytes = buf.into_inner();
-        let prefix = gdal_structural_metadata_bytes();
+        let prefix = gdal_structural_metadata_bytes(tiff_core::PlanarConfiguration::Chunky);
         assert_eq!(&bytes[8..8 + prefix.len()], prefix.as_slice());
     }
 
@@ -1168,14 +1116,9 @@ mod tests {
         let bytes = buf.into_inner();
         let file = tiff_reader::TiffFile::from_bytes(bytes).unwrap();
 
-        // Ghost + overview + base = 3 IFDs
-        assert_eq!(file.ifd_count(), 3);
-
-        // Find 32x32 base
-        let base_idx = (0..file.ifd_count())
-            .find(|&i| file.ifd(i).unwrap().width() == 32)
-            .unwrap();
-        let base = file.read_image::<u8>(base_idx).unwrap();
+        // Base + overview = 2 IFDs
+        assert_eq!(file.ifd_count(), 2);
+        let base = file.read_image::<u8>(0).unwrap();
         assert_eq!(base[[0, 0]], 1);
         assert_eq!(base[[0, 16]], 2);
         assert_eq!(base[[16, 0]], 3);
@@ -1217,7 +1160,7 @@ mod tests {
 
         let bytes = buf.into_inner();
         let geo = geotiff_reader::GeoTiffFile::from_bytes(bytes.clone()).unwrap();
-        assert_eq!(geo.base_ifd_index(), 2);
+        assert_eq!(geo.base_ifd_index(), 0);
         assert_eq!(geo.width(), 32);
         assert_eq!(geo.height(), 32);
         assert_eq!(geo.overview_count(), 1);

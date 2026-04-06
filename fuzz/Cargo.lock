@@ -120,11 +120,11 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "geotiff-core"
-version = "0.2.4"
+version = "0.2.5"
 
 [[package]]
 name = "geotiff-reader"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "geotiff-core",
  "lru",
@@ -185,6 +185,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 dependencies = [
  "rayon",
+]
+
+[[package]]
+name = "lerc-band-materialize"
+version = "0.2.0"
+source = "git+https://github.com/roteiro-gis/lerc-rust#bb0df6c2abfcaff3b1f20ab73857e3687e9f8af1"
+
+[[package]]
+name = "lerc-core"
+version = "0.2.0"
+source = "git+https://github.com/roteiro-gis/lerc-rust#bb0df6c2abfcaff3b1f20ab73857e3687e9f8af1"
+
+[[package]]
+name = "lerc-reader"
+version = "0.2.0"
+source = "git+https://github.com/roteiro-gis/lerc-rust#bb0df6c2abfcaff3b1f20ab73857e3687e9f8af1"
+dependencies = [
+ "lerc-band-materialize",
+ "lerc-core",
+ "ndarray",
 ]
 
 [[package]]
@@ -452,17 +472,19 @@ dependencies = [
 
 [[package]]
 name = "tiff-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "tiff-reader"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "flate2",
  "jpeg-decoder",
+ "lerc-core",
+ "lerc-reader",
  "lru",
  "memmap2",
  "ndarray",

@@ -29,7 +29,7 @@ smallvec = "1"
 criterion = "0.5"
 tempfile = "3"
 serde_json = "1"
-tiff-writer = { version = "0.3", path = "../tiff-writer" }
+tiff-writer = { version = ">=0.2.5, <0.4", path = "../tiff-writer" }
 
 [[bench]]
 name = "reference_compare_bench"

@@ -17,8 +17,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
-tiff-reader = { version = "0.3", path = "../tiff-reader" }
-geotiff-reader = { version = "0.3", path = "../geotiff-reader" }
+tiff-reader = { version = ">=0.2.5, <0.4", path = "../tiff-reader" }
+geotiff-reader = { version = ">=0.2.5, <0.4", path = "../geotiff-reader" }
 tempfile = "3"
 serde_json = "1"
 

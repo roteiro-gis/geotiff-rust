@@ -21,7 +21,7 @@ default = ["zstd"]
 zstd = ["dep:zstd"]
 
 [dev-dependencies]
-tiff-reader = { version = "0.3", path = "../tiff-reader" }
+tiff-reader = { version = ">=0.2.5, <0.4", path = "../tiff-reader" }
 
 [dependencies.zstd]
 version = "0.13"

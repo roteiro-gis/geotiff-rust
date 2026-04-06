@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
-    Compression, GeoTiffBuilder, LercOptions, LercAdditionalCompression, PlanarConfiguration,
+    Compression, GeoTiffBuilder, LercAdditionalCompression, LercOptions, PlanarConfiguration,
 };
 use ndarray::Array2;
 use tiff_reader::TiffFile;
@@ -30,7 +30,10 @@ fn geotiff_roundtrips_pixels_metadata_and_transform() {
     let raster = tiff.read_image::<f64>(0).unwrap();
     let (values, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0));
-    assert_eq!(values, (1..=16).map(|value| value as f64).collect::<Vec<_>>());
+    assert_eq!(
+        values,
+        (1..=16).map(|value| value as f64).collect::<Vec<_>>()
+    );
 
     let geo = GeoTiffFile::from_bytes(bytes).unwrap();
     assert_eq!(geo.epsg(), Some(4326));

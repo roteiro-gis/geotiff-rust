@@ -22,7 +22,12 @@ where
     values
 }
 
-fn padded_tile<T: Copy + Default>(width: usize, height: usize, tile_width: usize, pixels: &[T]) -> Vec<T> {
+fn padded_tile<T: Copy + Default>(
+    width: usize,
+    height: usize,
+    tile_width: usize,
+    pixels: &[T],
+) -> Vec<T> {
     let mut tile = vec![T::default(); tile_width * tile_width];
     for row in 0..height {
         let src_start = row * width;
@@ -159,7 +164,9 @@ fn multi_ifd_and_planar_rgb_roundtrip() {
                 planar_tile[index] = (band * 10 + row * 2 + col + 1) as u8;
             }
         }
-        writer.write_block(&planar_handle, band, &planar_tile).unwrap();
+        writer
+            .write_block(&planar_handle, band, &planar_tile)
+            .unwrap();
     }
     writer.finish().unwrap();
 

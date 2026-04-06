@@ -30,7 +30,10 @@ KNOWN_INCOMPATIBLE_EDITION=NO\n",
 
 fn assert_strictly_increasing_offsets(offsets: &[u64], context: &str) {
     for window in offsets.windows(2) {
-        assert!(window[0] < window[1], "{context}: offsets are not strictly increasing");
+        assert!(
+            window[0] < window[1],
+            "{context}: offsets are not strictly increasing"
+        );
     }
 }
 
@@ -137,7 +140,10 @@ fn cog_streaming_and_multiband_roundtrip_match_expectations() {
     let base = chunky_geo.read_raster::<u8>().unwrap();
     assert_eq!(base.shape(), &[32, 32, 3]);
     assert_eq!(base[[5, 9, 0]], rgb[[5, 9, 0]]);
-    assert_eq!(chunky_geo.read_overview::<u8>(0).unwrap().shape(), &[16, 16, 3]);
+    assert_eq!(
+        chunky_geo.read_overview::<u8>(0).unwrap().shape(),
+        &[16, 16, 3]
+    );
 
     let mut planar = Array3::<u8>::zeros((32, 32, 3));
     for row in 0..32 {

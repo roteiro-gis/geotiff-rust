@@ -14,7 +14,9 @@ pub struct LossyU8Tolerance {
 }
 
 pub fn workspace_root(manifest_dir: &str) -> PathBuf {
-    let mut current = Path::new(manifest_dir).canonicalize().unwrap_or_else(|_| PathBuf::from(manifest_dir));
+    let mut current = Path::new(manifest_dir)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(manifest_dir));
 
     loop {
         if current.join("testdata/interoperability").is_dir()

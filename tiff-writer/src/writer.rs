@@ -209,10 +209,7 @@ impl<W: Write + Seek> TiffWriter<W> {
         }
 
         let compressed = if matches!(state.builder.compression, tiff_core::Compression::Lerc) {
-            let opts = state
-                .builder
-                .lerc_options
-                .unwrap_or_default();
+            let opts = state.builder.lerc_options.unwrap_or_default();
             let block_width = state.builder.block_row_width() as u32;
             let block_height = state.builder.block_height(block_index);
             let depth = state.builder.block_samples_per_pixel() as u32;

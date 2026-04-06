@@ -249,5 +249,4 @@ mod tests {
         }
         assert_eq!(LercAdditionalCompression::from_code(99), None);
     }
-
 }

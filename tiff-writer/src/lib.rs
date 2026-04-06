@@ -938,7 +938,10 @@ mod tests {
         let result = writer.write_block(&handle, 0, &[1u64, 2, 3, 4]);
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("LERC"), "error should mention LERC: {err_msg}");
+        assert!(
+            err_msg.contains("LERC"),
+            "error should mention LERC: {err_msg}"
+        );
     }
 
     #[test]
@@ -978,7 +981,9 @@ mod tests {
         // Planar: 3 separate strips (one per band), each 4 pixels
         writer.write_block(&handle, 0, &[1u8, 2, 3, 4]).unwrap(); // R
         writer.write_block(&handle, 1, &[10u8, 20, 30, 40]).unwrap(); // G
-        writer.write_block(&handle, 2, &[100u8, 110, 120, 130]).unwrap(); // B
+        writer
+            .write_block(&handle, 2, &[100u8, 110, 120, 130])
+            .unwrap(); // B
         writer.finish().unwrap();
 
         let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();

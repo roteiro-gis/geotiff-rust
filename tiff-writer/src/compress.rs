@@ -68,8 +68,14 @@ pub fn compress_block_lerc<T: TiffWriteSample>(
     options: &LercOptions,
     index: usize,
 ) -> Result<Vec<u8>> {
-    let blob =
-        T::lerc_encode_block(samples, block_width, block_height, depth, options.max_z_error, index)?;
+    let blob = T::lerc_encode_block(
+        samples,
+        block_width,
+        block_height,
+        depth,
+        options.max_z_error,
+        index,
+    )?;
 
     match options.additional_compression {
         tiff_core::LercAdditionalCompression::None => Ok(blob),

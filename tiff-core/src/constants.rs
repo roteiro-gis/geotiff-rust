@@ -190,9 +190,40 @@ impl PlanarConfiguration {
     }
 }
 
+/// TIFF-side LERC additional compression mode.
+///
+/// When LERC is the primary compression (tag 259 = 34887), the LERC blob
+/// may optionally be wrapped in an additional compression layer. The mode
+/// is recorded in the `LercParameters` tag (50674).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LercAdditionalCompression {
+    None,
+    Deflate,
+    Zstd,
+}
+
+impl LercAdditionalCompression {
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::None),
+            1 => Some(Self::Deflate),
+            2 => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+
+    pub fn to_code(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::Deflate => 1,
+            Self::Zstd => 2,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Compression, TAG_LERC_PARAMETERS};
+    use super::*;
 
     #[test]
     fn compression_roundtrips_lerc() {
@@ -204,5 +235,18 @@ mod tests {
     #[test]
     fn lerc_parameters_tag_matches_registered_value() {
         assert_eq!(TAG_LERC_PARAMETERS, 50674);
+    }
+
+    #[test]
+    fn lerc_additional_compression_roundtrips() {
+        for (code, expected) in [
+            (0, LercAdditionalCompression::None),
+            (1, LercAdditionalCompression::Deflate),
+            (2, LercAdditionalCompression::Zstd),
+        ] {
+            assert_eq!(LercAdditionalCompression::from_code(code), Some(expected));
+            assert_eq!(expected.to_code(), code);
+        }
+        assert_eq!(LercAdditionalCompression::from_code(99), None);
     }
 }

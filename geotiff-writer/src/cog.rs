@@ -17,6 +17,7 @@ use std::path::Path;
 
 use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
 use tiff_core::{ByteOrder, Compression, Predictor};
+use tiff_writer::LercOptions;
 use tiff_writer::{ImageBuilder, ImageHandle, TiffVariant, TiffWriter, WriteOptions};
 
 use crate::builder::GeoTiffBuilder;
@@ -56,6 +57,8 @@ struct CogBlockEncoding {
     predictor: Predictor,
     samples_per_pixel: u16,
     row_width_pixels: usize,
+    block_height: u32,
+    lerc_options: Option<LercOptions>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +68,7 @@ struct TileWritePlan {
     planar_configuration: tiff_core::PlanarConfiguration,
     compression: Compression,
     predictor: Predictor,
+    lerc_options: Option<LercOptions>,
 }
 
 /// Configuration for COG writing.
@@ -97,15 +101,27 @@ fn write_cog_block<T: NumericSample, W: Write + Seek>(
     samples: &[T],
     encoding: CogBlockEncoding,
 ) -> Result<()> {
-    let compressed = tiff_writer::compress::compress_block(
-        samples,
-        ByteOrder::LittleEndian,
-        encoding.compression,
-        encoding.predictor,
-        encoding.samples_per_pixel,
-        encoding.row_width_pixels,
-        block_index,
-    )?;
+    let compressed = if matches!(encoding.compression, Compression::Lerc) {
+        let opts = encoding.lerc_options.unwrap_or_default();
+        tiff_writer::compress::compress_block_lerc(
+            samples,
+            encoding.row_width_pixels as u32,
+            encoding.block_height,
+            encoding.samples_per_pixel as u32,
+            &opts,
+            block_index,
+        )?
+    } else {
+        tiff_writer::compress::compress_block(
+            samples,
+            ByteOrder::LittleEndian,
+            encoding.compression,
+            encoding.predictor,
+            encoding.samples_per_pixel,
+            encoding.row_width_pixels,
+            block_index,
+        )?
+    };
     let leader = gdal_block_leader(compressed.len(), ByteOrder::LittleEndian);
     let trailer = gdal_block_trailer(&compressed);
     writer.write_block_raw_segmented(handle, block_index, &leader, &compressed, &trailer)?;
@@ -258,6 +274,10 @@ impl CogBuilder {
                 .tiles(tw as u32, th as u32)
                 .overview();
 
+            if let Some(opts) = self.inner.lerc_options {
+                ovr_ib = ovr_ib.lerc_options(opts);
+            }
+
             for tag in self.inner.build_extra_tags() {
                 ovr_ib = ovr_ib.tag(tag);
             }
@@ -292,6 +312,7 @@ impl CogBuilder {
                     planar_configuration: self.inner.planar_configuration,
                     compression: self.inner.compression,
                     predictor: self.inner.predictor,
+                    lerc_options: self.inner.lerc_options,
                 },
             )?;
         }
@@ -307,6 +328,7 @@ impl CogBuilder {
                 planar_configuration: self.inner.planar_configuration,
                 compression: self.inner.compression,
                 predictor: self.inner.predictor,
+                lerc_options: self.inner.lerc_options,
             },
         )?;
 
@@ -398,6 +420,7 @@ pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     planar_configuration: tiff_core::PlanarConfiguration,
     compression: Compression,
     predictor: Predictor,
+    lerc_options: Option<LercOptions>,
     overview_levels: Vec<u32>,
     resampling: Resampling,
     _phantom: std::marker::PhantomData<T>,
@@ -438,6 +461,10 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                 .tiles(tw, th)
                 .overview();
 
+            if let Some(opts) = cog.inner.lerc_options {
+                ovr_ib = ovr_ib.lerc_options(opts);
+            }
+
             for tag in cog.inner.build_extra_tags() {
                 ovr_ib = ovr_ib.tag(tag);
             }
@@ -465,6 +492,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             planar_configuration: cog.inner.planar_configuration,
             compression: cog.inner.compression,
             predictor: cog.inner.predictor,
+            lerc_options: cog.inner.lerc_options,
             overview_levels: sorted_levels,
             resampling: cog.resampling,
             _phantom: std::marker::PhantomData,
@@ -595,6 +623,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                     planar_configuration: self.planar_configuration,
                     compression: self.compression,
                     predictor: self.predictor,
+                    lerc_options: self.lerc_options,
                 },
             )?;
         }
@@ -609,6 +638,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                 planar_configuration: self.planar_configuration,
                 compression: self.compression,
                 predictor: self.predictor,
+                lerc_options: self.lerc_options,
             },
         )?;
 
@@ -701,6 +731,8 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
                             predictor: plan.predictor,
                             samples_per_pixel: 1,
                             row_width_pixels: tw,
+                            block_height: th as u32,
+                            lerc_options: plan.lerc_options,
                         },
                     )?;
                 }
@@ -737,6 +769,8 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
                         predictor: plan.predictor,
                         samples_per_pixel: bands as u16,
                         row_width_pixels: tw,
+                        block_height: th as u32,
+                        lerc_options: plan.lerc_options,
                     },
                 )?;
             }

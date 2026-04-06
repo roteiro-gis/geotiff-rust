@@ -32,7 +32,11 @@ pub use tile_writer::StreamingTileWriter;
 pub use geotiff_core::{
     CrsInfo, GeoKeyDirectory, GeoKeyValue, GeoTransform, ModelType, RasterType,
 };
-pub use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration, Predictor};
+pub use tiff_core::{
+    Compression, LercAdditionalCompression, PhotometricInterpretation, PlanarConfiguration,
+    Predictor,
+};
+pub use tiff_writer::LercOptions;
 
 #[cfg(test)]
 mod tests {
@@ -329,5 +333,161 @@ mod tests {
         let (ov, _) = oneshot_img.into_raw_vec_and_offset();
         let (sv, _) = streaming_img.into_raw_vec_and_offset();
         assert_eq!(ov, sv);
+    }
+
+    // -- LERC compression --
+
+    #[test]
+    fn write_and_read_lerc_geotiff() {
+        let data = Array2::<f32>::from_elem((8, 8), 42.5);
+        let mut buf = Cursor::new(Vec::new());
+        GeoTiffBuilder::new(8, 8)
+            .lerc_options(LercOptions::default())
+            .epsg(4326)
+            .pixel_scale(1.0, 1.0)
+            .origin(0.0, 8.0)
+            .write_2d_to(&mut buf, data.view())
+            .unwrap();
+
+        let bytes = buf.into_inner();
+        let file = tiff_reader::TiffFile::from_bytes(bytes.clone()).unwrap();
+        let img = file.read_image::<f32>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, vec![42.5f32; 64]);
+
+        let geo = geotiff_reader::GeoTiffFile::from_bytes(bytes).unwrap();
+        assert_eq!(geo.epsg(), Some(4326));
+    }
+
+    #[test]
+    fn write_and_read_lerc_deflate_geotiff() {
+        let data = Array2::<u16>::from_elem((8, 8), 1000);
+        let mut buf = Cursor::new(Vec::new());
+        GeoTiffBuilder::new(8, 8)
+            .lerc_options(LercOptions {
+                max_z_error: 0.0,
+                additional_compression: LercAdditionalCompression::Deflate,
+            })
+            .write_2d_to(&mut buf, data.view())
+            .unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<u16>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, vec![1000u16; 64]);
+    }
+
+    #[test]
+    fn write_and_read_lerc_multiband_geotiff() {
+        let mut data = ndarray::Array3::<u8>::zeros((4, 4, 3));
+        for r in 0..4 {
+            for c in 0..4 {
+                data[[r, c, 0]] = 255;
+                data[[r, c, 1]] = 0;
+                data[[r, c, 2]] = (r * 64) as u8;
+            }
+        }
+
+        let mut buf = Cursor::new(Vec::new());
+        GeoTiffBuilder::new(4, 4)
+            .bands(3)
+            .photometric(PhotometricInterpretation::Rgb)
+            .lerc_options(LercOptions::default())
+            .write_3d_to(&mut buf, data.view())
+            .unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<u8>(0).unwrap();
+        assert_eq!(img.shape(), &[4, 4, 3]);
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(&values[0..3], &[255, 0, 0]);
+        assert_eq!(&values[24..27], &[255, 0, 128]);
+    }
+
+    #[test]
+    fn cog_lerc_with_overviews() {
+        let mut data = Array2::<f32>::zeros((32, 32));
+        for r in 0..32 {
+            for c in 0..32 {
+                data[[r, c]] = (r * 32 + c) as f32;
+            }
+        }
+
+        let mut buf = Cursor::new(Vec::new());
+        let builder = GeoTiffBuilder::new(32, 32)
+            .tile_size(16, 16)
+            .lerc_options(LercOptions::default())
+            .epsg(4326);
+
+        CogBuilder::new(builder)
+            .overview_levels(vec![2, 4])
+            .write_2d_to(&mut buf, data.view())
+            .unwrap();
+
+        let bytes = buf.into_inner();
+        let file = tiff_reader::TiffFile::from_bytes(bytes).unwrap();
+
+        // Base + 2 overviews
+        assert_eq!(file.ifd_count(), 3);
+        assert_eq!(file.ifd(0).unwrap().width(), 32);
+
+        let base = file.read_image::<f32>(0).unwrap();
+        assert_eq!(base.shape(), &[32, 32]);
+        assert_eq!(base[[0, 0]], 0.0);
+        assert_eq!(base[[1, 1]], 33.0);
+    }
+
+    #[test]
+    fn streaming_tile_writer_lerc() {
+        let mut buf = Cursor::new(Vec::new());
+        let builder = GeoTiffBuilder::new(32, 32)
+            .tile_size(16, 16)
+            .lerc_options(LercOptions::default())
+            .epsg(4326);
+
+        let mut tw = builder.tile_writer::<u8, _>(&mut buf).unwrap();
+
+        for tile_row in 0..2 {
+            for tile_col in 0..2 {
+                let val = (tile_row * 2 + tile_col + 1) as u8;
+                let tile = ndarray::Array2::from_elem((16, 16), val);
+                tw.write_tile(tile_col * 16, tile_row * 16, &tile.view())
+                    .unwrap();
+            }
+        }
+        tw.finish().unwrap();
+
+        let bytes = buf.into_inner();
+        let file = tiff_reader::TiffFile::from_bytes(bytes).unwrap();
+        let img = file.read_image::<u8>(0).unwrap();
+        assert_eq!(img.shape(), &[32, 32]);
+        assert_eq!(img[[0, 0]], 1);
+        assert_eq!(img[[0, 16]], 2);
+        assert_eq!(img[[16, 0]], 3);
+        assert_eq!(img[[16, 16]], 4);
+    }
+
+    #[test]
+    fn write_and_read_lerc_lossy_geotiff() {
+        let data = Array2::<f32>::from_shape_fn((8, 8), |(r, c)| (r * 8 + c) as f32 * 1.1);
+        let mut buf = Cursor::new(Vec::new());
+        GeoTiffBuilder::new(8, 8)
+            .lerc_options(LercOptions {
+                max_z_error: 0.5,
+                additional_compression: LercAdditionalCompression::None,
+            })
+            .write_2d_to(&mut buf, data.view())
+            .unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<f32>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        for (actual, &expected) in values.iter().zip(data.iter()) {
+            assert!(
+                (actual - expected).abs() <= 0.5,
+                "lossy error {:.3} exceeds 0.5",
+                (actual - expected).abs()
+            );
+        }
     }
 }

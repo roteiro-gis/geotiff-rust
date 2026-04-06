@@ -31,6 +31,7 @@ pub struct GeoTiffBuilder {
     pub(crate) nodata: Option<String>,
     pub(crate) compression: Compression,
     pub(crate) predictor: Predictor,
+    pub(crate) lerc_options: Option<tiff_writer::LercOptions>,
     pub(crate) planar_configuration: PlanarConfiguration,
     pub(crate) tile_width: Option<u32>,
     pub(crate) tile_height: Option<u32>,
@@ -51,6 +52,7 @@ impl GeoTiffBuilder {
             nodata: None,
             compression: Compression::None,
             predictor: Predictor::None,
+            lerc_options: None,
             planar_configuration: PlanarConfiguration::Chunky,
             tile_width: None,
             tile_height: None,
@@ -154,12 +156,29 @@ impl GeoTiffBuilder {
     /// Set compression algorithm.
     pub fn compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        if !matches!(compression, Compression::Lerc) {
+            self.lerc_options = None;
+        }
         self
     }
 
     /// Set predictor (requires compression != None).
     pub fn predictor(mut self, predictor: Predictor) -> Self {
-        self.predictor = predictor;
+        // LERC does not use TIFF predictors; ignore the request.
+        if !matches!(self.compression, Compression::Lerc) {
+            self.predictor = predictor;
+        }
+        self
+    }
+
+    /// Set LERC compression with the given options.
+    ///
+    /// This sets `compression = Lerc` and `predictor = None` (LERC performs
+    /// its own quantization and does not use TIFF predictors).
+    pub fn lerc_options(mut self, options: tiff_writer::LercOptions) -> Self {
+        self.compression = Compression::Lerc;
+        self.predictor = Predictor::None;
+        self.lerc_options = Some(options);
         self
     }
 
@@ -245,6 +264,10 @@ impl GeoTiffBuilder {
             .predictor(self.predictor)
             .planar_configuration(self.planar_configuration)
             .photometric(self.photometric);
+
+        if let Some(opts) = self.lerc_options {
+            ib = ib.lerc_options(opts);
+        }
 
         if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {
             ib = ib.tiles(tw, th);

@@ -10,8 +10,8 @@ homepage.workspace = true
 
 [dependencies]
 tiff-core = { version = "0.2.5", path = "../tiff-core" }
-lerc-core = { version = "0.2", path = "../../lerc-rust/lerc-core" }
-lerc-writer = { version = "0.2", path = "../../lerc-rust/lerc-writer" }
+lerc-core = { workspace = true }
+lerc-writer = { workspace = true }
 thiserror = { workspace = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 weezl = "0.1"

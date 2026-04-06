@@ -362,13 +362,28 @@ dependencies = [
 
 [[package]]
 name = "geotiff-core"
-version = "0.3.0"
+version = "0.3.1"
+
+[[package]]
+name = "geotiff-integration"
+version = "0.3.1"
+dependencies = [
+ "criterion",
+ "geotiff-core",
+ "geotiff-reader",
+ "geotiff-writer",
+ "ndarray",
+ "serde_json",
+ "tempfile",
+ "tiff-core",
+ "tiff-reader",
+ "tiff-writer",
+]
 
 [[package]]
 name = "geotiff-reader"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
- "criterion",
  "geotiff-core",
  "lru",
  "memmap2",
@@ -376,27 +391,18 @@ dependencies = [
  "parking_lot",
  "rayon",
  "reqwest",
- "serde_json",
- "tempfile",
  "thiserror",
- "tiff-core",
  "tiff-reader",
- "tiff-writer",
 ]
 
 [[package]]
 name = "geotiff-writer"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
- "criterion",
  "geotiff-core",
- "geotiff-reader",
  "ndarray",
- "serde_json",
- "tempfile",
  "thiserror",
  "tiff-core",
- "tiff-reader",
  "tiff-writer",
 ]
 
@@ -1560,16 +1566,28 @@ dependencies = [
 
 [[package]]
 name = "tiff-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
-name = "tiff-reader"
-version = "0.3.0"
+name = "tiff-integration"
+version = "0.3.1"
 dependencies = [
  "criterion",
+ "ndarray",
+ "serde_json",
+ "tempfile",
+ "tiff-core",
+ "tiff-reader",
+ "tiff-writer",
+]
+
+[[package]]
+name = "tiff-reader"
+version = "0.3.1"
+dependencies = [
  "flate2",
  "jpeg-decoder",
  "lerc-core",
@@ -1579,26 +1597,22 @@ dependencies = [
  "ndarray",
  "parking_lot",
  "rayon",
- "serde_json",
  "smallvec",
- "tempfile",
  "thiserror",
  "tiff-core",
- "tiff-writer",
  "weezl",
  "zstd",
 ]
 
 [[package]]
 name = "tiff-writer"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "flate2",
  "lerc-core",
  "lerc-writer",
  "thiserror",
  "tiff-core",
- "tiff-reader",
  "weezl",
  "zstd",
 ]

@@ -1,0 +1,146 @@
+use std::io::Cursor;
+
+use geotiff_reader::GeoTiffFile;
+use geotiff_writer::{
+    Compression, GeoTiffBuilder, LercAdditionalCompression, LercOptions, PlanarConfiguration,
+};
+use ndarray::Array2;
+use tiff_reader::TiffFile;
+
+#[test]
+fn geotiff_roundtrips_pixels_metadata_and_transform() {
+    let mut data = Array2::<f64>::zeros((4, 4));
+    for row in 0..4 {
+        for col in 0..4 {
+            data[[row, col]] = (row * 4 + col + 1) as f64;
+        }
+    }
+
+    let mut buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(4, 4)
+        .epsg(4326)
+        .pixel_scale(1.0, 1.0)
+        .origin(100.0, 200.0)
+        .nodata("-9999")
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let bytes = buf.into_inner();
+    let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+    let raster = tiff.read_image::<f64>(0).unwrap();
+    let (values, offset) = raster.into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0));
+    assert_eq!(
+        values,
+        (1..=16).map(|value| value as f64).collect::<Vec<_>>()
+    );
+
+    let geo = GeoTiffFile::from_bytes(bytes).unwrap();
+    assert_eq!(geo.epsg(), Some(4326));
+    assert_eq!(geo.nodata(), Some("-9999"));
+
+    let transform = geo.transform().unwrap();
+    let (x, y) = transform.pixel_to_geo(0.0, 0.0);
+    assert!((x - 100.0).abs() < 1e-10);
+    assert!((y - 200.0).abs() < 1e-10);
+}
+
+#[test]
+fn geotiff_compressed_and_streaming_outputs_roundtrip() {
+    let data = Array2::<u16>::from_elem((8, 8), 1000);
+    let mut compressed = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(8, 8)
+        .compression(Compression::Deflate)
+        .write_2d_to(&mut compressed, data.view())
+        .unwrap();
+
+    let compressed_file = TiffFile::from_bytes(compressed.into_inner()).unwrap();
+    let compressed_raster = compressed_file.read_image::<u16>(0).unwrap();
+    let (compressed_values, offset) = compressed_raster.into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0));
+    assert_eq!(compressed_values, vec![1000u16; 64]);
+
+    let mut oneshot_data = ndarray::Array2::<u8>::zeros((32, 32));
+    for row in 0..32 {
+        for col in 0..32 {
+            oneshot_data[[row, col]] = ((row * 32 + col) % 256) as u8;
+        }
+    }
+
+    let mut oneshot_buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(32, 32)
+        .tile_size(16, 16)
+        .write_2d_to(&mut oneshot_buf, oneshot_data.view())
+        .unwrap();
+
+    let mut streaming_buf = Cursor::new(Vec::new());
+    let builder = GeoTiffBuilder::new(32, 32).tile_size(16, 16);
+    let mut writer = builder.tile_writer::<u8, _>(&mut streaming_buf).unwrap();
+    for tile_row in 0..2usize {
+        for tile_col in 0..2usize {
+            let y_off = tile_row * 16;
+            let x_off = tile_col * 16;
+            let tile = oneshot_data
+                .slice(ndarray::s![y_off..y_off + 16, x_off..x_off + 16])
+                .to_owned();
+            writer.write_tile(x_off, y_off, &tile.view()).unwrap();
+        }
+    }
+    writer.finish().unwrap();
+
+    let oneshot = TiffFile::from_bytes(oneshot_buf.into_inner()).unwrap();
+    let streaming = TiffFile::from_bytes(streaming_buf.into_inner()).unwrap();
+    let oneshot_image = oneshot.read_image::<u8>(0).unwrap();
+    let streaming_image = streaming.read_image::<u8>(0).unwrap();
+    let (oneshot_values, oneshot_offset) = oneshot_image.into_raw_vec_and_offset();
+    let (streaming_values, streaming_offset) = streaming_image.into_raw_vec_and_offset();
+    assert_eq!(oneshot_offset, Some(0));
+    assert_eq!(streaming_offset, Some(0));
+    assert_eq!(oneshot_values, streaming_values);
+}
+
+#[test]
+fn planar_and_lerc_geotiffs_roundtrip() {
+    let mut planar = ndarray::Array3::<u8>::zeros((16, 16, 3));
+    for row in 0..16 {
+        for col in 0..16 {
+            planar[[row, col, 0]] = ((row * 3 + col * 5) % 251) as u8;
+            planar[[row, col, 1]] = ((row * 11 + col * 7) % 251) as u8;
+            planar[[row, col, 2]] = ((row * 17 + col * 13) % 251) as u8;
+        }
+    }
+
+    let mut planar_buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(16, 16)
+        .bands(3)
+        .tile_size(16, 16)
+        .planar_configuration(PlanarConfiguration::Planar)
+        .compression(Compression::Deflate)
+        .write_3d_to(&mut planar_buf, planar.view())
+        .unwrap();
+
+    let planar_file = TiffFile::from_bytes(planar_buf.into_inner()).unwrap();
+    let planar_raster = planar_file.read_image::<u8>(0).unwrap();
+    assert_eq!(planar_raster.shape(), &[16, 16, 3]);
+    assert_eq!(planar_raster[[5, 7, 0]], planar[[5, 7, 0]]);
+    assert_eq!(planar_raster[[5, 7, 1]], planar[[5, 7, 1]]);
+    assert_eq!(planar_raster[[5, 7, 2]], planar[[5, 7, 2]]);
+
+    let lerc_data = Array2::<f32>::from_shape_fn((8, 8), |(row, col)| (row * 8 + col) as f32 * 1.1);
+    let mut lerc_buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(8, 8)
+        .lerc_options(LercOptions {
+            max_z_error: 0.5,
+            additional_compression: LercAdditionalCompression::None,
+        })
+        .write_2d_to(&mut lerc_buf, lerc_data.view())
+        .unwrap();
+
+    let lerc_file = TiffFile::from_bytes(lerc_buf.into_inner()).unwrap();
+    let lerc_raster = lerc_file.read_image::<f32>(0).unwrap();
+    let (values, offset) = lerc_raster.into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0));
+    for (actual, expected) in values.iter().zip(lerc_data.iter()) {
+        assert!((actual - expected).abs() <= 0.5);
+    }
+}

@@ -9,7 +9,7 @@ use geotiff_writer::{
 use ndarray::{Array3, ArrayD};
 use tempfile::NamedTempFile;
 
-#[path = "../../test-support/reference.rs"]
+#[path = "../../../test-support/reference.rs"]
 mod reference;
 
 const RUST_IMPL_NAME: &str = "geotiff-rust";

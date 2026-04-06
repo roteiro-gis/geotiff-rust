@@ -10,7 +10,7 @@ use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration};
 use tiff_reader::TiffFile;
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
-#[path = "../../test-support/reference.rs"]
+#[path = "../../../test-support/reference.rs"]
 mod reference;
 
 const RUST_IMPL_NAME: &str = "geotiff-rust";

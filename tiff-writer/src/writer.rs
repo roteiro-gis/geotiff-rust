@@ -111,6 +111,11 @@ impl<W: Write + Seek> TiffWriter<W> {
         let (offsets_tag, byte_counts_tag) = builder.offset_tag_codes();
         let layout_tags = builder.layout_tags();
 
+        let mut all_extra_tags = builder.extra_tags.clone();
+        if let Some(lerc_tag) = builder.lerc_parameters_tag() {
+            all_extra_tags.push(lerc_tag);
+        }
+
         let tags = encoder::build_image_tags(&encoder::ImageTagParams {
             width: builder.width,
             height: builder.height,
@@ -122,7 +127,7 @@ impl<W: Write + Seek> TiffWriter<W> {
             predictor: builder.predictor.to_code(),
             planar_configuration: builder.planar_configuration.to_code(),
             subfile_type: builder.subfile_type,
-            extra_tags: &builder.extra_tags,
+            extra_tags: &all_extra_tags,
             offsets_tag_code: offsets_tag,
             byte_counts_tag_code: byte_counts_tag,
             num_blocks,
@@ -203,15 +208,33 @@ impl<W: Write + Seek> TiffWriter<W> {
             });
         }
 
-        let compressed = compress::compress_block(
-            samples,
-            self.byte_order,
-            state.builder.compression,
-            state.builder.predictor,
-            state.builder.block_samples_per_pixel(),
-            state.builder.block_row_width(),
-            block_index,
-        )?;
+        let compressed = if matches!(state.builder.compression, tiff_core::Compression::Lerc) {
+            let opts = state
+                .builder
+                .lerc_options
+                .unwrap_or_default();
+            let block_width = state.builder.block_row_width() as u32;
+            let block_height = state.builder.block_height(block_index);
+            let depth = state.builder.block_samples_per_pixel() as u32;
+            compress::compress_block_lerc(
+                samples,
+                block_width,
+                block_height,
+                depth,
+                &opts,
+                block_index,
+            )?
+        } else {
+            compress::compress_block(
+                samples,
+                self.byte_order,
+                state.builder.compression,
+                state.builder.predictor,
+                state.builder.block_samples_per_pixel(),
+                state.builder.block_row_width(),
+                block_index,
+            )?
+        };
 
         self.write_block_raw(handle, block_index, &compressed)
     }

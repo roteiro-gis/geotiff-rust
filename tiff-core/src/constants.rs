@@ -190,9 +190,61 @@ impl PlanarConfiguration {
     }
 }
 
+/// TIFF-side LERC additional compression mode.
+///
+/// When LERC is the primary compression (tag 259 = 34887), the LERC blob
+/// may optionally be wrapped in an additional compression layer. The mode
+/// is recorded in the `LercParameters` tag (50674).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LercAdditionalCompression {
+    None,
+    Deflate,
+    Zstd,
+}
+
+impl LercAdditionalCompression {
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::None),
+            1 => Some(Self::Deflate),
+            2 => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+
+    pub fn to_code(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::Deflate => 1,
+            Self::Zstd => 2,
+        }
+    }
+}
+
+/// LERC encoding options for the TIFF writer.
+///
+/// Controls the LERC2 error tolerance and optional additional compression
+/// applied to the encoded LERC blob before storage in the TIFF block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LercOptions {
+    /// Maximum encoding error per sample value. Set to `0.0` for lossless.
+    pub max_z_error: f64,
+    /// Optional additional compression applied to the LERC blob.
+    pub additional_compression: LercAdditionalCompression,
+}
+
+impl Default for LercOptions {
+    fn default() -> Self {
+        Self {
+            max_z_error: 0.0,
+            additional_compression: LercAdditionalCompression::None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Compression, TAG_LERC_PARAMETERS};
+    use super::*;
 
     #[test]
     fn compression_roundtrips_lerc() {
@@ -204,5 +256,25 @@ mod tests {
     #[test]
     fn lerc_parameters_tag_matches_registered_value() {
         assert_eq!(TAG_LERC_PARAMETERS, 50674);
+    }
+
+    #[test]
+    fn lerc_additional_compression_roundtrips() {
+        for (code, expected) in [
+            (0, LercAdditionalCompression::None),
+            (1, LercAdditionalCompression::Deflate),
+            (2, LercAdditionalCompression::Zstd),
+        ] {
+            assert_eq!(LercAdditionalCompression::from_code(code), Some(expected));
+            assert_eq!(expected.to_code(), code);
+        }
+        assert_eq!(LercAdditionalCompression::from_code(99), None);
+    }
+
+    #[test]
+    fn lerc_options_default_is_lossless() {
+        let opts = LercOptions::default();
+        assert_eq!(opts.max_z_error, 0.0);
+        assert_eq!(opts.additional_compression, LercAdditionalCompression::None);
     }
 }

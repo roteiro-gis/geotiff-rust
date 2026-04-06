@@ -31,6 +31,7 @@ pub struct GeoTiffBuilder {
     pub(crate) nodata: Option<String>,
     pub(crate) compression: Compression,
     pub(crate) predictor: Predictor,
+    pub(crate) lerc_options: Option<tiff_core::LercOptions>,
     pub(crate) planar_configuration: PlanarConfiguration,
     pub(crate) tile_width: Option<u32>,
     pub(crate) tile_height: Option<u32>,
@@ -51,6 +52,7 @@ impl GeoTiffBuilder {
             nodata: None,
             compression: Compression::None,
             predictor: Predictor::None,
+            lerc_options: None,
             planar_configuration: PlanarConfiguration::Chunky,
             tile_width: None,
             tile_height: None,
@@ -163,6 +165,17 @@ impl GeoTiffBuilder {
         self
     }
 
+    /// Set LERC compression with the given options.
+    ///
+    /// This sets `compression = Lerc` and `predictor = None` (LERC performs
+    /// its own quantization and does not use TIFF predictors).
+    pub fn lerc_options(mut self, options: tiff_core::LercOptions) -> Self {
+        self.compression = Compression::Lerc;
+        self.predictor = Predictor::None;
+        self.lerc_options = Some(options);
+        self
+    }
+
     /// Set planar configuration for multi-band output.
     pub fn planar_configuration(mut self, planar_configuration: PlanarConfiguration) -> Self {
         self.planar_configuration = planar_configuration;
@@ -245,6 +258,10 @@ impl GeoTiffBuilder {
             .predictor(self.predictor)
             .planar_configuration(self.planar_configuration)
             .photometric(self.photometric);
+
+        if let Some(opts) = self.lerc_options {
+            ib = ib.lerc_options(opts);
+        }
 
         if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {
             ib = ib.tiles(tw, th);

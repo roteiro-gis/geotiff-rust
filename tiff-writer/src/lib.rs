@@ -26,6 +26,7 @@ pub mod writer;
 pub use builder::{DataLayout, ImageBuilder};
 pub use error::{Error, Result};
 pub use sample::TiffWriteSample;
+pub use tiff_core::{LercAdditionalCompression, LercOptions};
 pub use writer::{ImageHandle, TiffVariant, TiffWriter, WriteOptions};
 
 #[cfg(test)]
@@ -744,5 +745,221 @@ mod tests {
 
         let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
         assert!(file.is_bigtiff());
+    }
+
+    // -- LERC compression --
+
+    #[test]
+    fn write_and_read_lerc_u8() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<u8>()
+            .lerc_options(tiff_core::LercOptions::default())
+            .strips(4);
+        let handle = writer.add_image(image).unwrap();
+        let pixels: Vec<u8> = (0..16).collect();
+        writer.write_block(&handle, 0, &pixels).unwrap();
+        writer.finish().unwrap();
+
+        let data = buf.into_inner();
+        let file = tiff_reader::TiffFile::from_bytes(data).unwrap();
+        let img = file.read_image::<u8>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, pixels);
+    }
+
+    #[test]
+    fn write_and_read_lerc_i16() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<i16>()
+            .lerc_options(tiff_core::LercOptions::default())
+            .strips(4);
+        let handle = writer.add_image(image).unwrap();
+        let pixels: Vec<i16> = (-8..8).collect();
+        writer.write_block(&handle, 0, &pixels).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<i16>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, pixels);
+    }
+
+    #[test]
+    fn write_and_read_lerc_f32() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<f32>()
+            .lerc_options(tiff_core::LercOptions::default())
+            .strips(4);
+        let handle = writer.add_image(image).unwrap();
+        let pixels: Vec<f32> = (1..=16).map(|x| x as f32 * 0.5).collect();
+        writer.write_block(&handle, 0, &pixels).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<f32>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, pixels);
+    }
+
+    #[test]
+    fn write_and_read_lerc_f64() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<f64>()
+            .lerc_options(tiff_core::LercOptions::default())
+            .strips(4);
+        let handle = writer.add_image(image).unwrap();
+        let pixels: Vec<f64> = (1..=16).map(|x| x as f64 * 1.25).collect();
+        writer.write_block(&handle, 0, &pixels).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<f64>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, pixels);
+    }
+
+    #[test]
+    fn write_and_read_lerc_tiled() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<u16>()
+            .lerc_options(tiff_core::LercOptions::default())
+            .tiles(16, 16);
+        let handle = writer.add_image(image).unwrap();
+
+        let mut tile = vec![0u16; 256];
+        for row in 0..4 {
+            for col in 0..4 {
+                tile[row * 16 + col] = (row * 4 + col + 1) as u16;
+            }
+        }
+        writer.write_block(&handle, 0, &tile).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<u16>(0).unwrap();
+        assert_eq!(img.shape(), &[4, 4]);
+        let (values, _) = img.into_raw_vec_and_offset();
+        let expected: Vec<u16> = (1..=16).collect();
+        assert_eq!(values, expected);
+    }
+
+    #[test]
+    fn write_and_read_lerc_deflate() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<f32>()
+            .lerc_options(tiff_core::LercOptions {
+                max_z_error: 0.0,
+                additional_compression: tiff_core::LercAdditionalCompression::Deflate,
+            })
+            .strips(4);
+        let handle = writer.add_image(image).unwrap();
+        let pixels: Vec<f32> = (1..=16).map(|x| x as f32).collect();
+        writer.write_block(&handle, 0, &pixels).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<f32>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, pixels);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn write_and_read_lerc_zstd() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<u32>()
+            .lerc_options(tiff_core::LercOptions {
+                max_z_error: 0.0,
+                additional_compression: tiff_core::LercAdditionalCompression::Zstd,
+            })
+            .strips(4);
+        let handle = writer.add_image(image).unwrap();
+        let pixels: Vec<u32> = (100..116).collect();
+        writer.write_block(&handle, 0, &pixels).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<u32>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, pixels);
+    }
+
+    #[test]
+    fn write_and_read_lerc_multiband_chunky() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(2, 2)
+            .sample_type::<u8>()
+            .samples_per_pixel(3)
+            .photometric(tiff_core::PhotometricInterpretation::Rgb)
+            .lerc_options(tiff_core::LercOptions::default())
+            .strips(2);
+        let handle = writer.add_image(image).unwrap();
+        // 4 pixels, 3 bands each, interleaved
+        let pixels: Vec<u8> = vec![
+            255, 0, 0, // pixel 0: red
+            0, 255, 0, // pixel 1: green
+            0, 0, 255, // pixel 2: blue
+            128, 128, 128, // pixel 3: grey
+        ];
+        writer.write_block(&handle, 0, &pixels).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<u8>(0).unwrap();
+        assert_eq!(img.shape(), &[2, 2, 3]);
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, pixels);
+    }
+
+    #[test]
+    fn lerc_u64_returns_error() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(2, 2)
+            .sample_type::<u64>()
+            .lerc_options(tiff_core::LercOptions::default())
+            .strips(2);
+        let handle = writer.add_image(image).unwrap();
+        let result = writer.write_block(&handle, 0, &[1u64, 2, 3, 4]);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("LERC"), "error should mention LERC: {err_msg}");
+    }
+
+    #[test]
+    fn write_and_read_lerc_multi_strip() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<i32>()
+            .lerc_options(tiff_core::LercOptions::default())
+            .strips(2);
+        let handle = writer.add_image(image).unwrap();
+        let strip0: Vec<i32> = (1..=8).collect();
+        let strip1: Vec<i32> = (9..=16).collect();
+        writer.write_block(&handle, 0, &strip0).unwrap();
+        writer.write_block(&handle, 1, &strip1).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<i32>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        let expected: Vec<i32> = (1..=16).collect();
+        assert_eq!(values, expected);
     }
 }

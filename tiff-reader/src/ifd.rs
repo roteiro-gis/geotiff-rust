@@ -14,24 +14,7 @@ pub use tiff_core::constants::{
 };
 pub use tiff_core::RasterLayout;
 
-/// TIFF-side LERC additional compression mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LercAdditionalCompression {
-    None,
-    Deflate,
-    Zstd,
-}
-
-impl LercAdditionalCompression {
-    fn from_code(code: u32) -> Option<Self> {
-        match code {
-            0 => Some(Self::None),
-            1 => Some(Self::Deflate),
-            2 => Some(Self::Zstd),
-            _ => None,
-        }
-    }
-}
+pub use tiff_core::LercAdditionalCompression;
 
 /// Parsed TIFF `LercParameters` tag payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

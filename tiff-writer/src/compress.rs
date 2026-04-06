@@ -3,7 +3,7 @@
 //! This is the inverse of `tiff-reader/src/filters.rs`.
 
 use crate::error::{Error, Result};
-use tiff_core::{ByteOrder, Compression, Predictor};
+use tiff_core::{ByteOrder, Compression, LercOptions, Predictor};
 
 use crate::sample::TiffWriteSample;
 
@@ -34,6 +34,9 @@ pub fn compress_block<T: TiffWriteSample>(
 }
 
 /// Compress raw bytes using the specified compression scheme.
+///
+/// LERC compression operates on typed samples, not raw bytes. Use
+/// [`compress_block_lerc`] for LERC encoding.
 pub fn compress(data: &[u8], compression: Compression, index: usize) -> Result<Vec<u8>> {
     match compression {
         Compression::None => Ok(data.to_vec()),
@@ -41,11 +44,77 @@ pub fn compress(data: &[u8], compression: Compression, index: usize) -> Result<V
         Compression::Deflate | Compression::DeflateOld => compress_deflate(data, index),
         #[cfg(feature = "zstd")]
         Compression::Zstd => compress_zstd(data, index),
+        Compression::Lerc => Err(Error::CompressionFailed {
+            index,
+            reason: "LERC operates on typed samples; use compress_block_lerc() instead".into(),
+        }),
         other => Err(Error::CompressionFailed {
             index,
             reason: format!("compression {:?} is not supported for writing", other),
         }),
     }
+}
+
+/// Full LERC compression pipeline: typed samples → LERC2 blob → optional additional compression.
+///
+/// This is the LERC counterpart of [`compress_block`]. LERC operates directly on
+/// typed sample values (no byte-order encoding, no TIFF predictor).
+pub fn compress_block_lerc<T: TiffWriteSample>(
+    samples: &[T],
+    block_width: u32,
+    block_height: u32,
+    depth: u32,
+    options: &LercOptions,
+    index: usize,
+) -> Result<Vec<u8>> {
+    let blob =
+        T::lerc_encode_block(samples, block_width, block_height, depth, options.max_z_error, index)?;
+
+    match options.additional_compression {
+        tiff_core::LercAdditionalCompression::None => Ok(blob),
+        tiff_core::LercAdditionalCompression::Deflate => compress_deflate(&blob, index),
+        tiff_core::LercAdditionalCompression::Zstd => {
+            #[cfg(feature = "zstd")]
+            {
+                compress_zstd(&blob, index)
+            }
+            #[cfg(not(feature = "zstd"))]
+            {
+                Err(Error::CompressionFailed {
+                    index,
+                    reason: "LERC+Zstd requires the 'zstd' feature".into(),
+                })
+            }
+        }
+    }
+}
+
+/// Low-level LERC2 encoding for a single typed raster block.
+///
+/// Called by `TiffWriteSample::lerc_encode_block` implementations for
+/// LERC-compatible types (i8, u8, i16, u16, i32, u32, f32, f64).
+pub(crate) fn lerc_encode<T: lerc_core::Sample>(
+    samples: &[T],
+    width: u32,
+    height: u32,
+    depth: u32,
+    max_z_error: f64,
+    index: usize,
+) -> Result<Vec<u8>> {
+    let raster = lerc_core::RasterView::new(width, height, depth, samples).map_err(|e| {
+        Error::CompressionFailed {
+            index,
+            reason: format!("LERC raster view: {e}"),
+        }
+    })?;
+    let options = lerc_writer::EncodeOptions {
+        max_z_error,
+        micro_block_size: 8,
+    };
+    lerc_writer::encode(raster, None, options).map_err(|e| Error::CompressionFailed {
+        index,
+        reason: format!("LERC encode: {e}"),
+    })
 }
 
 /// Apply forward predictor to a row of file-order bytes (in-place).

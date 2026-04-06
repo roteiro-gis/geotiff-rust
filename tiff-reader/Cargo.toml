@@ -14,8 +14,8 @@ categories = ["science", "parser-implementations"]
 
 [dependencies]
 tiff-core = { version = "0.2.5", path = "../tiff-core" }
-lerc-core = "0.1"
-lerc-reader = "0.1"
+lerc-core = { version = "0.2", path = "../../lerc-rust/lerc-core" }
+lerc-reader = { version = "0.2", path = "../../lerc-rust/lerc-reader" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
 memmap2 = { workspace = true }

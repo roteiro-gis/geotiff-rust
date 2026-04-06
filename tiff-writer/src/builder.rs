@@ -1,6 +1,6 @@
 //! Image builder for configuring a single TIFF IFD.
 
-use tiff_core::*;
+use tiff_core::{LercOptions, *};
 
 use crate::sample::TiffWriteSample;
 
@@ -28,6 +28,7 @@ pub struct ImageBuilder {
     pub(crate) layout: DataLayout,
     pub(crate) extra_tags: Vec<Tag>,
     pub(crate) subfile_type: u32,
+    pub(crate) lerc_options: Option<LercOptions>,
 }
 
 impl ImageBuilder {
@@ -48,6 +49,7 @@ impl ImageBuilder {
             },
             extra_tags: Vec::new(),
             subfile_type: 0,
+            lerc_options: None,
         }
     }
 
@@ -119,6 +121,17 @@ impl ImageBuilder {
     /// Mark this IFD as a reduced-resolution overview.
     pub fn overview(mut self) -> Self {
         self.subfile_type = 1;
+        self
+    }
+
+    /// Set LERC compression with the given options.
+    ///
+    /// This sets `compression = Lerc` and `predictor = None` (LERC performs
+    /// its own quantization and does not use TIFF predictors).
+    pub fn lerc_options(mut self, options: LercOptions) -> Self {
+        self.compression = Compression::Lerc;
+        self.predictor = Predictor::None;
+        self.lerc_options = Some(options);
         self
     }
 
@@ -236,6 +249,32 @@ impl ImageBuilder {
         }
     }
 
+    /// Height of the block at `index` in pixels.
+    ///
+    /// Tiles are always full-sized (padded at edges). Strips may be shorter
+    /// for the final strip.
+    pub fn block_height(&self, index: usize) -> u32 {
+        match self.layout {
+            DataLayout::Tiles { height, .. } => height,
+            DataLayout::Strips { rows_per_strip } => {
+                let plane_index = self.block_plane_index(index);
+                let rps = rows_per_strip.max(1) as usize;
+                let start_row = plane_index * rps;
+                let remaining = (self.height as usize).saturating_sub(start_row);
+                remaining.min(rps) as u32
+            }
+        }
+    }
+
+    /// Build the `TAG_LERC_PARAMETERS` tag if LERC compression is configured.
+    pub fn lerc_parameters_tag(&self) -> Option<Tag> {
+        let opts = self.lerc_options.as_ref()?;
+        Some(Tag::new(
+            TAG_LERC_PARAMETERS,
+            TagValue::Long(vec![2, opts.additional_compression.to_code()]),
+        ))
+    }
+
     /// Validate the configuration.
     pub fn validate(&self) -> crate::error::Result<()> {
         if self.width == 0 || self.height == 0 {
@@ -255,6 +294,13 @@ impl ImageBuilder {
                     "tile dimensions must be multiples of 16, got {}x{}",
                     width, height
                 )));
+            }
+        }
+        if matches!(self.compression, Compression::Lerc) {
+            if !matches!(self.predictor, Predictor::None) {
+                return Err(crate::error::Error::InvalidConfig(
+                    "LERC compression does not support TIFF predictors".into(),
+                ));
             }
         }
         Ok(())

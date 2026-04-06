@@ -2,7 +2,8 @@ use crate::error::{Error, Result};
 use crate::filters;
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, LercAdditionalCompression};
-use lerc_core::{DataType, DecodedBandSet, PixelData};
+use lerc_core::{DataType, PixelData};
+use lerc_reader::DecodedBandSet;
 use tiff_core::{Compression, RasterLayout, SampleFormat};
 
 pub(crate) struct BlockDecodeRequest<'a> {

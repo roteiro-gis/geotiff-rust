@@ -8,7 +8,7 @@ use geotiff_writer::{
 use ndarray::{Array3, ArrayD};
 use tempfile::NamedTempFile;
 
-#[path = "../../test-support/reference.rs"]
+#[path = "../../../test-support/reference.rs"]
 mod reference;
 
 fn assert_shape<T>(array: &ArrayD<T>, width: u32, height: u32, band_count: u64) {

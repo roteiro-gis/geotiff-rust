@@ -1,10 +1,19 @@
 [workspace]
-members = ["tiff-core", "tiff-reader", "tiff-writer", "geotiff-core", "geotiff-reader", "geotiff-writer"]
+members = [
+    "tiff-core",
+    "tiff-reader",
+    "tiff-writer",
+    "geotiff-core",
+    "geotiff-reader",
+    "geotiff-writer",
+    "integration-tests/tiff-integration",
+    "integration-tests/geotiff-integration",
+]
 exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.77"
 license = "MIT OR Apache-2.0"

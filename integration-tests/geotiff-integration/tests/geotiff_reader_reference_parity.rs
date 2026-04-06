@@ -1,5 +1,3 @@
-#![cfg(feature = "local")]
-
 use std::fs::File;
 use std::io::BufWriter;
 
@@ -12,7 +10,7 @@ use geotiff_core::geokeys::{self, GeoKeyDirectory, GeoKeyValue};
 use geotiff_core::{tags, RasterType};
 use geotiff_reader::GeoTiffFile;
 
-#[path = "../../test-support/reference.rs"]
+#[path = "../../../test-support/reference.rs"]
 mod reference;
 
 #[derive(Clone, Copy)]

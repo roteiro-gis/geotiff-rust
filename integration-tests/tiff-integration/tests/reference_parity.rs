@@ -7,7 +7,7 @@ use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration};
 use tiff_reader::TiffFile;
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
-#[path = "../../test-support/reference.rs"]
+#[path = "../../../test-support/reference.rs"]
 mod reference;
 
 #[derive(Debug, Default)]
@@ -358,7 +358,7 @@ fn matches_gdal_decoded_pixels_for_interoperability_corpus() {
         return;
     }
 
-    let cases = vec![
+    let mut cases = vec![
         (fixture("gdal/gcore/data/byte.tif"), 0usize, SampleKind::U8),
         (
             fixture("gdal/gcore/data/WGS_1984_Web_Mercator.tif"),
@@ -397,10 +397,6 @@ fn matches_gdal_decoded_pixels_for_interoperability_corpus() {
         ),
     ];
 
-    #[cfg(feature = "zstd")]
-    let mut cases = cases;
-
-    #[cfg(feature = "zstd")]
     cases.push((
         fixture("gdal/gcore/data/byte_zstd.tif"),
         0usize,

@@ -1,5 +1,3 @@
-#![cfg(feature = "local")]
-
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
@@ -14,7 +12,7 @@ use tempfile::NamedTempFile;
 use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration, Tag, TagValue};
 use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
 
-#[path = "../../test-support/reference.rs"]
+#[path = "../../../test-support/reference.rs"]
 mod reference;
 
 const RUST_IMPL_NAME: &str = "geotiff-rust";

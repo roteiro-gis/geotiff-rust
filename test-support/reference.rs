@@ -14,10 +14,23 @@ pub struct LossyU8Tolerance {
 }
 
 pub fn workspace_root(manifest_dir: &str) -> PathBuf {
-    Path::new(manifest_dir)
-        .join("..")
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(manifest_dir).join(".."))
+    let mut current = Path::new(manifest_dir).canonicalize().unwrap_or_else(|_| PathBuf::from(manifest_dir));
+
+    loop {
+        if current.join("testdata/interoperability").is_dir()
+            && current.join("scripts/reference_gdal.py").is_file()
+            && current.join("Cargo.toml").is_file()
+        {
+            return current;
+        }
+
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent.to_path_buf();
+    }
+
+    panic!("failed to locate workspace root from manifest dir: {manifest_dir}");
 }
 
 pub fn fixture(manifest_dir: &str, relative_path: &str) -> PathBuf {

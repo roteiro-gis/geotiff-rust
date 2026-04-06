@@ -1,5 +1,10 @@
 //! Pure-Rust TIFF/BigTIFF encoder with compression, tiling, and streaming writes.
 //!
+//! Supports:
+//! - **Compression**: None, LZW, Deflate, LERC, LERC+Deflate, LERC+Zstd, ZSTD (feature)
+//! - **Predictors**: Horizontal differencing, floating-point
+//! - **Layouts**: strips, tiles, multi-IFD, BigTIFF
+//!
 //! # Example
 //!
 //! ```no_run

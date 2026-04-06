@@ -1,5 +1,9 @@
 //! Compression pipeline: forward predictor + compress.
 //!
+//! Standard codecs (LZW, Deflate, Zstd) follow: encode bytes → predictor → compress.
+//! LERC operates directly on typed samples via [`compress_block_lerc`], bypassing
+//! the byte-order encoding and predictor stages.
+//!
 //! This is the inverse of `tiff-reader/src/filters.rs`.
 
 use crate::builder::LercOptions;

@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-tiff-core = { version = "0.2.5", path = "../tiff-core" }
+tiff-core = { version = "0.3.0", path = "../tiff-core" }
 lerc-core = { workspace = true }
 lerc-writer = { workspace = true }
 thiserror = { workspace = true }
@@ -21,7 +21,7 @@ default = ["zstd"]
 zstd = ["dep:zstd"]
 
 [dev-dependencies]
-tiff-reader = { version = "0.2", path = "../tiff-reader" }
+tiff-reader = { version = "0.3", path = "../tiff-reader" }
 
 [dependencies.zstd]
 version = "0.13"

@@ -326,12 +326,12 @@ impl ImageBuilder {
                 )));
             }
         }
-        if matches!(self.compression, Compression::Lerc) {
-            if !matches!(self.predictor, Predictor::None) {
-                return Err(crate::error::Error::InvalidConfig(
-                    "LERC compression does not support TIFF predictors".into(),
-                ));
-            }
+        if matches!(self.compression, Compression::Lerc)
+            && !matches!(self.predictor, Predictor::None)
+        {
+            return Err(crate::error::Error::InvalidConfig(
+                "LERC compression does not support TIFF predictors".into(),
+            ));
         }
         Ok(())
     }

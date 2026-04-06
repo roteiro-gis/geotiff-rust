@@ -362,11 +362,11 @@ dependencies = [
 
 [[package]]
 name = "geotiff-core"
-version = "0.2.5"
+version = "0.3.0"
 
 [[package]]
 name = "geotiff-reader"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "geotiff-core",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "geotiff-writer"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "geotiff-core",
@@ -1560,14 +1560,14 @@ dependencies = [
 
 [[package]]
 name = "tiff-core"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "tiff-reader"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "flate2",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-writer"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "lerc-core",

@@ -1,8 +1,29 @@
 //! Image builder for configuring a single TIFF IFD.
 
-use tiff_core::{LercOptions, *};
+use tiff_core::*;
 
 use crate::sample::TiffWriteSample;
+
+/// LERC encoding options for the TIFF writer.
+///
+/// Controls the LERC2 error tolerance and optional additional compression
+/// applied to the encoded LERC blob before storage in the TIFF block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LercOptions {
+    /// Maximum encoding error per sample value. Set to `0.0` for lossless.
+    pub max_z_error: f64,
+    /// Optional additional compression applied to the LERC blob.
+    pub additional_compression: LercAdditionalCompression,
+}
+
+impl Default for LercOptions {
+    fn default() -> Self {
+        Self {
+            max_z_error: 0.0,
+            additional_compression: LercAdditionalCompression::None,
+        }
+    }
+}
 
 /// Describes how image data is organized: strips or tiles.
 #[derive(Debug, Clone, Copy)]
@@ -78,11 +99,17 @@ impl ImageBuilder {
 
     pub fn compression(mut self, c: Compression) -> Self {
         self.compression = c;
+        if !matches!(c, Compression::Lerc) {
+            self.lerc_options = None;
+        }
         self
     }
 
     pub fn predictor(mut self, p: Predictor) -> Self {
-        self.predictor = p;
+        // LERC does not use TIFF predictors; ignore the request.
+        if !matches!(self.compression, Compression::Lerc) {
+            self.predictor = p;
+        }
         self
     }
 
@@ -268,7 +295,10 @@ impl ImageBuilder {
 
     /// Build the `TAG_LERC_PARAMETERS` tag if LERC compression is configured.
     pub fn lerc_parameters_tag(&self) -> Option<Tag> {
-        let opts = self.lerc_options.as_ref()?;
+        if !matches!(self.compression, Compression::Lerc) {
+            return None;
+        }
+        let opts = self.lerc_options.unwrap_or_default();
         Some(Tag::new(
             TAG_LERC_PARAMETERS,
             TagValue::Long(vec![2, opts.additional_compression.to_code()]),

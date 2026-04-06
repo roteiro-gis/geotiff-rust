@@ -2,8 +2,9 @@
 //!
 //! This is the inverse of `tiff-reader/src/filters.rs`.
 
+use crate::builder::LercOptions;
 use crate::error::{Error, Result};
-use tiff_core::{ByteOrder, Compression, LercOptions, Predictor};
+use tiff_core::{ByteOrder, Compression, Predictor};
 
 use crate::sample::TiffWriteSample;
 

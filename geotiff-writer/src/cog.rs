@@ -16,7 +16,8 @@ use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
 use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
-use tiff_core::{ByteOrder, Compression, LercOptions, Predictor};
+use tiff_core::{ByteOrder, Compression, Predictor};
+use tiff_writer::LercOptions;
 use tiff_writer::{ImageBuilder, ImageHandle, TiffVariant, TiffWriter, WriteOptions};
 
 use crate::builder::GeoTiffBuilder;

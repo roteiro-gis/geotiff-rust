@@ -31,7 +31,7 @@ pub struct GeoTiffBuilder {
     pub(crate) nodata: Option<String>,
     pub(crate) compression: Compression,
     pub(crate) predictor: Predictor,
-    pub(crate) lerc_options: Option<tiff_core::LercOptions>,
+    pub(crate) lerc_options: Option<tiff_writer::LercOptions>,
     pub(crate) planar_configuration: PlanarConfiguration,
     pub(crate) tile_width: Option<u32>,
     pub(crate) tile_height: Option<u32>,
@@ -156,12 +156,18 @@ impl GeoTiffBuilder {
     /// Set compression algorithm.
     pub fn compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        if !matches!(compression, Compression::Lerc) {
+            self.lerc_options = None;
+        }
         self
     }
 
     /// Set predictor (requires compression != None).
     pub fn predictor(mut self, predictor: Predictor) -> Self {
-        self.predictor = predictor;
+        // LERC does not use TIFF predictors; ignore the request.
+        if !matches!(self.compression, Compression::Lerc) {
+            self.predictor = predictor;
+        }
         self
     }
 
@@ -169,7 +175,7 @@ impl GeoTiffBuilder {
     ///
     /// This sets `compression = Lerc` and `predictor = None` (LERC performs
     /// its own quantization and does not use TIFF predictors).
-    pub fn lerc_options(mut self, options: tiff_core::LercOptions) -> Self {
+    pub fn lerc_options(mut self, options: tiff_writer::LercOptions) -> Self {
         self.compression = Compression::Lerc;
         self.predictor = Predictor::None;
         self.lerc_options = Some(options);

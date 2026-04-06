@@ -221,27 +221,6 @@ impl LercAdditionalCompression {
     }
 }
 
-/// LERC encoding options for the TIFF writer.
-///
-/// Controls the LERC2 error tolerance and optional additional compression
-/// applied to the encoded LERC blob before storage in the TIFF block.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LercOptions {
-    /// Maximum encoding error per sample value. Set to `0.0` for lossless.
-    pub max_z_error: f64,
-    /// Optional additional compression applied to the LERC blob.
-    pub additional_compression: LercAdditionalCompression,
-}
-
-impl Default for LercOptions {
-    fn default() -> Self {
-        Self {
-            max_z_error: 0.0,
-            additional_compression: LercAdditionalCompression::None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,10 +250,4 @@ mod tests {
         assert_eq!(LercAdditionalCompression::from_code(99), None);
     }
 
-    #[test]
-    fn lerc_options_default_is_lossless() {
-        let opts = LercOptions::default();
-        assert_eq!(opts.max_z_error, 0.0);
-        assert_eq!(opts.additional_compression, LercAdditionalCompression::None);
-    }
 }

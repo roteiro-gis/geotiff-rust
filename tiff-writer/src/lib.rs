@@ -23,10 +23,10 @@ pub mod error;
 pub mod sample;
 pub mod writer;
 
-pub use builder::{DataLayout, ImageBuilder};
+pub use builder::{DataLayout, ImageBuilder, LercOptions};
 pub use error::{Error, Result};
 pub use sample::TiffWriteSample;
-pub use tiff_core::{LercAdditionalCompression, LercOptions};
+pub use tiff_core::LercAdditionalCompression;
 pub use writer::{ImageHandle, TiffVariant, TiffWriter, WriteOptions};
 
 #[cfg(test)]
@@ -755,7 +755,7 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(4, 4)
             .sample_type::<u8>()
-            .lerc_options(tiff_core::LercOptions::default())
+            .lerc_options(LercOptions::default())
             .strips(4);
         let handle = writer.add_image(image).unwrap();
         let pixels: Vec<u8> = (0..16).collect();
@@ -775,7 +775,7 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(4, 4)
             .sample_type::<i16>()
-            .lerc_options(tiff_core::LercOptions::default())
+            .lerc_options(LercOptions::default())
             .strips(4);
         let handle = writer.add_image(image).unwrap();
         let pixels: Vec<i16> = (-8..8).collect();
@@ -794,7 +794,7 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(4, 4)
             .sample_type::<f32>()
-            .lerc_options(tiff_core::LercOptions::default())
+            .lerc_options(LercOptions::default())
             .strips(4);
         let handle = writer.add_image(image).unwrap();
         let pixels: Vec<f32> = (1..=16).map(|x| x as f32 * 0.5).collect();
@@ -813,7 +813,7 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(4, 4)
             .sample_type::<f64>()
-            .lerc_options(tiff_core::LercOptions::default())
+            .lerc_options(LercOptions::default())
             .strips(4);
         let handle = writer.add_image(image).unwrap();
         let pixels: Vec<f64> = (1..=16).map(|x| x as f64 * 1.25).collect();
@@ -832,7 +832,7 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(4, 4)
             .sample_type::<u16>()
-            .lerc_options(tiff_core::LercOptions::default())
+            .lerc_options(LercOptions::default())
             .tiles(16, 16);
         let handle = writer.add_image(image).unwrap();
 
@@ -859,9 +859,9 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(4, 4)
             .sample_type::<f32>()
-            .lerc_options(tiff_core::LercOptions {
+            .lerc_options(LercOptions {
                 max_z_error: 0.0,
-                additional_compression: tiff_core::LercAdditionalCompression::Deflate,
+                additional_compression: LercAdditionalCompression::Deflate,
             })
             .strips(4);
         let handle = writer.add_image(image).unwrap();
@@ -882,9 +882,9 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(4, 4)
             .sample_type::<u32>()
-            .lerc_options(tiff_core::LercOptions {
+            .lerc_options(LercOptions {
                 max_z_error: 0.0,
-                additional_compression: tiff_core::LercAdditionalCompression::Zstd,
+                additional_compression: LercAdditionalCompression::Zstd,
             })
             .strips(4);
         let handle = writer.add_image(image).unwrap();
@@ -906,7 +906,7 @@ mod tests {
             .sample_type::<u8>()
             .samples_per_pixel(3)
             .photometric(tiff_core::PhotometricInterpretation::Rgb)
-            .lerc_options(tiff_core::LercOptions::default())
+            .lerc_options(LercOptions::default())
             .strips(2);
         let handle = writer.add_image(image).unwrap();
         // 4 pixels, 3 bands each, interleaved
@@ -932,7 +932,7 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(2, 2)
             .sample_type::<u64>()
-            .lerc_options(tiff_core::LercOptions::default())
+            .lerc_options(LercOptions::default())
             .strips(2);
         let handle = writer.add_image(image).unwrap();
         let result = writer.write_block(&handle, 0, &[1u64, 2, 3, 4]);
@@ -947,7 +947,7 @@ mod tests {
         let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
         let image = ImageBuilder::new(4, 4)
             .sample_type::<i32>()
-            .lerc_options(tiff_core::LercOptions::default())
+            .lerc_options(LercOptions::default())
             .strips(2);
         let handle = writer.add_image(image).unwrap();
         let strip0: Vec<i32> = (1..=8).collect();
@@ -961,5 +961,89 @@ mod tests {
         let (values, _) = img.into_raw_vec_and_offset();
         let expected: Vec<i32> = (1..=16).collect();
         assert_eq!(values, expected);
+    }
+
+    #[test]
+    fn write_and_read_lerc_planar_rgb() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(2, 2)
+            .sample_type::<u8>()
+            .samples_per_pixel(3)
+            .photometric(tiff_core::PhotometricInterpretation::Rgb)
+            .planar_configuration(tiff_core::PlanarConfiguration::Planar)
+            .lerc_options(LercOptions::default())
+            .strips(2);
+        let handle = writer.add_image(image).unwrap();
+        // Planar: 3 separate strips (one per band), each 4 pixels
+        writer.write_block(&handle, 0, &[1u8, 2, 3, 4]).unwrap(); // R
+        writer.write_block(&handle, 1, &[10u8, 20, 30, 40]).unwrap(); // G
+        writer.write_block(&handle, 2, &[100u8, 110, 120, 130]).unwrap(); // B
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        assert_eq!(file.ifd(0).unwrap().planar_configuration(), 2);
+        let img = file.read_image::<u8>(0).unwrap();
+        assert_eq!(img.shape(), &[2, 2, 3]);
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values, vec![1, 10, 100, 2, 20, 110, 3, 30, 120, 4, 40, 130]);
+    }
+
+    #[test]
+    fn write_and_read_lerc_lossy_f32() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
+        let image = ImageBuilder::new(4, 4)
+            .sample_type::<f32>()
+            .lerc_options(LercOptions {
+                max_z_error: 0.5,
+                additional_compression: LercAdditionalCompression::None,
+            })
+            .strips(4);
+        let handle = writer.add_image(image).unwrap();
+        let pixels: Vec<f32> = (1..=16).map(|x| x as f32 * 1.1).collect();
+        writer.write_block(&handle, 0, &pixels).unwrap();
+        writer.finish().unwrap();
+
+        let file = tiff_reader::TiffFile::from_bytes(buf.into_inner()).unwrap();
+        let img = file.read_image::<f32>(0).unwrap();
+        let (values, _) = img.into_raw_vec_and_offset();
+        assert_eq!(values.len(), pixels.len());
+        for (actual, expected) in values.iter().zip(pixels.iter()) {
+            assert!(
+                (actual - expected).abs() <= 0.5,
+                "lossy LERC error {:.3} exceeds max_z_error 0.5",
+                (actual - expected).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn compression_setter_clears_lerc_options() {
+        let ib = ImageBuilder::new(4, 4)
+            .sample_type::<u8>()
+            .lerc_options(LercOptions::default())
+            .compression(tiff_core::Compression::Deflate);
+        assert!(ib.lerc_options.is_none());
+        assert!(ib.lerc_parameters_tag().is_none());
+    }
+
+    #[test]
+    fn predictor_is_ignored_when_lerc_active() {
+        let ib = ImageBuilder::new(4, 4)
+            .sample_type::<f32>()
+            .lerc_options(LercOptions::default())
+            .predictor(tiff_core::Predictor::Horizontal);
+        assert_eq!(ib.predictor, tiff_core::Predictor::None);
+    }
+
+    #[test]
+    fn lerc_tag_emitted_without_explicit_lerc_options() {
+        // Using .compression(Lerc) without .lerc_options() should still emit the tag
+        let ib = ImageBuilder::new(4, 4)
+            .sample_type::<u8>()
+            .compression(tiff_core::Compression::Lerc);
+        let tag = ib.lerc_parameters_tag();
+        assert!(tag.is_some());
     }
 }

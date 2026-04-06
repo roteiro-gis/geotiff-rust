@@ -1,5 +1,7 @@
 //! Pure-Rust GeoTIFF and COG writer with compression, tiling, and overview support.
 //!
+//! Compression: None, LZW, Deflate, LERC, LERC+Deflate, LERC+Zstd, ZSTD (feature).
+//!
 //! # Example
 //!
 //! ```no_run

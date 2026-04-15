@@ -2,9 +2,10 @@ use std::io::Cursor;
 
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
-    Compression, GeoTiffBuilder, LercAdditionalCompression, LercOptions, PlanarConfiguration,
+    Compression, Error as GeoTiffWriteError, GeoTiffBuilder, LercAdditionalCompression,
+    LercOptions, ModelType, PlanarConfiguration,
 };
-use ndarray::Array2;
+use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
 
 #[test]
@@ -143,4 +144,61 @@ fn planar_and_lerc_geotiffs_roundtrip() {
     for (actual, expected) in values.iter().zip(lerc_data.iter()) {
         assert!((actual - expected).abs() <= 0.5);
     }
+}
+
+#[test]
+fn geotiff_writer_uses_bigtiff_for_large_streaming_outputs() {
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let _writer = GeoTiffBuilder::new(70_000, 70_000)
+            .tile_writer::<u8, _>(&mut buf)
+            .unwrap();
+    }
+
+    let bytes = buf.into_inner();
+    assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
+}
+
+#[test]
+fn streaming_tile_writer_rejects_misaligned_offsets_and_band_mismatches() {
+    let mut single_band_buf = Cursor::new(Vec::new());
+    let mut single_band_writer = GeoTiffBuilder::new(32, 32)
+        .tile_size(16, 16)
+        .tile_writer::<u8, _>(&mut single_band_buf)
+        .unwrap();
+    let single_band_tile = Array2::<u8>::zeros((16, 16));
+    let err = single_band_writer
+        .write_tile(1, 0, &single_band_tile.view())
+        .unwrap_err();
+    assert!(
+        matches!(err, GeoTiffWriteError::Other(message) if message.contains("align to tile boundaries"))
+    );
+
+    let mut planar_buf = Cursor::new(Vec::new());
+    let mut planar_writer = GeoTiffBuilder::new(32, 32)
+        .bands(3)
+        .tile_size(16, 16)
+        .planar_configuration(PlanarConfiguration::Planar)
+        .tile_writer::<u8, _>(&mut planar_buf)
+        .unwrap();
+    let wrong_bands = Array3::<u8>::zeros((16, 16, 2));
+    let err = planar_writer
+        .write_tile_3d(0, 0, &wrong_bands.view())
+        .unwrap_err();
+    assert!(matches!(err, GeoTiffWriteError::DataSizeMismatch { .. }));
+}
+
+#[test]
+fn geocentric_epsg_roundtrips_through_reader_metadata() {
+    let data = Array2::<u8>::from_elem((1, 1), 7);
+    let mut buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(1, 1)
+        .epsg(4978)
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let geo = GeoTiffFile::from_bytes(buf.into_inner()).unwrap();
+    assert_eq!(geo.epsg(), Some(4978));
+    assert_eq!(geo.crs().model_type_enum(), ModelType::Geocentric);
+    assert_eq!(geo.crs().geocentric_epsg, Some(4978));
 }

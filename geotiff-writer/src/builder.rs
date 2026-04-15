@@ -66,25 +66,48 @@ impl GeoTiffBuilder {
         self
     }
 
-    /// Set CRS by EPSG code. Auto-detects Geographic vs Projected.
+    /// Set CRS by EPSG code.
+    ///
+    /// If a model type was already set explicitly, it is preserved. Otherwise
+    /// this uses a projected-vs-geodetic heuristic and recognizes EPSG:4978
+    /// as geocentric.
     pub fn epsg(mut self, code: u16) -> Self {
-        let is_geographic = (4000..5000).contains(&code);
-        if is_geographic {
-            self.geokeys.set(
-                geokeys::GT_MODEL_TYPE,
-                GeoKeyValue::Short(ModelType::Geographic.code()),
-            );
-            self.geokeys
-                .set(geokeys::GEOGRAPHIC_TYPE, GeoKeyValue::Short(code));
-        } else {
-            self.geokeys.set(
-                geokeys::GT_MODEL_TYPE,
-                GeoKeyValue::Short(ModelType::Projected.code()),
-            );
-            self.geokeys
-                .set(geokeys::PROJECTED_CS_TYPE, GeoKeyValue::Short(code));
+        let model_type = self
+            .geokeys
+            .get_short(geokeys::GT_MODEL_TYPE)
+            .map(ModelType::from_code)
+            .unwrap_or_else(|| {
+                if code == 4978 {
+                    ModelType::Geocentric
+                } else if (4000..5000).contains(&code) {
+                    ModelType::Geographic
+                } else {
+                    ModelType::Projected
+                }
+            });
+
+        self.geokeys.set(
+            geokeys::GT_MODEL_TYPE,
+            GeoKeyValue::Short(model_type.code()),
+        );
+        match model_type {
+            ModelType::Projected => {
+                self.geokeys.remove(geokeys::GEOGRAPHIC_TYPE);
+                self.geokeys
+                    .set(geokeys::PROJECTED_CS_TYPE, GeoKeyValue::Short(code));
+            }
+            ModelType::Geographic | ModelType::Geocentric | ModelType::Unknown(_) => {
+                self.geokeys.remove(geokeys::PROJECTED_CS_TYPE);
+                self.geokeys
+                    .set(geokeys::GEOGRAPHIC_TYPE, GeoKeyValue::Short(code));
+            }
         }
         self
+    }
+
+    /// Set a geocentric CRS by EPSG code.
+    pub fn geocentric_epsg(self, code: u16) -> Self {
+        self.model_type(ModelType::Geocentric).epsg(code)
     }
 
     /// Set the model type explicitly.
@@ -308,7 +331,8 @@ impl GeoTiffBuilder {
         }
 
         let ib = self.to_image_builder::<T>();
-        let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
+        let mut writer =
+            TiffWriter::new(sink, WriteOptions::auto(ib.estimated_uncompressed_bytes()))?;
         let handle = writer.add_image(ib)?;
 
         let block_count = self.images_block_count::<T>();
@@ -349,7 +373,8 @@ impl GeoTiffBuilder {
         }
 
         let ib = self.to_image_builder::<T>();
-        let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
+        let mut writer =
+            TiffWriter::new(sink, WriteOptions::auto(ib.estimated_uncompressed_bytes()))?;
         let handle = writer.add_image(ib)?;
 
         let block_count = self.images_block_count::<T>();

@@ -9,7 +9,7 @@ use tiff_writer::{ImageHandle, TiffWriter, WriteOptions};
 
 use crate::builder::GeoTiffBuilder;
 use crate::error::{Error, Result};
-use crate::sample::{NumericSample, WriteSample};
+use crate::sample::{nodata_fill_or_zero, NumericSample, WriteSample};
 
 /// Streaming tile-by-tile GeoTIFF writer.
 ///
@@ -31,17 +31,6 @@ pub struct StreamingTileWriter<T: WriteSample, W: Write + Seek> {
     _phantom: PhantomData<T>,
 }
 
-/// Parse a nodata string into a fill value for the given sample type.
-fn parse_nodata_fill<T: NumericSample>(nodata: &Option<String>) -> T {
-    let zero = T::zero();
-    let Some(nd) = nodata else { return zero };
-
-    let Ok(val) = nd.trim().parse::<f64>() else {
-        return zero;
-    };
-    T::from_f64(val)
-}
-
 impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
     pub(crate) fn new(builder: GeoTiffBuilder, sink: W) -> Result<Self> {
         let tw = builder.tile_width.unwrap_or(256);
@@ -53,14 +42,15 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
             builder
         };
 
-        let fill_value = parse_nodata_fill::<T>(&builder.nodata);
+        let fill_value = nodata_fill_or_zero::<T>(&builder.nodata);
 
         let ib = builder.to_image_builder::<T>();
         let num_blocks = ib.block_count();
         let tiles_across = (builder.width as usize).div_ceil(tw as usize);
         let tiles_down = (builder.height as usize).div_ceil(th as usize);
 
-        let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
+        let mut writer =
+            TiffWriter::new(sink, WriteOptions::auto(ib.estimated_uncompressed_bytes()))?;
         let handle = writer.add_image(ib)?;
 
         Ok(Self {
@@ -90,6 +80,12 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
                 "write_tile only supports single-band output; use write_tile_3d for multi-band tiles".into(),
             ));
         }
+        if x_off % self.tile_width as usize != 0 || y_off % self.tile_height as usize != 0 {
+            return Err(Error::Other(format!(
+                "tile offsets must align to tile boundaries of {}x{}, got ({x_off},{y_off})",
+                self.tile_width, self.tile_height
+            )));
+        }
 
         let tile_col = x_off / self.tile_width as usize;
         let tile_row = y_off / self.tile_height as usize;
@@ -107,9 +103,17 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
         let (data_h, data_w) = data.dim();
+        let expected_h = (self.height as usize).saturating_sub(y_off).min(th);
+        let expected_w = (self.width as usize).saturating_sub(x_off).min(tw);
+        if data_h > expected_h || data_w > expected_w {
+            return Err(Error::Other(format!(
+                "tile data shape {}x{} exceeds raster bounds for tile starting at ({x_off},{y_off}); expected at most {}x{}",
+                data_h, data_w, expected_h, expected_w
+            )));
+        }
         let mut padded = vec![self.fill_value; tw * th];
-        for row in 0..data_h.min(th) {
-            for col in 0..data_w.min(tw) {
+        for row in 0..data_h {
+            for col in 0..data_w {
                 padded[row * tw + col] = data[[row, col]];
             }
         }
@@ -127,6 +131,13 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         y_off: usize,
         data: &ndarray::ArrayView3<T>,
     ) -> Result<()> {
+        if x_off % self.tile_width as usize != 0 || y_off % self.tile_height as usize != 0 {
+            return Err(Error::Other(format!(
+                "tile offsets must align to tile boundaries of {}x{}, got ({x_off},{y_off})",
+                self.tile_width, self.tile_height
+            )));
+        }
+
         let tile_col = x_off / self.tile_width as usize;
         let tile_row = y_off / self.tile_height as usize;
 
@@ -145,11 +156,25 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         let tiles_per_plane = self.tiles_across as usize * self.tiles_down as usize;
         let (data_h, data_w, data_b) = data.dim();
         let spp = self.bands as usize;
+        let expected_h = (self.height as usize).saturating_sub(y_off).min(th);
+        let expected_w = (self.width as usize).saturating_sub(x_off).min(tw);
+        if data_h > expected_h || data_w > expected_w {
+            return Err(Error::Other(format!(
+                "tile data shape {}x{} exceeds raster bounds for tile starting at ({x_off},{y_off}); expected at most {}x{}",
+                data_h, data_w, expected_h, expected_w
+            )));
+        }
+        if data_b != spp {
+            return Err(Error::DataSizeMismatch {
+                expected: data_h * data_w * spp,
+                actual: data_h * data_w * data_b,
+            });
+        }
         if matches!(self.planar_configuration, PlanarConfiguration::Planar) {
-            for band in 0..data_b.min(spp) {
+            for band in 0..spp {
                 let mut padded = vec![self.fill_value; tw * th];
-                for row in 0..data_h.min(th) {
-                    for col in 0..data_w.min(tw) {
+                for row in 0..data_h {
+                    for col in 0..data_w {
                         padded[row * tw + col] = data[[row, col, band]];
                     }
                 }
@@ -160,9 +185,9 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
             }
         } else {
             let mut padded = vec![self.fill_value; tw * th * spp];
-            for row in 0..data_h.min(th) {
-                for col in 0..data_w.min(tw) {
-                    for band in 0..data_b.min(spp) {
+            for row in 0..data_h {
+                for col in 0..data_w {
+                    for band in 0..spp {
                         padded[(row * tw + col) * spp + band] = data[[row, col, band]];
                     }
                 }

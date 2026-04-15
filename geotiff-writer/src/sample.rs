@@ -4,10 +4,20 @@ pub use tiff_writer::TiffWriteSample as WriteSample;
 
 /// Numeric conversions used internally by overview generation and fill handling.
 #[doc(hidden)]
-pub trait NumericSample: WriteSample {
+pub trait NumericSample: WriteSample + PartialEq {
     fn zero() -> Self;
     fn to_f64(self) -> f64;
     fn from_f64(value: f64) -> Self;
+}
+
+pub(crate) fn parse_nodata_value<T: NumericSample>(nodata: &Option<String>) -> Option<T> {
+    let nd = nodata.as_ref()?;
+    let value = nd.trim().parse::<f64>().ok()?;
+    Some(T::from_f64(value))
+}
+
+pub(crate) fn nodata_fill_or_zero<T: NumericSample>(nodata: &Option<String>) -> T {
+    parse_nodata_value(nodata).unwrap_or_else(T::zero)
 }
 
 macro_rules! impl_numeric_sample {

@@ -10,7 +10,8 @@
 // Well-known GeoKey IDs.
 pub const GT_MODEL_TYPE: u16 = 1024;
 pub const GT_RASTER_TYPE: u16 = 1025;
-pub const GEOGRAPHIC_TYPE: u16 = 2048;
+pub const GEODETIC_CRS_TYPE: u16 = 2048;
+pub const GEOGRAPHIC_TYPE: u16 = GEODETIC_CRS_TYPE;
 pub const GEOG_CITATION: u16 = 2049;
 pub const GEOG_GEODETIC_DATUM: u16 = 2050;
 pub const GEOG_ANGULAR_UNITS: u16 = 2054;

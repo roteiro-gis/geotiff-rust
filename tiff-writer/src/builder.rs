@@ -312,6 +312,11 @@ impl ImageBuilder {
                 "image dimensions must be positive".into(),
             ));
         }
+        if self.samples_per_pixel == 0 {
+            return Err(crate::error::Error::InvalidConfig(
+                "samples_per_pixel must be greater than zero".into(),
+            ));
+        }
         if !matches!(self.bits_per_sample, 8 | 16 | 32 | 64) {
             return Err(crate::error::Error::InvalidConfig(format!(
                 "bits_per_sample must be 8, 16, 32, or 64, got {}",
@@ -332,6 +337,23 @@ impl ImageBuilder {
             return Err(crate::error::Error::InvalidConfig(
                 "LERC compression does not support TIFF predictors".into(),
             ));
+        }
+        match self.photometric {
+            PhotometricInterpretation::Rgb if self.samples_per_pixel < 3 => {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "RGB photometric interpretation requires at least 3 samples per pixel, got {}",
+                    self.samples_per_pixel
+                )));
+            }
+            PhotometricInterpretation::Palette | PhotometricInterpretation::Mask
+                if self.samples_per_pixel != 1 =>
+            {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "{:?} photometric interpretation requires exactly 1 sample per pixel, got {}",
+                    self.photometric, self.samples_per_pixel
+                )));
+            }
+            _ => {}
         }
         Ok(())
     }

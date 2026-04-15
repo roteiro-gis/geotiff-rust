@@ -32,6 +32,9 @@ pub enum Error {
     #[error("classic TIFF offset {offset} exceeds 4 GiB limit; use TiffVariant::BigTiff")]
     ClassicOffsetOverflow { offset: u64 },
 
+    #[error("classic TIFF byte count {byte_count} exceeds 4 GiB limit; use TiffVariant::BigTiff")]
+    ClassicByteCountOverflow { byte_count: u64 },
+
     #[error("{0}")]
     Other(String),
 }

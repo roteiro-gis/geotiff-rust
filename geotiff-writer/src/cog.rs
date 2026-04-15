@@ -18,11 +18,11 @@ use std::path::Path;
 use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
 use tiff_core::{ByteOrder, Compression, Predictor};
 use tiff_writer::LercOptions;
-use tiff_writer::{ImageBuilder, ImageHandle, TiffVariant, TiffWriter, WriteOptions};
+use tiff_writer::{ImageBuilder, ImageHandle, TiffWriter, WriteOptions};
 
 use crate::builder::GeoTiffBuilder;
 use crate::error::{Error, Result};
-use crate::sample::NumericSample;
+use crate::sample::{parse_nodata_value, NumericSample};
 
 /// Overview resampling algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +128,19 @@ fn write_cog_block<T: NumericSample, W: Write + Seek>(
     Ok(())
 }
 
+fn validate_overview_levels(levels: &[u32]) -> Result<Vec<u32>> {
+    if let Some(invalid) = levels.iter().copied().find(|&level| level <= 1) {
+        return Err(Error::InvalidConfig(format!(
+            "overview levels must be greater than 1, got {invalid}"
+        )));
+    }
+
+    let mut normalized = levels.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    Ok(normalized)
+}
+
 impl CogBuilder {
     /// Create a COG builder from a GeoTiffBuilder.
     /// Tiling is required for COG; if not set, defaults to 256x256.
@@ -158,6 +171,62 @@ impl CogBuilder {
     pub fn resampling(mut self, resampling: Resampling) -> Self {
         self.resampling = resampling;
         self
+    }
+
+    fn normalized_overview_levels(&self) -> Result<Vec<u32>> {
+        validate_overview_levels(&self.overview_levels)
+    }
+
+    fn overview_image_builder<T: NumericSample>(
+        &self,
+        level: u32,
+        tile_width: u32,
+        tile_height: u32,
+    ) -> ImageBuilder {
+        let ovr_w = (self.inner.width as usize).div_ceil(level as usize) as u32;
+        let ovr_h = (self.inner.height as usize).div_ceil(level as usize) as u32;
+
+        let mut builder = ImageBuilder::new(ovr_w, ovr_h)
+            .sample_type::<T>()
+            .samples_per_pixel(self.inner.bands as u16)
+            .compression(self.inner.compression)
+            .predictor(self.inner.predictor)
+            .photometric(self.inner.photometric)
+            .planar_configuration(self.inner.planar_configuration)
+            .tiles(tile_width, tile_height)
+            .overview();
+
+        if let Some(opts) = self.inner.lerc_options {
+            builder = builder.lerc_options(opts);
+        }
+
+        for tag in self.inner.build_extra_tags() {
+            builder = builder.tag(tag);
+        }
+
+        builder
+    }
+
+    fn estimated_output_bytes<T: NumericSample>(&self, overview_levels: &[u32]) -> u64 {
+        let metadata_len =
+            gdal_structural_metadata_bytes(self.inner.planar_configuration).len() as u64;
+        let base = self.inner.to_image_builder::<T>();
+        let base_blocks = u64::try_from(base.block_count()).unwrap_or(u64::MAX);
+        let mut estimated = metadata_len
+            .saturating_add(base.estimated_uncompressed_bytes())
+            .saturating_add(base_blocks.saturating_mul(8));
+
+        let tw = self.inner.tile_width.unwrap_or(256);
+        let th = self.inner.tile_height.unwrap_or(256);
+        for &level in overview_levels {
+            let overview = self.overview_image_builder::<T>(level, tw, th);
+            let block_count = u64::try_from(overview.block_count()).unwrap_or(u64::MAX);
+            estimated = estimated
+                .saturating_add(overview.estimated_uncompressed_bytes())
+                .saturating_add(block_count.saturating_mul(8));
+        }
+
+        estimated
     }
 
     /// Write a complete COG from a 2D array to a file path.
@@ -235,17 +304,16 @@ impl CogBuilder {
 
         let tw = self.inner.tile_width.unwrap_or(256) as usize;
         let th = self.inner.tile_height.unwrap_or(256) as usize;
+        let overview_levels = self.normalized_overview_levels()?;
+        let nodata = parse_nodata_value::<T>(&self.inner.nodata);
 
         // Generate overview rasters
-        let overviews = self.generate_overviews(data);
+        let overviews = self.generate_overviews(data, nodata, &overview_levels);
 
         // --- Phase 1: Write header + GDAL metadata + all IFDs (with placeholder offsets) ---
         let mut writer = TiffWriter::new(
             sink,
-            WriteOptions {
-                byte_order: ByteOrder::LittleEndian,
-                variant: TiffVariant::Classic,
-            },
+            WriteOptions::auto(self.estimated_output_bytes::<T>(&overview_levels)),
         )?;
         writer.write_header_prefix(&gdal_structural_metadata_bytes(
             self.inner.planar_configuration,
@@ -256,32 +324,12 @@ impl CogBuilder {
         let base_handle = writer.add_image(base_ib)?;
 
         // Overview IFDs follow from largest to smallest in dimensions.
-        let mut sorted_levels = self.overview_levels.clone();
-        sorted_levels.sort_unstable();
-
         let mut overview_handles: Vec<(ImageHandle, u32, u32)> = Vec::new();
-        for &level in &sorted_levels {
+        for &level in &overview_levels {
             let ovr_w = (self.inner.width as usize).div_ceil(level as usize) as u32;
             let ovr_h = (self.inner.height as usize).div_ceil(level as usize) as u32;
 
-            let mut ovr_ib = ImageBuilder::new(ovr_w, ovr_h)
-                .sample_type::<T>()
-                .samples_per_pixel(self.inner.bands as u16)
-                .compression(self.inner.compression)
-                .predictor(self.inner.predictor)
-                .photometric(self.inner.photometric)
-                .planar_configuration(self.inner.planar_configuration)
-                .tiles(tw as u32, th as u32)
-                .overview();
-
-            if let Some(opts) = self.inner.lerc_options {
-                ovr_ib = ovr_ib.lerc_options(opts);
-            }
-
-            for tag in self.inner.build_extra_tags() {
-                ovr_ib = ovr_ib.tag(tag);
-            }
-
+            let ovr_ib = self.overview_image_builder::<T>(level, tw as u32, th as u32);
             let handle = writer.add_image(ovr_ib)?;
             overview_handles.push((handle, ovr_w, ovr_h));
         }
@@ -289,19 +337,9 @@ impl CogBuilder {
         // --- Phase 2: Write tile data ---
 
         // Overview tiles (smallest overview first)
-        for &level in sorted_levels.iter().rev() {
-            let idx = sorted_levels
-                .iter()
-                .position(|&candidate| candidate == level)
-                .unwrap();
+        for idx in (0..overview_levels.len()).rev() {
             let (ref handle, _, _) = overview_handles[idx];
-            // Find the matching overview array (overviews are stored in original order)
-            let level_idx = self
-                .overview_levels
-                .iter()
-                .position(|&l| l == level)
-                .unwrap();
-            let overview = &overviews[level_idx];
+            let overview = &overviews[idx];
             write_tiled_data_3d::<T, W>(
                 &mut writer,
                 handle,
@@ -358,9 +396,14 @@ impl CogBuilder {
         self.tile_writer(writer)
     }
 
-    fn generate_overviews<T: NumericSample>(&self, data: ArrayView3<T>) -> Vec<Array3<T>> {
+    fn generate_overviews<T: NumericSample>(
+        &self,
+        data: ArrayView3<T>,
+        nodata: Option<T>,
+        overview_levels: &[u32],
+    ) -> Vec<Array3<T>> {
         let (height, width, bands) = data.dim();
-        self.overview_levels
+        overview_levels
             .iter()
             .map(|&level| {
                 let level = level as usize;
@@ -383,12 +426,16 @@ impl CogBuilder {
                             let mut count = 0usize;
                             for sr in start_r..end_r {
                                 for sc in start_c..end_c {
-                                    sum += data[[sr, sc, band]].to_f64();
+                                    let value = data[[sr, sc, band]];
+                                    if nodata.is_some_and(|nodata_value| value == nodata_value) {
+                                        continue;
+                                    }
+                                    sum += value.to_f64();
                                     count += 1;
                                 }
                             }
                             if count == 0 {
-                                T::zero()
+                                nodata.unwrap_or_else(T::zero)
                             } else {
                                 T::from_f64(sum / count as f64)
                             }
@@ -423,6 +470,7 @@ pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     lerc_options: Option<LercOptions>,
     overview_levels: Vec<u32>,
     resampling: Resampling,
+    nodata_value: Option<T>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -432,9 +480,14 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let th = cog.inner.tile_height.unwrap_or(256);
         let tiles_across = (cog.inner.width as usize).div_ceil(tw as usize);
         let tiles_down = (cog.inner.height as usize).div_ceil(th as usize);
-        let fill_value = T::zero();
+        let overview_levels = cog.normalized_overview_levels()?;
+        let nodata_value = parse_nodata_value::<T>(&cog.inner.nodata);
+        let fill_value = nodata_value.unwrap_or_else(T::zero);
 
-        let mut writer = TiffWriter::new(sink, WriteOptions::default())?;
+        let mut writer = TiffWriter::new(
+            sink,
+            WriteOptions::auto(cog.estimated_output_bytes::<T>(&overview_levels)),
+        )?;
         writer.write_header_prefix(&gdal_structural_metadata_bytes(
             cog.inner.planar_configuration,
         ))?;
@@ -443,32 +496,12 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let base_ib = cog.inner.to_image_builder::<T>();
         let base_handle = writer.add_image(base_ib)?;
 
-        let mut sorted_levels = cog.overview_levels.clone();
-        sorted_levels.sort_unstable();
-
         let mut overview_handles = Vec::new();
-        for &level in &sorted_levels {
+        for &level in &overview_levels {
             let ovr_w = (cog.inner.width as usize).div_ceil(level as usize) as u32;
             let ovr_h = (cog.inner.height as usize).div_ceil(level as usize) as u32;
 
-            let mut ovr_ib = ImageBuilder::new(ovr_w, ovr_h)
-                .sample_type::<T>()
-                .samples_per_pixel(cog.inner.bands as u16)
-                .compression(cog.inner.compression)
-                .predictor(cog.inner.predictor)
-                .photometric(cog.inner.photometric)
-                .planar_configuration(cog.inner.planar_configuration)
-                .tiles(tw, th)
-                .overview();
-
-            if let Some(opts) = cog.inner.lerc_options {
-                ovr_ib = ovr_ib.lerc_options(opts);
-            }
-
-            for tag in cog.inner.build_extra_tags() {
-                ovr_ib = ovr_ib.tag(tag);
-            }
-
+            let ovr_ib = cog.overview_image_builder::<T>(level, tw, th);
             let handle = writer.add_image(ovr_ib)?;
             overview_handles.push((handle, ovr_w, ovr_h));
         }
@@ -493,8 +526,9 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             compression: cog.inner.compression,
             predictor: cog.inner.predictor,
             lerc_options: cog.inner.lerc_options,
-            overview_levels: sorted_levels,
+            overview_levels,
             resampling: cog.resampling,
+            nodata_value,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -603,15 +637,12 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             .map_err(|err| Error::Other(format!("invalid streaming COG raster shape: {err}")))?;
 
         // Generate and write overview tiles
-        for &level in self.overview_levels.iter().rev() {
-            let idx = self
-                .overview_levels
-                .iter()
-                .position(|&candidate| candidate == level)
-                .unwrap();
+        for idx in (0..self.overview_levels.len()).rev() {
+            let level = self.overview_levels[idx] as usize;
             let (ref handle, _, _) = self.overview_handles[idx];
 
-            let overview = generate_overview_3d(full.view(), level as usize, self.resampling);
+            let overview =
+                generate_overview_3d(full.view(), level, self.resampling, self.nodata_value);
 
             write_tiled_data_3d::<T, W>(
                 &mut self.writer,
@@ -652,6 +683,7 @@ fn generate_overview_3d<T: NumericSample>(
     data: ArrayView3<T>,
     level: usize,
     resampling: Resampling,
+    nodata: Option<T>,
 ) -> Array3<T> {
     let (height, width, bands) = data.dim();
     let ovr_w = width.div_ceil(level);
@@ -672,12 +704,16 @@ fn generate_overview_3d<T: NumericSample>(
             let mut count = 0usize;
             for sr in start_r..end_r {
                 for sc in start_c..end_c {
-                    sum += data[[sr, sc, band]].to_f64();
+                    let value = data[[sr, sc, band]];
+                    if nodata.is_some_and(|nodata_value| value == nodata_value) {
+                        continue;
+                    }
+                    sum += value.to_f64();
                     count += 1;
                 }
             }
             if count == 0 {
-                T::zero()
+                nodata.unwrap_or_else(T::zero)
             } else {
                 T::from_f64(sum / count as f64)
             }

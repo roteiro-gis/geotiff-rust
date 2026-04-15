@@ -18,8 +18,8 @@ use std::path::Path;
 use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
 use tempfile::tempfile;
 use tiff_core::{ByteOrder, Compression, Predictor, Tag};
-use tiff_writer::LercOptions;
 use tiff_writer::{encoder, ImageBuilder, TiffVariant};
+use tiff_writer::{JpegOptions, LercOptions};
 
 use crate::builder::GeoTiffBuilder;
 use crate::error::{Error, Result};
@@ -69,6 +69,7 @@ struct CogBlockEncoding {
     row_width_pixels: usize,
     block_height: u32,
     lerc_options: Option<LercOptions>,
+    jpeg_options: Option<JpegOptions>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +80,7 @@ struct TileWritePlan {
     compression: Compression,
     predictor: Predictor,
     lerc_options: Option<LercOptions>,
+    jpeg_options: Option<JpegOptions>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -198,11 +200,14 @@ fn compress_cog_block<T: NumericSample>(
     } else {
         tiff_writer::compress::compress_block(
             samples,
-            ByteOrder::LittleEndian,
-            encoding.compression,
-            encoding.predictor,
-            encoding.samples_per_pixel,
-            encoding.row_width_pixels,
+            tiff_writer::compress::BlockEncodingOptions {
+                byte_order: ByteOrder::LittleEndian,
+                compression: encoding.compression,
+                predictor: encoding.predictor,
+                samples_per_pixel: encoding.samples_per_pixel,
+                row_width_pixels: encoding.row_width_pixels,
+                jpeg_options: encoding.jpeg_options.as_ref(),
+            },
             block_index,
         )
         .map_err(Into::into)
@@ -496,6 +501,9 @@ impl CogBuilder {
         if let Some(opts) = self.inner.lerc_options {
             builder = builder.lerc_options(opts);
         }
+        if let Some(opts) = self.inner.jpeg_options {
+            builder = builder.jpeg_options(opts);
+        }
 
         for tag in self.inner.build_extra_tags() {
             builder = builder.tag(tag);
@@ -610,6 +618,7 @@ impl CogBuilder {
                     compression: self.inner.compression,
                     predictor: self.inner.predictor,
                     lerc_options: self.inner.lerc_options,
+                    jpeg_options: self.inner.jpeg_options,
                 },
             )?;
         }
@@ -624,6 +633,7 @@ impl CogBuilder {
                 compression: self.inner.compression,
                 predictor: self.inner.predictor,
                 lerc_options: self.inner.lerc_options,
+                jpeg_options: self.inner.jpeg_options,
             },
         )?;
 
@@ -673,6 +683,7 @@ pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     compression: Compression,
     predictor: Predictor,
     lerc_options: Option<LercOptions>,
+    jpeg_options: Option<JpegOptions>,
     overview_levels: Vec<u32>,
     resampling: Resampling,
     nodata_value: Option<T>,
@@ -709,6 +720,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             compression: cog.inner.compression,
             predictor: cog.inner.predictor,
             lerc_options: cog.inner.lerc_options,
+            jpeg_options: cog.inner.jpeg_options,
             overview_levels,
             resampling: cog.resampling,
             nodata_value,
@@ -858,6 +870,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                     compression: self.compression,
                     predictor: self.predictor,
                     lerc_options: self.lerc_options,
+                    jpeg_options: self.jpeg_options,
                 },
             )?;
         }
@@ -872,6 +885,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                 compression: self.compression,
                 predictor: self.predictor,
                 lerc_options: self.lerc_options,
+                jpeg_options: self.jpeg_options,
             },
         )?;
 
@@ -991,6 +1005,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
                             row_width_pixels: tw,
                             block_height: th as u32,
                             lerc_options: plan.lerc_options,
+                            jpeg_options: plan.jpeg_options,
                         },
                     )?;
                 }
@@ -1028,6 +1043,7 @@ fn spool_tiled_data_3d<T: NumericSample>(
                         row_width_pixels: tw,
                         block_height: th as u32,
                         lerc_options: plan.lerc_options,
+                        jpeg_options: plan.jpeg_options,
                     },
                 )?;
             }

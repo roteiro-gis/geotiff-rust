@@ -17,8 +17,13 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 weezl = "0.1"
 
 [features]
-default = ["zstd"]
+default = ["jpeg", "zstd"]
+jpeg = ["dep:jpeg-encoder"]
 zstd = ["dep:zstd"]
+
+[dependencies.jpeg-encoder]
+version = "0.6"
+optional = true
 
 [dependencies.zstd]
 version = "0.13"

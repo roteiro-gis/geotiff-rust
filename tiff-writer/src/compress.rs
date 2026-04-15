@@ -6,22 +6,48 @@
 //!
 //! This is the inverse of `tiff-reader/src/filters.rs`.
 
-use crate::builder::LercOptions;
+use crate::builder::{JpegOptions, LercOptions};
 use crate::error::{Error, Result};
 use tiff_core::{ByteOrder, Compression, Predictor};
 
 use crate::sample::TiffWriteSample;
 
+/// Encoding parameters for a single TIFF strip or tile block.
+#[derive(Debug, Clone, Copy)]
+pub struct BlockEncodingOptions<'a> {
+    pub byte_order: ByteOrder,
+    pub compression: Compression,
+    pub predictor: Predictor,
+    pub samples_per_pixel: u16,
+    pub row_width_pixels: usize,
+    pub jpeg_options: Option<&'a JpegOptions>,
+}
+
 /// Full compression pipeline: native samples → file-order bytes → predictor → compress.
 pub fn compress_block<T: TiffWriteSample>(
     samples: &[T],
-    byte_order: ByteOrder,
-    compression: Compression,
-    predictor: Predictor,
-    samples_per_pixel: u16,
-    row_width_pixels: usize,
+    options: BlockEncodingOptions<'_>,
     index: usize,
 ) -> Result<Vec<u8>> {
+    let BlockEncodingOptions {
+        byte_order,
+        compression,
+        predictor,
+        samples_per_pixel,
+        row_width_pixels,
+        jpeg_options,
+    } = options;
+
+    if matches!(compression, Compression::Jpeg) {
+        return compress_block_jpeg(
+            samples,
+            samples_per_pixel,
+            row_width_pixels,
+            jpeg_options.copied().unwrap_or_default(),
+            index,
+        );
+    }
+
     let mut encoded = T::encode_slice(samples, byte_order);
     let row_bytes = row_width_pixels * T::BYTES_PER_SAMPLE * samples_per_pixel as usize;
     if row_bytes > 0 {
@@ -38,6 +64,78 @@ pub fn compress_block<T: TiffWriteSample>(
     compress(&encoded, compression, index)
 }
 
+#[cfg(feature = "jpeg")]
+fn compress_block_jpeg<T: TiffWriteSample>(
+    samples: &[T],
+    samples_per_pixel: u16,
+    row_width_pixels: usize,
+    options: JpegOptions,
+    index: usize,
+) -> Result<Vec<u8>> {
+    if T::BITS_PER_SAMPLE != 8 || T::SAMPLE_FORMAT != 1 {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!(
+                "JPEG write requires 8-bit unsigned samples, got sample_format={} bits_per_sample={}",
+                T::SAMPLE_FORMAT,
+                T::BITS_PER_SAMPLE
+            ),
+        });
+    }
+    let samples_per_pixel = usize::from(samples_per_pixel);
+    if !matches!(samples_per_pixel, 1 | 3) {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!(
+                "JPEG write supports 1 or 3 samples per block, got {samples_per_pixel}"
+            ),
+        });
+    }
+    let pixels_per_row = row_width_pixels
+        .checked_mul(samples_per_pixel)
+        .ok_or_else(|| Error::CompressionFailed {
+            index,
+            reason: "JPEG row size overflows usize".into(),
+        })?;
+    if pixels_per_row == 0 {
+        return Ok(Vec::new());
+    }
+    if samples.len() % pixels_per_row != 0 {
+        return Err(Error::CompressionFailed {
+            index,
+            reason: format!(
+                "JPEG block sample count {} is not divisible by row size {}",
+                samples.len(),
+                pixels_per_row
+            ),
+        });
+    }
+    let height = samples.len() / pixels_per_row;
+    let bytes = T::encode_slice(samples, ByteOrder::LittleEndian);
+    compress_jpeg(
+        &bytes,
+        row_width_pixels,
+        height,
+        samples_per_pixel,
+        options,
+        index,
+    )
+}
+
+#[cfg(not(feature = "jpeg"))]
+fn compress_block_jpeg<T: TiffWriteSample>(
+    _samples: &[T],
+    _samples_per_pixel: u16,
+    _row_width_pixels: usize,
+    _options: JpegOptions,
+    index: usize,
+) -> Result<Vec<u8>> {
+    Err(Error::CompressionFailed {
+        index,
+        reason: "JPEG compression requires the 'jpeg' feature".into(),
+    })
+}
+
 /// Compress raw bytes using the specified compression scheme.
 ///
 /// LERC compression operates on typed samples, not raw bytes. Use
@@ -47,6 +145,16 @@ pub fn compress(data: &[u8], compression: Compression, index: usize) -> Result<V
         Compression::None => Ok(data.to_vec()),
         Compression::Lzw => compress_lzw(data, index),
         Compression::Deflate | Compression::DeflateOld => compress_deflate(data, index),
+        #[cfg(feature = "jpeg")]
+        Compression::Jpeg => Err(Error::CompressionFailed {
+            index,
+            reason: "JPEG operates on 8-bit sample blocks; use compress_block()".into(),
+        }),
+        #[cfg(not(feature = "jpeg"))]
+        Compression::Jpeg => Err(Error::CompressionFailed {
+            index,
+            reason: "JPEG compression requires the 'jpeg' feature".into(),
+        }),
         #[cfg(feature = "zstd")]
         Compression::Zstd => compress_zstd(data, index),
         Compression::Lerc => Err(Error::CompressionFailed {
@@ -272,6 +380,44 @@ fn compress_deflate(data: &[u8], index: usize) -> Result<Vec<u8>> {
         index,
         reason: format!("deflate finish: {e}"),
     })
+}
+
+#[cfg(feature = "jpeg")]
+fn compress_jpeg(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    samples_per_pixel: usize,
+    options: JpegOptions,
+    index: usize,
+) -> Result<Vec<u8>> {
+    let width = u16::try_from(width).map_err(|_| Error::CompressionFailed {
+        index,
+        reason: format!("JPEG block width {width} exceeds u16::MAX"),
+    })?;
+    let height = u16::try_from(height).map_err(|_| Error::CompressionFailed {
+        index,
+        reason: format!("JPEG block height {height} exceeds u16::MAX"),
+    })?;
+    let color_type = match samples_per_pixel {
+        1 => jpeg_encoder::ColorType::Luma,
+        3 => jpeg_encoder::ColorType::Rgb,
+        other => {
+            return Err(Error::CompressionFailed {
+                index,
+                reason: format!("JPEG write supports 1 or 3 samples per block, got {other}"),
+            })
+        }
+    };
+
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, options.quality)
+        .encode(data, width, height, color_type)
+        .map_err(|error| Error::CompressionFailed {
+            index,
+            reason: format!("JPEG: {error}"),
+        })?;
+    Ok(out)
 }
 
 #[cfg(feature = "zstd")]

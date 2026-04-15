@@ -2,8 +2,8 @@ use std::io::Cursor;
 
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
-    CogBuilder, Compression, Error as GeoTiffWriteError, GeoTiffBuilder, PhotometricInterpretation,
-    PlanarConfiguration, Resampling, TiffVariant,
+    CogBuilder, Compression, Error as GeoTiffWriteError, GeoTiffBuilder, JpegOptions,
+    PhotometricInterpretation, PlanarConfiguration, Resampling, TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
@@ -35,6 +35,34 @@ fn assert_strictly_increasing_offsets(offsets: &[u64], context: &str) {
             "{context}: offsets are not strictly increasing"
         );
     }
+}
+
+fn assert_u8_bytes_close(
+    actual: &[u8],
+    expected: &[u8],
+    max_abs_delta: u8,
+    max_diff_pixels: usize,
+) {
+    assert_eq!(actual.len(), expected.len(), "byte length mismatch");
+
+    let mut diff_pixels = 0usize;
+    let mut max_seen_delta = 0u8;
+    for (&actual_byte, &expected_byte) in actual.iter().zip(expected.iter()) {
+        let delta = actual_byte.abs_diff(expected_byte);
+        if delta != 0 {
+            diff_pixels += 1;
+            max_seen_delta = max_seen_delta.max(delta);
+        }
+    }
+
+    assert!(
+        max_seen_delta <= max_abs_delta,
+        "max abs delta {max_seen_delta} exceeded {max_abs_delta}"
+    );
+    assert!(
+        diff_pixels <= max_diff_pixels,
+        "differing pixels {diff_pixels} exceeded {max_diff_pixels}"
+    );
 }
 
 #[test]
@@ -297,4 +325,49 @@ fn cog_emits_bigtiff_when_requested() {
 
     let tiff = TiffFile::from_bytes(bytes).unwrap();
     assert!(tiff.is_bigtiff());
+}
+
+#[test]
+fn cog_jpeg_compression_roundtrips_without_jpeg_tables() {
+    let mut data = Array2::<u8>::zeros((32, 32));
+    for row in 0..32usize {
+        for col in 0..32usize {
+            data[[row, col]] = match (row / 16, col / 16) {
+                (0, 0) => 24,
+                (0, 1) => 96,
+                (1, 0) => 160,
+                _ => 224,
+            };
+        }
+    }
+
+    let mut buf = Cursor::new(Vec::new());
+    let builder = GeoTiffBuilder::new(32, 32)
+        .tile_size(16, 16)
+        .epsg(4326)
+        .jpeg_options(JpegOptions { quality: 90 });
+
+    CogBuilder::new(builder)
+        .overview_levels(vec![2])
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let bytes = buf.into_inner();
+    let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+    let base_ifd = tiff.ifd(0).unwrap();
+    let overview_ifd = tiff.ifd(1).unwrap();
+    assert_eq!(base_ifd.compression(), Compression::Jpeg.to_code());
+    assert_eq!(overview_ifd.compression(), Compression::Jpeg.to_code());
+    assert!(base_ifd.tag(tiff_core::TAG_JPEG_TABLES).is_none());
+    assert!(overview_ifd.tag(tiff_core::TAG_JPEG_TABLES).is_none());
+
+    let raster = tiff.read_image::<u8>(0).unwrap();
+    let (values, offset) = raster.into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0));
+    let expected = data.iter().copied().collect::<Vec<_>>();
+    assert_u8_bytes_close(&values, &expected, 2, 32);
+
+    let geo = GeoTiffFile::from_bytes(bytes).unwrap();
+    assert_eq!(geo.overview_count(), 1);
+    assert_eq!(geo.read_overview::<u8>(0).unwrap().shape(), &[16, 16]);
 }

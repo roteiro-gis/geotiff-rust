@@ -5,7 +5,7 @@ use ndarray::ArrayD;
 use tempfile::NamedTempFile;
 use tiff_core::{Compression, PhotometricInterpretation, PlanarConfiguration};
 use tiff_reader::TiffFile;
-use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
+use tiff_writer::{ImageBuilder, JpegOptions, TiffWriter, WriteOptions};
 
 #[path = "../../../test-support/reference.rs"]
 mod reference;
@@ -176,6 +176,22 @@ fn assert_gdal_hash_matches(path: &std::path::Path, ifd_index: usize, sample_kin
 }
 
 fn assert_gdal_u8_pixels_close(path: &std::path::Path, ifd_index: usize) {
+    let tolerance = reference::fixture_lossy_u8_tolerance(path)
+        .unwrap_or_else(|| panic!("missing lossy tolerance for fixture: {}", path.display()));
+    assert_gdal_u8_pixels_close_with_tolerance(
+        path,
+        ifd_index,
+        tolerance.max_abs_delta,
+        tolerance.max_diff_pixels,
+    );
+}
+
+fn assert_gdal_u8_pixels_close_with_tolerance(
+    path: &std::path::Path,
+    ifd_index: usize,
+    max_abs_delta: u8,
+    max_diff_pixels: usize,
+) {
     let path_str = path.to_str().unwrap();
     let overview_arg = (ifd_index != 0).then(|| (ifd_index - 1).to_string());
     let expected = if let Some(ref overview) = overview_arg {
@@ -191,15 +207,7 @@ fn assert_gdal_u8_pixels_close(path: &std::path::Path, ifd_index: usize) {
     let (actual, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0), "unexpected array offset for {path_str}");
 
-    let tolerance = reference::fixture_lossy_u8_tolerance(path)
-        .unwrap_or_else(|| panic!("missing lossy tolerance for fixture: {path_str}"));
-    reference::assert_u8_bytes_close(
-        &actual,
-        &expected,
-        tolerance.max_abs_delta,
-        tolerance.max_diff_pixels,
-        path_str,
-    );
+    reference::assert_u8_bytes_close(&actual, &expected, max_abs_delta, max_diff_pixels, path_str);
 }
 
 fn write_generated_planar_fixture(path: &std::path::Path) {
@@ -232,6 +240,36 @@ fn write_generated_planar_fixture(path: &std::path::Path) {
             .unwrap();
     }
 
+    tiff_writer.finish().unwrap();
+}
+
+fn write_generated_jpeg_fixture(path: &std::path::Path) {
+    let mut rgb = vec![0u8; 16 * 16 * 3];
+    for row in 0..16usize {
+        for col in 0..16usize {
+            let pixel = (row * 16 + col) * 3;
+            let color = match (row / 8, col / 8) {
+                (0, 0) => [255, 0, 0],
+                (0, 1) => [0, 255, 0],
+                (1, 0) => [0, 0, 255],
+                _ => [240, 240, 32],
+            };
+            rgb[pixel..pixel + 3].copy_from_slice(&color);
+        }
+    }
+
+    let file = File::create(path).unwrap();
+    let writer = BufWriter::new(file);
+    let mut tiff_writer = TiffWriter::new(writer, WriteOptions::default()).unwrap();
+    let image = ImageBuilder::new(16, 16)
+        .sample_type::<u8>()
+        .samples_per_pixel(3)
+        .photometric(PhotometricInterpretation::Rgb)
+        .compression(Compression::Jpeg)
+        .jpeg_options(JpegOptions { quality: 90 })
+        .tiles(16, 16);
+    let handle = tiff_writer.add_image(image).unwrap();
+    tiff_writer.write_block(&handle, 0, &rgb).unwrap();
     tiff_writer.finish().unwrap();
 }
 
@@ -349,6 +387,40 @@ fn matches_reference_tools_for_generated_planar_tiff() {
     assert_eq!(ifd.tile_height(), directory.tile_height);
 
     assert_gdal_hash_matches(fixture.path(), 0, SampleKind::U8);
+}
+
+#[test]
+fn matches_gdal_for_generated_jpeg_tiff() {
+    if !reference::python_gdal_available() {
+        eprintln!("skipping GDAL JPEG parity test because Python GDAL bindings are unavailable");
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_generated_jpeg_fixture(fixture.path());
+
+    let path_str = fixture.path().to_str().unwrap();
+    let reference_json =
+        reference::run_reference_json(env!("CARGO_MANIFEST_DIR"), &["metadata", path_str]);
+    let file = TiffFile::open(fixture.path()).unwrap();
+    let ifd = file.ifd(0).unwrap();
+
+    assert_eq!(
+        ifd.width() as u64,
+        reference_json["width"].as_u64().unwrap()
+    );
+    assert_eq!(
+        ifd.height() as u64,
+        reference_json["height"].as_u64().unwrap()
+    );
+    assert_eq!(
+        ifd.samples_per_pixel() as u64,
+        reference_json["band_count"].as_u64().unwrap()
+    );
+    assert_eq!(ifd.compression(), Compression::Jpeg.to_code());
+    assert!(ifd.tag(tiff_core::TAG_JPEG_TABLES).is_none());
+
+    assert_gdal_u8_pixels_close_with_tolerance(fixture.path(), 0, 6, 256);
 }
 
 #[test]

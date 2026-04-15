@@ -12,7 +12,7 @@ use ndarray::{ArrayView2, ArrayView3};
 use tiff_core::{
     Compression, PhotometricInterpretation, PlanarConfiguration, Predictor, Tag, TagValue,
 };
-use tiff_writer::{ImageBuilder, TiffVariant, TiffWriter, WriteOptions};
+use tiff_writer::{ImageBuilder, JpegOptions, TiffVariant, TiffWriter, WriteOptions};
 
 use crate::error::{Error, Result};
 use crate::sample::{NumericSample, WriteSample};
@@ -32,6 +32,7 @@ pub struct GeoTiffBuilder {
     pub(crate) compression: Compression,
     pub(crate) predictor: Predictor,
     pub(crate) lerc_options: Option<tiff_writer::LercOptions>,
+    pub(crate) jpeg_options: Option<JpegOptions>,
     pub(crate) planar_configuration: PlanarConfiguration,
     pub(crate) tile_width: Option<u32>,
     pub(crate) tile_height: Option<u32>,
@@ -54,6 +55,7 @@ impl GeoTiffBuilder {
             compression: Compression::None,
             predictor: Predictor::None,
             lerc_options: None,
+            jpeg_options: None,
             planar_configuration: PlanarConfiguration::Chunky,
             tile_width: None,
             tile_height: None,
@@ -184,13 +186,19 @@ impl GeoTiffBuilder {
         if !matches!(compression, Compression::Lerc) {
             self.lerc_options = None;
         }
+        if !matches!(compression, Compression::Jpeg) {
+            self.jpeg_options = None;
+        }
+        if matches!(compression, Compression::Lerc | Compression::Jpeg) {
+            self.predictor = Predictor::None;
+        }
         self
     }
 
     /// Set predictor (requires compression != None).
     pub fn predictor(mut self, predictor: Predictor) -> Self {
-        // LERC does not use TIFF predictors; ignore the request.
-        if !matches!(self.compression, Compression::Lerc) {
+        // LERC and JPEG do not use TIFF predictors; ignore the request.
+        if !matches!(self.compression, Compression::Lerc | Compression::Jpeg) {
             self.predictor = predictor;
         }
         self
@@ -204,6 +212,19 @@ impl GeoTiffBuilder {
         self.compression = Compression::Lerc;
         self.predictor = Predictor::None;
         self.lerc_options = Some(options);
+        self.jpeg_options = None;
+        self
+    }
+
+    /// Set JPEG compression with the given options.
+    ///
+    /// This sets `compression = Jpeg` and `predictor = None` (JPEG uses its
+    /// own transform and entropy coding pipeline rather than TIFF predictors).
+    pub fn jpeg_options(mut self, options: JpegOptions) -> Self {
+        self.compression = Compression::Jpeg;
+        self.predictor = Predictor::None;
+        self.jpeg_options = Some(options);
+        self.lerc_options = None;
         self
     }
 
@@ -298,6 +319,9 @@ impl GeoTiffBuilder {
 
         if let Some(opts) = self.lerc_options {
             ib = ib.lerc_options(opts);
+        }
+        if let Some(opts) = self.jpeg_options {
+            ib = ib.jpeg_options(opts);
         }
 
         if let (Some(tw), Some(th)) = (self.tile_width, self.tile_height) {

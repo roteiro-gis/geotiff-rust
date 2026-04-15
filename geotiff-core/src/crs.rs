@@ -68,6 +68,8 @@ pub struct CrsInfo {
     pub projected_epsg: Option<u16>,
     /// EPSG code for a geographic CRS (from GeographicTypeGeoKey).
     pub geographic_epsg: Option<u16>,
+    /// EPSG code for a geocentric CRS (stored in the geodetic GeoKey 2048).
+    pub geocentric_epsg: Option<u16>,
     /// Citation string for the projected CRS.
     pub projection_citation: Option<String>,
     /// Citation string for the geographic CRS.
@@ -77,11 +79,18 @@ pub struct CrsInfo {
 impl CrsInfo {
     /// Extract CRS information from a GeoKey directory.
     pub fn from_geokeys(geokeys: &GeoKeyDirectory) -> Self {
+        let model_type = geokeys.get_short(geokeys::GT_MODEL_TYPE).unwrap_or(0);
+        let geodetic_epsg = geokeys.get_short(geokeys::GEOGRAPHIC_TYPE);
         Self {
-            model_type: geokeys.get_short(geokeys::GT_MODEL_TYPE).unwrap_or(0),
+            model_type,
             raster_type: geokeys.get_short(geokeys::GT_RASTER_TYPE).unwrap_or(1),
             projected_epsg: geokeys.get_short(geokeys::PROJECTED_CS_TYPE),
-            geographic_epsg: geokeys.get_short(geokeys::GEOGRAPHIC_TYPE),
+            geographic_epsg: (model_type != ModelType::Geocentric.code())
+                .then_some(geodetic_epsg)
+                .flatten(),
+            geocentric_epsg: (model_type == ModelType::Geocentric.code())
+                .then_some(geodetic_epsg)
+                .flatten(),
             projection_citation: geokeys.get_ascii(geokeys::PROJ_CITATION).map(String::from),
             geographic_citation: geokeys.get_ascii(geokeys::GEOG_CITATION).map(String::from),
         }
@@ -91,6 +100,7 @@ impl CrsInfo {
     pub fn epsg(&self) -> Option<u32> {
         self.projected_epsg
             .or(self.geographic_epsg)
+            .or(self.geocentric_epsg)
             .map(|e| e as u32)
     }
 
@@ -113,9 +123,13 @@ impl CrsInfo {
         );
         if let Some(epsg) = self.projected_epsg {
             geokeys.set(geokeys::PROJECTED_CS_TYPE, GeoKeyValue::Short(epsg));
+        } else {
+            geokeys.remove(geokeys::PROJECTED_CS_TYPE);
         }
-        if let Some(epsg) = self.geographic_epsg {
+        if let Some(epsg) = self.geographic_epsg.or(self.geocentric_epsg) {
             geokeys.set(geokeys::GEOGRAPHIC_TYPE, GeoKeyValue::Short(epsg));
+        } else {
+            geokeys.remove(geokeys::GEOGRAPHIC_TYPE);
         }
         if let Some(ref citation) = self.projection_citation {
             geokeys.set(geokeys::PROJ_CITATION, GeoKeyValue::Ascii(citation.clone()));

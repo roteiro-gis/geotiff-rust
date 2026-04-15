@@ -227,3 +227,33 @@ fn lerc_roundtrip_and_builder_state_behave_consistently() {
         .compression(Compression::Lerc);
     assert!(ib.lerc_parameters_tag().is_some());
 }
+
+#[test]
+fn writer_validation_rejects_zero_samples_and_rgb_band_mismatches() {
+    let mut zero_spp_buf = Cursor::new(Vec::new());
+    let mut zero_spp_writer = TiffWriter::new(&mut zero_spp_buf, WriteOptions::default()).unwrap();
+    let err = zero_spp_writer
+        .add_image(
+            ImageBuilder::new(1, 1)
+                .sample_type::<u8>()
+                .samples_per_pixel(0),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("samples_per_pixel"))
+    );
+
+    let mut rgb_buf = Cursor::new(Vec::new());
+    let mut rgb_writer = TiffWriter::new(&mut rgb_buf, WriteOptions::default()).unwrap();
+    let err = rgb_writer
+        .add_image(
+            ImageBuilder::new(1, 1)
+                .sample_type::<u8>()
+                .samples_per_pixel(1)
+                .photometric(tiff_core::PhotometricInterpretation::Rgb),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("RGB photometric interpretation"))
+    );
+}

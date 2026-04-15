@@ -2,8 +2,8 @@ use std::io::Cursor;
 
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
-    CogBuilder, Compression, GeoTiffBuilder, PhotometricInterpretation, PlanarConfiguration,
-    Resampling,
+    CogBuilder, Compression, Error as GeoTiffWriteError, GeoTiffBuilder, PhotometricInterpretation,
+    PlanarConfiguration, Resampling,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
@@ -206,4 +206,71 @@ fn cog_streaming_and_multiband_roundtrip_match_expectations() {
 
     let overview = streaming.read_overview::<u8>(0).unwrap();
     assert_eq!(overview.shape(), &[16, 16, 3]);
+}
+
+#[test]
+fn cog_validates_and_dedupes_overview_levels() {
+    let data = Array2::<u8>::from_elem((8, 8), 1);
+
+    let mut invalid_buf = Cursor::new(Vec::new());
+    let err = CogBuilder::new(GeoTiffBuilder::new(8, 8).tile_size(16, 16))
+        .overview_levels(vec![2, 0, 2])
+        .write_2d_to(&mut invalid_buf, data.view())
+        .unwrap_err();
+    assert!(
+        matches!(err, GeoTiffWriteError::InvalidConfig(message) if message.contains("greater than 1"))
+    );
+
+    let mut deduped_buf = Cursor::new(Vec::new());
+    CogBuilder::new(GeoTiffBuilder::new(8, 8).tile_size(16, 16))
+        .overview_levels(vec![4, 2, 2, 4])
+        .write_2d_to(&mut deduped_buf, data.view())
+        .unwrap();
+    let tiff = TiffFile::from_bytes(deduped_buf.into_inner()).unwrap();
+    assert_eq!(tiff.ifd_count(), 3);
+}
+
+#[test]
+fn cog_average_overviews_ignore_nodata_for_oneshot_and_streaming_writes() {
+    let nodata = -1.0f32;
+    let oneshot = Array2::from_shape_vec(
+        (4, 4),
+        vec![
+            1.0, nodata, 2.0, nodata, nodata, nodata, nodata, nodata, 3.0, 3.0, 4.0, 4.0, 3.0,
+            nodata, nodata, nodata,
+        ],
+    )
+    .unwrap();
+
+    let builder = GeoTiffBuilder::new(4, 4).tile_size(16, 16).nodata("-1");
+
+    let mut oneshot_buf = Cursor::new(Vec::new());
+    CogBuilder::new(builder.clone())
+        .overview_levels(vec![2])
+        .resampling(Resampling::Average)
+        .write_2d_to(&mut oneshot_buf, oneshot.view())
+        .unwrap();
+    let oneshot_tiff = TiffFile::from_bytes(oneshot_buf.into_inner()).unwrap();
+    let oneshot_overview = oneshot_tiff.read_image::<f32>(1).unwrap();
+    assert_eq!(oneshot_overview[[0, 0]], 1.0);
+    assert_eq!(oneshot_overview[[0, 1]], 2.0);
+    assert_eq!(oneshot_overview[[1, 0]], 3.0);
+    assert_eq!(oneshot_overview[[1, 1]], 4.0);
+
+    let mut streaming_buf = Cursor::new(Vec::new());
+    let mut writer = CogBuilder::new(builder)
+        .overview_levels(vec![2])
+        .resampling(Resampling::Average)
+        .tile_writer::<f32, _>(&mut streaming_buf)
+        .unwrap();
+    let sparse_tile = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+    writer.write_tile(0, 0, &sparse_tile.view()).unwrap();
+    writer.finish().unwrap();
+
+    let streaming_tiff = TiffFile::from_bytes(streaming_buf.into_inner()).unwrap();
+    let streaming_overview = streaming_tiff.read_image::<f32>(1).unwrap();
+    assert_eq!(streaming_overview[[0, 0]], 2.5);
+    assert_eq!(streaming_overview[[0, 1]], nodata);
+    assert_eq!(streaming_overview[[1, 0]], nodata);
+    assert_eq!(streaming_overview[[1, 1]], nodata);
 }

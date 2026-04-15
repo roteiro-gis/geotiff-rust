@@ -6,6 +6,15 @@ use tiff_core::{ByteOrder, Tag, TagValue};
 
 use crate::error::Result;
 
+fn classic_offset_u32(offset: u64) -> Result<u32> {
+    u32::try_from(offset).map_err(|_| crate::error::Error::ClassicOffsetOverflow { offset })
+}
+
+fn classic_byte_count_u32(byte_count: u64) -> Result<u32> {
+    u32::try_from(byte_count)
+        .map_err(|_| crate::error::Error::ClassicByteCountOverflow { byte_count })
+}
+
 /// Write the TIFF header. Classic = 8 bytes, BigTIFF = 16 bytes.
 /// The first-IFD offset is set to 0 and must be patched later.
 pub fn write_header<W: Write + Seek>(
@@ -40,7 +49,7 @@ pub fn patch_first_ifd<W: Write + Seek>(
         sink.write_all(&byte_order.write_u64(ifd_offset))?;
     } else {
         sink.seek(SeekFrom::Start(header_offset + 4))?;
-        sink.write_all(&byte_order.write_u32(ifd_offset as u32))?;
+        sink.write_all(&byte_order.write_u32(classic_offset_u32(ifd_offset)?))?;
     }
     Ok(())
 }
@@ -59,6 +68,27 @@ pub struct IfdWriteResult {
     pub is_bigtiff: bool,
 }
 
+/// Estimate the encoded size of an IFD, including deferred tag payloads.
+pub fn estimate_ifd_size(byte_order: ByteOrder, is_bigtiff: bool, tags: &[Tag]) -> u64 {
+    let entry_size: u64 = if is_bigtiff { 20 } else { 12 };
+    let inline_max: usize = if is_bigtiff { 8 } else { 4 };
+    let next_ptr_size: u64 = if is_bigtiff { 8 } else { 4 };
+    let count_size: u64 = if is_bigtiff { 8 } else { 2 };
+    let deferred_len: u64 = tags
+        .iter()
+        .map(|tag| {
+            let encoded_len = tag.value.encode(byte_order).len();
+            if encoded_len > inline_max {
+                encoded_len as u64
+            } else {
+                0
+            }
+        })
+        .sum();
+
+    count_size + tags.len() as u64 * entry_size + next_ptr_size + deferred_len
+}
+
 /// Write an IFD (Classic or BigTIFF). Tags must be sorted by code.
 pub fn write_ifd<W: Write + Seek>(
     sink: &mut W,
@@ -69,6 +99,12 @@ pub fn write_ifd<W: Write + Seek>(
     byte_counts_tag_code: u16,
     _num_blocks: usize,
 ) -> Result<IfdWriteResult> {
+    if !is_bigtiff && tags.len() > u16::MAX as usize {
+        return Err(crate::error::Error::Other(
+            "classic TIFF IFD entry count exceeds u16::MAX".into(),
+        ));
+    }
+
     let ifd_offset = sink.stream_position()?;
 
     // Sizes depend on format
@@ -124,7 +160,13 @@ pub fn write_ifd<W: Write + Seek>(
         if is_bigtiff {
             sink.write_all(&byte_order.write_u64(tag.count))?;
         } else {
-            sink.write_all(&byte_order.write_u32(tag.count as u32))?;
+            let tag_count = u32::try_from(tag.count).map_err(|_| {
+                crate::error::Error::Other(format!(
+                    "classic TIFF tag {} count exceeds u32::MAX",
+                    tag.code
+                ))
+            })?;
+            sink.write_all(&byte_order.write_u32(tag_count))?;
         }
 
         let encoded = tag.value.encode(byte_order);
@@ -137,7 +179,7 @@ pub fn write_ifd<W: Write + Seek>(
             if is_bigtiff {
                 sink.write_all(&byte_order.write_u64(offset))?;
             } else {
-                sink.write_all(&byte_order.write_u32(offset as u32))?;
+                sink.write_all(&byte_order.write_u32(classic_offset_u32(offset)?))?;
             }
             deferred_idx += 1;
         }
@@ -179,10 +221,7 @@ pub fn patch_block_offsets<W: Write + Seek>(
         if is_bigtiff {
             sink.write_all(&byte_order.write_u64(offset))?;
         } else {
-            if offset > u32::MAX as u64 {
-                return Err(crate::error::Error::ClassicOffsetOverflow { offset });
-            }
-            sink.write_all(&byte_order.write_u32(offset as u32))?;
+            sink.write_all(&byte_order.write_u32(classic_offset_u32(offset)?))?;
         }
     }
     Ok(())
@@ -201,7 +240,7 @@ pub fn patch_block_byte_counts<W: Write + Seek>(
         if is_bigtiff {
             sink.write_all(&byte_order.write_u64(count))?;
         } else {
-            sink.write_all(&byte_order.write_u32(count as u32))?;
+            sink.write_all(&byte_order.write_u32(classic_byte_count_u32(count)?))?;
         }
     }
     Ok(())
@@ -219,7 +258,7 @@ pub fn patch_next_ifd<W: Write + Seek>(
     if is_bigtiff {
         sink.write_all(&byte_order.write_u64(next_ifd))?;
     } else {
-        sink.write_all(&byte_order.write_u32(next_ifd as u32))?;
+        sink.write_all(&byte_order.write_u32(classic_offset_u32(next_ifd)?))?;
     }
     Ok(())
 }

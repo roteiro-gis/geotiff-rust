@@ -3,7 +3,9 @@ use std::io::Cursor;
 
 use tiff_core::{Compression, Predictor};
 use tiff_reader::{TiffFile, TiffSample};
-use tiff_writer::{ImageBuilder, LercOptions, TiffWriteSample, TiffWriter, WriteOptions};
+use tiff_writer::{
+    ImageBuilder, LercOptions, TiffVariant, TiffWriteSample, TiffWriter, WriteOptions,
+};
 
 fn roundtrip_image<T>(image: ImageBuilder, block_index: usize, block: &[T]) -> Vec<T>
 where
@@ -256,4 +258,30 @@ fn writer_validation_rejects_zero_samples_and_rgb_band_mismatches() {
     assert!(
         matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("RGB photometric interpretation"))
     );
+}
+
+#[test]
+fn explicit_bigtiff_roundtrips_small_images() {
+    let mut buf = Cursor::new(Vec::new());
+    let mut writer = TiffWriter::new(
+        &mut buf,
+        WriteOptions {
+            byte_order: tiff_core::ByteOrder::LittleEndian,
+            variant: TiffVariant::BigTiff,
+        },
+    )
+    .unwrap();
+
+    let handle = writer
+        .add_image(ImageBuilder::new(2, 2).sample_type::<u8>().strips(2))
+        .unwrap();
+    writer.write_block(&handle, 0, &[1u8, 2, 3, 4]).unwrap();
+    writer.finish().unwrap();
+
+    let file = TiffFile::from_bytes(buf.into_inner()).unwrap();
+    assert!(file.is_bigtiff());
+    let image = file.read_image::<u8>(0).unwrap();
+    let (values, offset) = image.into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0));
+    assert_eq!(values, vec![1, 2, 3, 4]);
 }

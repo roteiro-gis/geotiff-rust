@@ -3,7 +3,7 @@ use std::io::Cursor;
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
     CogBuilder, Compression, Error as GeoTiffWriteError, GeoTiffBuilder, PhotometricInterpretation,
-    PlanarConfiguration, Resampling,
+    PlanarConfiguration, Resampling, TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
@@ -273,4 +273,28 @@ fn cog_average_overviews_ignore_nodata_for_oneshot_and_streaming_writes() {
     assert_eq!(streaming_overview[[0, 1]], nodata);
     assert_eq!(streaming_overview[[1, 0]], nodata);
     assert_eq!(streaming_overview[[1, 1]], nodata);
+}
+
+#[test]
+fn cog_emits_bigtiff_when_requested() {
+    let data = Array2::<u8>::from_elem((32, 32), 7);
+    let mut buf = Cursor::new(Vec::new());
+    let builder = GeoTiffBuilder::new(32, 32)
+        .tile_size(16, 16)
+        .tiff_variant(TiffVariant::BigTiff);
+
+    CogBuilder::new(builder)
+        .overview_levels(vec![2])
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let bytes = buf.into_inner();
+    assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
+    assert_eq!(
+        &bytes[16..16 + gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).len()],
+        gdal_structural_metadata_bytes(PlanarConfiguration::Chunky).as_slice()
+    );
+
+    let tiff = TiffFile::from_bytes(bytes).unwrap();
+    assert!(tiff.is_bigtiff());
 }

@@ -38,4 +38,4 @@ pub use tiff_core::{
     Compression, LercAdditionalCompression, PhotometricInterpretation, PlanarConfiguration,
     Predictor,
 };
-pub use tiff_writer::LercOptions;
+pub use tiff_writer::{LercOptions, TiffVariant};

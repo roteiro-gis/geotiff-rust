@@ -2,6 +2,7 @@
 
 use tiff_core::*;
 
+use crate::encoder;
 use crate::sample::TiffWriteSample;
 
 /// LERC encoding options for the TIFF writer.
@@ -233,6 +234,36 @@ impl ImageBuilder {
                 ]
             }
         }
+    }
+
+    /// Build the serialized TIFF tags for this image definition.
+    pub fn build_tags(&self, is_bigtiff: bool) -> Vec<Tag> {
+        let mut extra_tags = self.extra_tags.clone();
+        if let Some(lerc_tag) = self.lerc_parameters_tag() {
+            extra_tags.push(lerc_tag);
+        }
+
+        let (offsets_tag_code, byte_counts_tag_code) = self.offset_tag_codes();
+        let layout_tags = self.layout_tags();
+
+        encoder::build_image_tags(&encoder::ImageTagParams {
+            width: self.width,
+            height: self.height,
+            samples_per_pixel: self.samples_per_pixel,
+            bits_per_sample: self.bits_per_sample,
+            sample_format: self.sample_format.to_code(),
+            compression: self.compression.to_code(),
+            photometric: self.photometric.to_code(),
+            predictor: self.predictor.to_code(),
+            planar_configuration: self.planar_configuration.to_code(),
+            subfile_type: self.subfile_type,
+            extra_tags: &extra_tags,
+            offsets_tag_code,
+            byte_counts_tag_code,
+            num_blocks: self.block_count(),
+            layout_tags: &layout_tags,
+            is_bigtiff,
+        })
     }
 
     /// Row width in pixels for compression pipeline (tile_width or image_width).

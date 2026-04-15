@@ -78,9 +78,11 @@ pub fn estimate_ifd_size(byte_order: ByteOrder, is_bigtiff: bool, tags: &[Tag]) 
         .iter()
         .map(|tag| {
             let encoded_len = tag.value.encode(byte_order).len();
-            (encoded_len > inline_max)
-                .then_some(encoded_len as u64)
-                .unwrap_or(0)
+            if encoded_len > inline_max {
+                encoded_len as u64
+            } else {
+                0
+            }
         })
         .sum();
 

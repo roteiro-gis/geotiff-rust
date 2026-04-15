@@ -1,7 +1,7 @@
 //! Cloud Optimized GeoTIFF (COG) writer.
 //!
 //! COG files have a specific byte layout:
-//! 1. TIFF header (8 bytes)
+//! 1. TIFF header
 //! 2. GDAL structural metadata block (the COG "ghost area")
 //! 3. Base image IFD (full resolution)
 //! 4. Overview IFDs (largest → smallest)
@@ -12,13 +12,14 @@
 //! all metadata in a single request from the start of the file.
 
 use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
-use tiff_core::{ByteOrder, Compression, Predictor};
+use tempfile::tempfile;
+use tiff_core::{ByteOrder, Compression, Predictor, Tag};
 use tiff_writer::LercOptions;
-use tiff_writer::{ImageBuilder, ImageHandle, TiffWriter, WriteOptions};
+use tiff_writer::{encoder, ImageBuilder, TiffVariant};
 
 use crate::builder::GeoTiffBuilder;
 use crate::error::{Error, Result};
@@ -29,6 +30,15 @@ use crate::sample::{parse_nodata_value, NumericSample};
 pub enum Resampling {
     NearestNeighbor,
     Average,
+}
+
+fn checked_len_u64(len: usize, context: &str) -> Result<u64> {
+    u64::try_from(len).map_err(|_| Error::Other(format!("{context} length exceeds u64::MAX")))
+}
+
+fn checked_add_u64(lhs: u64, rhs: u64, context: &str) -> Result<u64> {
+    lhs.checked_add(rhs)
+        .ok_or_else(|| Error::Other(format!("{context} overflow")))
 }
 
 fn gdal_structural_metadata_bytes(planar_configuration: tiff_core::PlanarConfiguration) -> Vec<u8> {
@@ -71,6 +81,80 @@ struct TileWritePlan {
     lerc_options: Option<LercOptions>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CogBlockRecord {
+    spool_offset: u64,
+    logical_offset_delta: u64,
+    logical_byte_count: u64,
+}
+
+struct CogImage {
+    builder: ImageBuilder,
+    blocks: Vec<CogBlockRecord>,
+}
+
+struct PlannedCogImage {
+    tags: Vec<Tag>,
+    block_offsets: Vec<u64>,
+    block_byte_counts: Vec<u64>,
+}
+
+struct CogLayout {
+    base_offset: u64,
+    is_bigtiff: bool,
+    images: Vec<PlannedCogImage>,
+}
+
+struct BlockSpool {
+    file: File,
+    len: u64,
+}
+
+impl BlockSpool {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            file: tempfile()?,
+            len: 0,
+        })
+    }
+
+    fn append_segmented(
+        &mut self,
+        prefix: &[u8],
+        payload: &[u8],
+        suffix: &[u8],
+    ) -> Result<CogBlockRecord> {
+        let spool_offset = self.len;
+        let prefix_len = checked_len_u64(prefix.len(), "COG block prefix")?;
+        let payload_len = checked_len_u64(payload.len(), "COG block payload")?;
+        let suffix_len = checked_len_u64(suffix.len(), "COG block suffix")?;
+        let physical_len = checked_add_u64(
+            checked_add_u64(prefix_len, payload_len, "COG block size")?,
+            suffix_len,
+            "COG block size",
+        )?;
+
+        self.file.seek(SeekFrom::End(0))?;
+        self.file.write_all(prefix)?;
+        self.file.write_all(payload)?;
+        self.file.write_all(suffix)?;
+        self.len = checked_add_u64(self.len, physical_len, "COG spool length")?;
+
+        Ok(CogBlockRecord {
+            spool_offset,
+            logical_offset_delta: prefix_len,
+            logical_byte_count: payload_len,
+        })
+    }
+
+    fn copy_into<W: Write + Seek>(&mut self, sink: &mut W) -> Result<()> {
+        self.file.seek(SeekFrom::Start(0))?;
+        sink.seek(SeekFrom::End(0))?;
+        io::copy(&mut self.file, sink)?;
+        Ok(())
+    }
+}
+
 /// Configuration for COG writing.
 #[derive(Debug, Clone)]
 pub struct CogBuilder {
@@ -79,11 +163,12 @@ pub struct CogBuilder {
     resampling: Resampling,
 }
 
-fn gdal_block_leader(payload_len: usize, byte_order: ByteOrder) -> Vec<u8> {
+fn gdal_block_leader(payload_len: usize, byte_order: ByteOrder) -> Result<Vec<u8>> {
+    let block_len = u32::try_from(payload_len)
+        .map_err(|_| Error::Other("COG block payload exceeds u32::MAX".into()))?;
     let mut leader = Vec::with_capacity(4);
-    let block_len = u32::try_from(payload_len).expect("COG block payload exceeds u32::MAX");
     leader.extend_from_slice(&byte_order.write_u32(block_len));
-    leader
+    Ok(leader)
 }
 
 fn gdal_block_trailer(bytes: &[u8]) -> Vec<u8> {
@@ -94,14 +179,12 @@ fn gdal_block_trailer(bytes: &[u8]) -> Vec<u8> {
     }
 }
 
-fn write_cog_block<T: NumericSample, W: Write + Seek>(
-    writer: &mut TiffWriter<W>,
-    handle: &ImageHandle,
-    block_index: usize,
+fn compress_cog_block<T: NumericSample>(
     samples: &[T],
+    block_index: usize,
     encoding: CogBlockEncoding,
-) -> Result<()> {
-    let compressed = if matches!(encoding.compression, Compression::Lerc) {
+) -> Result<Vec<u8>> {
+    if matches!(encoding.compression, Compression::Lerc) {
         let opts = encoding.lerc_options.unwrap_or_default();
         tiff_writer::compress::compress_block_lerc(
             samples,
@@ -110,7 +193,8 @@ fn write_cog_block<T: NumericSample, W: Write + Seek>(
             encoding.samples_per_pixel as u32,
             &opts,
             block_index,
-        )?
+        )
+        .map_err(Into::into)
     } else {
         tiff_writer::compress::compress_block(
             samples,
@@ -120,12 +204,9 @@ fn write_cog_block<T: NumericSample, W: Write + Seek>(
             encoding.samples_per_pixel,
             encoding.row_width_pixels,
             block_index,
-        )?
-    };
-    let leader = gdal_block_leader(compressed.len(), ByteOrder::LittleEndian);
-    let trailer = gdal_block_trailer(&compressed);
-    writer.write_block_raw_segmented(handle, block_index, &leader, &compressed, &trailer)?;
-    Ok(())
+        )
+        .map_err(Into::into)
+    }
 }
 
 fn validate_overview_levels(levels: &[u32]) -> Result<Vec<u32>> {
@@ -139,6 +220,222 @@ fn validate_overview_levels(levels: &[u32]) -> Result<Vec<u32>> {
     normalized.sort_unstable();
     normalized.dedup();
     Ok(normalized)
+}
+
+fn plan_cog_layout_for_variant(
+    base_offset: u64,
+    prefix_len: u64,
+    images: &[CogImage],
+    is_bigtiff: bool,
+) -> Result<CogLayout> {
+    let mut image_plans = Vec::with_capacity(images.len());
+    let mut current = checked_add_u64(
+        checked_add_u64(
+            base_offset,
+            encoder::header_len(is_bigtiff),
+            "COG header size",
+        )?,
+        prefix_len,
+        "COG prefix size",
+    )?;
+
+    for image in images {
+        let expected_blocks = image.builder.block_count();
+        if image.blocks.len() != expected_blocks {
+            return Err(Error::Other(format!(
+                "COG image is missing block records: expected {expected_blocks}, got {}",
+                image.blocks.len()
+            )));
+        }
+        let tags = image.builder.build_tags(is_bigtiff);
+        current = checked_add_u64(
+            current,
+            encoder::estimate_ifd_size(ByteOrder::LittleEndian, is_bigtiff, &tags),
+            "COG IFD layout",
+        )?;
+        if !is_bigtiff {
+            u32::try_from(current).map_err(|_| {
+                Error::Tiff(tiff_writer::Error::ClassicOffsetOverflow { offset: current })
+            })?;
+        }
+        image_plans.push(PlannedCogImage {
+            tags,
+            block_offsets: Vec::with_capacity(image.blocks.len()),
+            block_byte_counts: Vec::with_capacity(image.blocks.len()),
+        });
+    }
+
+    let data_start = current;
+    for (image, planned) in images.iter().zip(image_plans.iter_mut()) {
+        for block in &image.blocks {
+            let physical_start =
+                checked_add_u64(data_start, block.spool_offset, "COG block physical offset")?;
+            let logical_offset = checked_add_u64(
+                physical_start,
+                block.logical_offset_delta,
+                "COG block logical offset",
+            )?;
+            if !is_bigtiff {
+                u32::try_from(logical_offset).map_err(|_| {
+                    Error::Tiff(tiff_writer::Error::ClassicOffsetOverflow {
+                        offset: logical_offset,
+                    })
+                })?;
+                u32::try_from(block.logical_byte_count).map_err(|_| {
+                    Error::Tiff(tiff_writer::Error::ClassicByteCountOverflow {
+                        byte_count: block.logical_byte_count,
+                    })
+                })?;
+            }
+            planned.block_offsets.push(logical_offset);
+            planned.block_byte_counts.push(block.logical_byte_count);
+        }
+    }
+
+    Ok(CogLayout {
+        base_offset,
+        is_bigtiff,
+        images: image_plans,
+    })
+}
+
+fn plan_cog_layout(
+    base_offset: u64,
+    prefix_len: u64,
+    variant: TiffVariant,
+    images: &[CogImage],
+) -> Result<CogLayout> {
+    match variant {
+        TiffVariant::Classic => plan_cog_layout_for_variant(base_offset, prefix_len, images, false),
+        TiffVariant::BigTiff => plan_cog_layout_for_variant(base_offset, prefix_len, images, true),
+        TiffVariant::Auto => {
+            match plan_cog_layout_for_variant(base_offset, prefix_len, images, false) {
+                Ok(layout) => Ok(layout),
+                Err(Error::Tiff(
+                    tiff_writer::Error::ClassicOffsetOverflow { .. }
+                    | tiff_writer::Error::ClassicByteCountOverflow { .. },
+                )) => plan_cog_layout_for_variant(base_offset, prefix_len, images, true),
+                Err(err) => Err(err),
+            }
+        }
+    }
+}
+
+fn emit_cog<W: Write + Seek>(
+    sink: &mut W,
+    prefix: &[u8],
+    images: &[CogImage],
+    layout: &CogLayout,
+    spool: &mut BlockSpool,
+) -> Result<()> {
+    sink.seek(SeekFrom::Start(layout.base_offset))?;
+    encoder::write_header(sink, ByteOrder::LittleEndian, layout.is_bigtiff)?;
+    sink.write_all(prefix)?;
+
+    let mut ifd_results = Vec::with_capacity(images.len());
+    for (image, planned) in images.iter().zip(&layout.images) {
+        let (offsets_tag_code, byte_counts_tag_code) = image.builder.offset_tag_codes();
+        let ifd_result = encoder::write_ifd(
+            sink,
+            ByteOrder::LittleEndian,
+            layout.is_bigtiff,
+            &planned.tags,
+            offsets_tag_code,
+            byte_counts_tag_code,
+            image.builder.block_count(),
+        )?;
+        ifd_results.push(ifd_result);
+    }
+
+    for (index, image) in images.iter().enumerate() {
+        let planned = &layout.images[index];
+        let ifd_result = &ifd_results[index];
+        let (offsets_tag_code, byte_counts_tag_code) = image.builder.offset_tag_codes();
+
+        if image.blocks.len() == 1 {
+            if let Some(off) = encoder::find_inline_tag_value_offset(
+                ifd_result.ifd_offset,
+                layout.is_bigtiff,
+                &planned.tags,
+                offsets_tag_code,
+            ) {
+                sink.seek(SeekFrom::Start(off))?;
+                if layout.is_bigtiff {
+                    sink.write_all(&ByteOrder::LittleEndian.write_u64(planned.block_offsets[0]))?;
+                } else {
+                    sink.write_all(&ByteOrder::LittleEndian.write_u32(
+                        u32::try_from(planned.block_offsets[0]).map_err(|_| {
+                            Error::Tiff(tiff_writer::Error::ClassicOffsetOverflow {
+                                offset: planned.block_offsets[0],
+                            })
+                        })?,
+                    ))?;
+                }
+            }
+            if let Some(off) = encoder::find_inline_tag_value_offset(
+                ifd_result.ifd_offset,
+                layout.is_bigtiff,
+                &planned.tags,
+                byte_counts_tag_code,
+            ) {
+                sink.seek(SeekFrom::Start(off))?;
+                if layout.is_bigtiff {
+                    sink.write_all(
+                        &ByteOrder::LittleEndian.write_u64(planned.block_byte_counts[0]),
+                    )?;
+                } else {
+                    sink.write_all(&ByteOrder::LittleEndian.write_u32(
+                        u32::try_from(planned.block_byte_counts[0]).map_err(|_| {
+                            Error::Tiff(tiff_writer::Error::ClassicByteCountOverflow {
+                                byte_count: planned.block_byte_counts[0],
+                            })
+                        })?,
+                    ))?;
+                }
+            }
+        } else {
+            if let Some(off) = ifd_result.offsets_tag_data_offset {
+                encoder::patch_block_offsets(
+                    sink,
+                    ByteOrder::LittleEndian,
+                    layout.is_bigtiff,
+                    off,
+                    &planned.block_offsets,
+                )?;
+            }
+            if let Some(off) = ifd_result.byte_counts_tag_data_offset {
+                encoder::patch_block_byte_counts(
+                    sink,
+                    ByteOrder::LittleEndian,
+                    layout.is_bigtiff,
+                    off,
+                    &planned.block_byte_counts,
+                )?;
+            }
+        }
+
+        if index == 0 {
+            encoder::patch_first_ifd(
+                sink,
+                layout.base_offset,
+                ByteOrder::LittleEndian,
+                layout.is_bigtiff,
+                ifd_result.ifd_offset,
+            )?;
+        } else {
+            encoder::patch_next_ifd(
+                sink,
+                ByteOrder::LittleEndian,
+                layout.is_bigtiff,
+                ifd_results[index - 1].next_ifd_pointer_offset,
+                ifd_result.ifd_offset,
+            )?;
+        }
+    }
+
+    sink.seek(SeekFrom::End(0))?;
+    spool.copy_into(sink)?;
+    Ok(())
 }
 
 impl CogBuilder {
@@ -207,26 +504,24 @@ impl CogBuilder {
         builder
     }
 
-    fn estimated_output_bytes<T: NumericSample>(&self, overview_levels: &[u32]) -> u64 {
-        let metadata_len =
-            gdal_structural_metadata_bytes(self.inner.planar_configuration).len() as u64;
-        let base = self.inner.to_image_builder::<T>();
-        let base_blocks = u64::try_from(base.block_count()).unwrap_or(u64::MAX);
-        let mut estimated = metadata_len
-            .saturating_add(base.estimated_uncompressed_bytes())
-            .saturating_add(base_blocks.saturating_mul(8));
-
-        let tw = self.inner.tile_width.unwrap_or(256);
-        let th = self.inner.tile_height.unwrap_or(256);
+    fn build_images<T: NumericSample>(
+        &self,
+        overview_levels: &[u32],
+        tile_width: u32,
+        tile_height: u32,
+    ) -> Vec<CogImage> {
+        let mut images = Vec::with_capacity(1 + overview_levels.len());
+        images.push(CogImage {
+            builder: self.inner.to_image_builder::<T>(),
+            blocks: Vec::new(),
+        });
         for &level in overview_levels {
-            let overview = self.overview_image_builder::<T>(level, tw, th);
-            let block_count = u64::try_from(overview.block_count()).unwrap_or(u64::MAX);
-            estimated = estimated
-                .saturating_add(overview.estimated_uncompressed_bytes())
-                .saturating_add(block_count.saturating_mul(8));
+            images.push(CogImage {
+                builder: self.overview_image_builder::<T>(level, tile_width, tile_height),
+                blocks: Vec::new(),
+            });
         }
-
-        estimated
+        images
     }
 
     /// Write a complete COG from a 2D array to a file path.
@@ -252,14 +547,6 @@ impl CogBuilder {
     }
 
     /// Write a complete COG to any Write+Seek target.
-    ///
-    /// The file layout is:
-    /// 1. TIFF header
-    /// 2. GDAL structural metadata ghost area
-    /// 3. Base image IFD
-    /// 4. Overview IFDs (largest → smallest)
-    /// 5. Tile offset/byte-count arrays
-    /// 6. Tile data (overview tiles smallest first, then base tiles)
     pub fn write_2d_to<T: NumericSample, W: Write + Seek>(
         &self,
         sink: W,
@@ -286,7 +573,7 @@ impl CogBuilder {
 
     fn write_array_to<T: NumericSample, W: Write + Seek>(
         &self,
-        sink: W,
+        mut sink: W,
         data: ArrayView3<T>,
     ) -> Result<()> {
         let (height, width, bands) = data.dim();
@@ -306,43 +593,15 @@ impl CogBuilder {
         let th = self.inner.tile_height.unwrap_or(256) as usize;
         let overview_levels = self.normalized_overview_levels()?;
         let nodata = parse_nodata_value::<T>(&self.inner.nodata);
+        let prefix = gdal_structural_metadata_bytes(self.inner.planar_configuration);
+        let mut spool = BlockSpool::new()?;
+        let mut images = self.build_images::<T>(&overview_levels, tw as u32, th as u32);
 
-        // Generate overview rasters
-        let overviews = self.generate_overviews(data, nodata, &overview_levels);
-
-        // --- Phase 1: Write header + GDAL metadata + all IFDs (with placeholder offsets) ---
-        let mut writer = TiffWriter::new(
-            sink,
-            WriteOptions::auto(self.estimated_output_bytes::<T>(&overview_levels)),
-        )?;
-        writer.write_header_prefix(&gdal_structural_metadata_bytes(
-            self.inner.planar_configuration,
-        ))?;
-
-        // Base image IFD first, per GDAL COG layout.
-        let base_ib = self.inner.to_image_builder::<T>();
-        let base_handle = writer.add_image(base_ib)?;
-
-        // Overview IFDs follow from largest to smallest in dimensions.
-        let mut overview_handles: Vec<(ImageHandle, u32, u32)> = Vec::new();
-        for &level in &overview_levels {
-            let ovr_w = (self.inner.width as usize).div_ceil(level as usize) as u32;
-            let ovr_h = (self.inner.height as usize).div_ceil(level as usize) as u32;
-
-            let ovr_ib = self.overview_image_builder::<T>(level, tw as u32, th as u32);
-            let handle = writer.add_image(ovr_ib)?;
-            overview_handles.push((handle, ovr_w, ovr_h));
-        }
-
-        // --- Phase 2: Write tile data ---
-
-        // Overview tiles (smallest overview first)
         for idx in (0..overview_levels.len()).rev() {
-            let (ref handle, _, _) = overview_handles[idx];
-            let overview = &overviews[idx];
-            write_tiled_data_3d::<T, W>(
-                &mut writer,
-                handle,
+            let overview =
+                generate_overview_3d(data, overview_levels[idx] as usize, self.resampling, nodata);
+            images[1 + idx].blocks = spool_tiled_data_3d(
+                &mut spool,
                 overview.view(),
                 TileWritePlan {
                     tile_width: tw,
@@ -355,10 +614,8 @@ impl CogBuilder {
             )?;
         }
 
-        // Base tiles
-        write_tiled_data_3d::<T, W>(
-            &mut writer,
-            &base_handle,
+        images[0].blocks = spool_tiled_data_3d(
+            &mut spool,
             data,
             TileWritePlan {
                 tile_width: tw,
@@ -370,15 +627,18 @@ impl CogBuilder {
             },
         )?;
 
-        writer.finish()?;
+        let base_offset = sink.stream_position()?;
+        let layout = plan_cog_layout(
+            base_offset,
+            checked_len_u64(prefix.len(), "COG prefix")?,
+            self.inner.tiff_variant,
+            &images,
+        )?;
+        emit_cog(&mut sink, &prefix, &images, &layout, &mut spool)?;
         Ok(())
     }
 
     /// Create a streaming COG tile writer.
-    ///
-    /// The writer creates the base IFD and overview IFD placeholders immediately.
-    /// Base tiles are written incrementally via `write_tile`. Overview tiles are
-    /// generated from the base tiles during `finish()`.
     pub fn tile_writer<T: NumericSample, W: Write + Seek>(
         &self,
         sink: W,
@@ -395,67 +655,12 @@ impl CogBuilder {
         let writer = BufWriter::new(file);
         self.tile_writer(writer)
     }
-
-    fn generate_overviews<T: NumericSample>(
-        &self,
-        data: ArrayView3<T>,
-        nodata: Option<T>,
-        overview_levels: &[u32],
-    ) -> Vec<Array3<T>> {
-        let (height, width, bands) = data.dim();
-        overview_levels
-            .iter()
-            .map(|&level| {
-                let level = level as usize;
-                let ovr_w = width.div_ceil(level);
-                let ovr_h = height.div_ceil(level);
-
-                Array3::from_shape_fn((ovr_h, ovr_w, bands), |(r, c, band)| {
-                    match self.resampling {
-                        Resampling::NearestNeighbor => {
-                            let src_r = (r * level).min(height - 1);
-                            let src_c = (c * level).min(width - 1);
-                            data[[src_r, src_c, band]]
-                        }
-                        Resampling::Average => {
-                            let start_r = r * level;
-                            let start_c = c * level;
-                            let end_r = (start_r + level).min(height);
-                            let end_c = (start_c + level).min(width);
-                            let mut sum = 0.0;
-                            let mut count = 0usize;
-                            for sr in start_r..end_r {
-                                for sc in start_c..end_c {
-                                    let value = data[[sr, sc, band]];
-                                    if nodata.is_some_and(|nodata_value| value == nodata_value) {
-                                        continue;
-                                    }
-                                    sum += value.to_f64();
-                                    count += 1;
-                                }
-                            }
-                            if count == 0 {
-                                nodata.unwrap_or_else(T::zero)
-                            } else {
-                                T::from_f64(sum / count as f64)
-                            }
-                        }
-                    }
-                })
-            })
-            .collect()
-    }
 }
 
 /// Streaming COG tile writer.
-///
-/// Base tiles are accumulated in memory. Overview and base blocks are emitted
-/// during `finish()` in canonical COG order, and the file-level COG ghost area
-/// is handled automatically.
 pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
-    writer: TiffWriter<W>,
-    overview_handles: Vec<(ImageHandle, u32, u32)>, // (handle, width, height)
-    base_handle: ImageHandle,
+    sink: W,
+    cog: CogBuilder,
     base_pixels: Vec<T>,
     tile_width: u32,
     tile_height: u32,
@@ -484,31 +689,9 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let nodata_value = parse_nodata_value::<T>(&cog.inner.nodata);
         let fill_value = nodata_value.unwrap_or_else(T::zero);
 
-        let mut writer = TiffWriter::new(
-            sink,
-            WriteOptions::auto(cog.estimated_output_bytes::<T>(&overview_levels)),
-        )?;
-        writer.write_header_prefix(&gdal_structural_metadata_bytes(
-            cog.inner.planar_configuration,
-        ))?;
-
-        // Base image IFD first, followed by overview IFDs from largest to smallest.
-        let base_ib = cog.inner.to_image_builder::<T>();
-        let base_handle = writer.add_image(base_ib)?;
-
-        let mut overview_handles = Vec::new();
-        for &level in &overview_levels {
-            let ovr_w = (cog.inner.width as usize).div_ceil(level as usize) as u32;
-            let ovr_h = (cog.inner.height as usize).div_ceil(level as usize) as u32;
-
-            let ovr_ib = cog.overview_image_builder::<T>(level, tw, th);
-            let handle = writer.add_image(ovr_ib)?;
-            overview_handles.push((handle, ovr_w, ovr_h));
-        }
         Ok(Self {
-            writer,
-            overview_handles,
-            base_handle,
+            sink,
+            cog: cog.clone(),
             base_pixels: vec![
                 fill_value;
                 cog.inner.width as usize
@@ -545,10 +728,15 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                 "write_tile only supports single-band COG output; use write_tile_3d for multi-band tiles".into(),
             ));
         }
+        if x_off % self.tile_width as usize != 0 || y_off % self.tile_height as usize != 0 {
+            return Err(Error::Other(format!(
+                "tile offsets must align to tile boundaries of {}x{}, got ({x_off},{y_off})",
+                self.tile_width, self.tile_height
+            )));
+        }
 
         let tile_col = x_off / self.tile_width as usize;
         let tile_row = y_off / self.tile_height as usize;
-
         if tile_col >= self.tiles_across as usize || tile_row >= self.tiles_down as usize {
             return Err(Error::TileOutOfBounds {
                 x_off,
@@ -561,16 +749,19 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
         let (data_h, data_w) = data.dim();
+        let expected_h = (self.height as usize).saturating_sub(y_off).min(th);
+        let expected_w = (self.width as usize).saturating_sub(x_off).min(tw);
+        if data_h > expected_h || data_w > expected_w {
+            return Err(Error::Other(format!(
+                "tile data shape {}x{} exceeds raster bounds for tile starting at ({x_off},{y_off}); expected at most {}x{}",
+                data_h, data_w, expected_h, expected_w
+            )));
+        }
 
-        for row in 0..data_h.min(th) {
-            for col in 0..data_w.min(tw) {
-                let value = data[[row, col]];
-                let dst_row = y_off + row;
-                let dst_col = x_off + col;
-                if dst_row < self.height as usize && dst_col < self.width as usize {
-                    let pixel_index = dst_row * self.width as usize + dst_col;
-                    self.base_pixels[pixel_index] = value;
-                }
+        for row in 0..data_h {
+            for col in 0..data_w {
+                let pixel_index = (y_off + row) * self.width as usize + (x_off + col);
+                self.base_pixels[pixel_index] = data[[row, col]];
             }
         }
 
@@ -578,16 +769,21 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
     }
 
     /// Write a multi-band tile at pixel offset (x_off, y_off).
-    /// Data shape: (tile_height, tile_width, bands) — interleaved.
     pub fn write_tile_3d(
         &mut self,
         x_off: usize,
         y_off: usize,
         data: &ndarray::ArrayView3<T>,
     ) -> Result<()> {
+        if x_off % self.tile_width as usize != 0 || y_off % self.tile_height as usize != 0 {
+            return Err(Error::Other(format!(
+                "tile offsets must align to tile boundaries of {}x{}, got ({x_off},{y_off})",
+                self.tile_width, self.tile_height
+            )));
+        }
+
         let tile_col = x_off / self.tile_width as usize;
         let tile_row = y_off / self.tile_height as usize;
-
         if tile_col >= self.tiles_across as usize || tile_row >= self.tiles_down as usize {
             return Err(Error::TileOutOfBounds {
                 x_off,
@@ -601,6 +797,14 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let th = self.tile_height as usize;
         let (data_h, data_w, data_b) = data.dim();
         let bands = self.bands as usize;
+        let expected_h = (self.height as usize).saturating_sub(y_off).min(th);
+        let expected_w = (self.width as usize).saturating_sub(x_off).min(tw);
+        if data_h > expected_h || data_w > expected_w {
+            return Err(Error::Other(format!(
+                "tile data shape {}x{} exceeds raster bounds for tile starting at ({x_off},{y_off}); expected at most {}x{}",
+                data_h, data_w, expected_h, expected_w
+            )));
+        }
         if data_b != bands {
             return Err(Error::DataSizeMismatch {
                 expected: data_h * data_w * bands,
@@ -608,14 +812,9 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             });
         }
 
-        for row in 0..data_h.min(th) {
-            for col in 0..data_w.min(tw) {
-                let dst_row = y_off + row;
-                let dst_col = x_off + col;
-                if dst_row >= self.height as usize || dst_col >= self.width as usize {
-                    continue;
-                }
-                let pixel_index = (dst_row * self.width as usize + dst_col) * bands;
+        for row in 0..data_h {
+            for col in 0..data_w {
+                let pixel_index = ((y_off + row) * self.width as usize + (x_off + col)) * bands;
                 for band in 0..bands {
                     self.base_pixels[pixel_index + band] = data[[row, col, band]];
                 }
@@ -625,7 +824,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         Ok(())
     }
 
-    /// Finish: generate overview tiles from accumulated base tiles, write everything, finalize.
+    /// Finish: generate overview tiles, emit the COG layout, and return the sink.
     pub fn finish(mut self) -> Result<W> {
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
@@ -636,17 +835,21 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let full = Array3::from_shape_vec((full_h, full_w, bands), self.base_pixels)
             .map_err(|err| Error::Other(format!("invalid streaming COG raster shape: {err}")))?;
 
-        // Generate and write overview tiles
+        let prefix = gdal_structural_metadata_bytes(self.planar_configuration);
+        let mut spool = BlockSpool::new()?;
+        let mut images =
+            self.cog
+                .build_images::<T>(&self.overview_levels, self.tile_width, self.tile_height);
+
         for idx in (0..self.overview_levels.len()).rev() {
-            let level = self.overview_levels[idx] as usize;
-            let (ref handle, _, _) = self.overview_handles[idx];
-
-            let overview =
-                generate_overview_3d(full.view(), level, self.resampling, self.nodata_value);
-
-            write_tiled_data_3d::<T, W>(
-                &mut self.writer,
-                handle,
+            let overview = generate_overview_3d(
+                full.view(),
+                self.overview_levels[idx] as usize,
+                self.resampling,
+                self.nodata_value,
+            );
+            images[1 + idx].blocks = spool_tiled_data_3d(
+                &mut spool,
                 overview.view(),
                 TileWritePlan {
                     tile_width: tw,
@@ -659,9 +862,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             )?;
         }
 
-        write_tiled_data_3d::<T, W>(
-            &mut self.writer,
-            &self.base_handle,
+        images[0].blocks = spool_tiled_data_3d(
+            &mut spool,
             full.view(),
             TileWritePlan {
                 tile_width: tw,
@@ -673,11 +875,17 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             },
         )?;
 
-        Ok(self.writer.finish()?)
+        let base_offset = self.sink.stream_position()?;
+        let layout = plan_cog_layout(
+            base_offset,
+            checked_len_u64(prefix.len(), "COG prefix")?,
+            self.cog.inner.tiff_variant,
+            &images,
+        )?;
+        emit_cog(&mut self.sink, &prefix, &images, &layout, &mut spool)?;
+        Ok(self.sink)
     }
 }
-
-// -- Helper functions --
 
 fn generate_overview_3d<T: NumericSample>(
     data: ArrayView3<T>,
@@ -721,17 +929,32 @@ fn generate_overview_3d<T: NumericSample>(
     })
 }
 
-fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
-    writer: &mut TiffWriter<W>,
-    handle: &ImageHandle,
+fn spool_tiled_data_3d<T: NumericSample>(
+    spool: &mut BlockSpool,
     data: ArrayView3<T>,
     plan: TileWritePlan,
-) -> Result<()> {
+) -> Result<Vec<CogBlockRecord>> {
     let (height, width, bands) = data.dim();
     let tw = plan.tile_width;
     let th = plan.tile_height;
     let tiles_across = width.div_ceil(tw);
     let tiles_down = height.div_ceil(th);
+    let total_blocks = if matches!(
+        plan.planar_configuration,
+        tiff_core::PlanarConfiguration::Planar
+    ) {
+        tiles_across * tiles_down * bands
+    } else {
+        tiles_across * tiles_down
+    };
+    let mut blocks = vec![
+        CogBlockRecord {
+            spool_offset: 0,
+            logical_offset_delta: 0,
+            logical_byte_count: 0,
+        };
+        total_blocks
+    ];
 
     if matches!(
         plan.planar_configuration,
@@ -742,6 +965,7 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
             for tile_row in 0..tiles_down {
                 for tile_col in 0..tiles_across {
                     let tile_index = tile_row * tiles_across + tile_col;
+                    let block_index = band * tiles_per_plane + tile_index;
                     let mut tile_data = vec![T::zero(); tw * th];
                     for row in 0..th {
                         let src_row = tile_row * th + row;
@@ -756,12 +980,10 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
                             tile_data[row * tw + col] = data[[src_row, src_col, band]];
                         }
                     }
-                    let block_index = band * tiles_per_plane + tile_index;
-                    write_cog_block(
-                        writer,
-                        handle,
-                        block_index,
+                    blocks[block_index] = spool_cog_block(
+                        spool,
                         &tile_data,
+                        block_index,
                         CogBlockEncoding {
                             compression: plan.compression,
                             predictor: plan.predictor,
@@ -777,7 +999,7 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
     } else {
         for tile_row in 0..tiles_down {
             for tile_col in 0..tiles_across {
-                let tile_index = tile_row * tiles_across + tile_col;
+                let block_index = tile_row * tiles_across + tile_col;
                 let mut tile_data = vec![T::zero(); tw * th * bands];
                 for row in 0..th {
                     let src_row = tile_row * th + row;
@@ -795,11 +1017,10 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
                         }
                     }
                 }
-                write_cog_block(
-                    writer,
-                    handle,
-                    tile_index,
+                blocks[block_index] = spool_cog_block(
+                    spool,
                     &tile_data,
+                    block_index,
                     CogBlockEncoding {
                         compression: plan.compression,
                         predictor: plan.predictor,
@@ -812,5 +1033,46 @@ fn write_tiled_data_3d<T: NumericSample, W: Write + Seek>(
             }
         }
     }
-    Ok(())
+
+    Ok(blocks)
+}
+
+fn spool_cog_block<T: NumericSample>(
+    spool: &mut BlockSpool,
+    samples: &[T],
+    block_index: usize,
+    encoding: CogBlockEncoding,
+) -> Result<CogBlockRecord> {
+    let compressed = compress_cog_block(samples, block_index, encoding)?;
+    let leader = gdal_block_leader(compressed.len(), ByteOrder::LittleEndian)?;
+    let trailer = gdal_block_trailer(&compressed);
+    spool.append_segmented(&leader, &compressed, &trailer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_promotes_cog_layout_to_bigtiff_when_classic_offsets_overflow() {
+        let prefix = gdal_structural_metadata_bytes(tiff_core::PlanarConfiguration::Chunky);
+        let images = vec![CogImage {
+            builder: ImageBuilder::new(1, 1).sample_type::<u8>().tiles(16, 16),
+            blocks: vec![CogBlockRecord {
+                spool_offset: u32::MAX as u64,
+                logical_offset_delta: 4,
+                logical_byte_count: 1,
+            }],
+        }];
+
+        let layout = plan_cog_layout(
+            0,
+            checked_len_u64(prefix.len(), "COG prefix").unwrap(),
+            TiffVariant::Auto,
+            &images,
+        )
+        .unwrap();
+
+        assert!(layout.is_bigtiff);
+    }
 }

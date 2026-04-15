@@ -49,8 +49,13 @@ impl<T: NumericSample, W: Write + Seek> StreamingTileWriter<T, W> {
         let tiles_across = (builder.width as usize).div_ceil(tw as usize);
         let tiles_down = (builder.height as usize).div_ceil(th as usize);
 
-        let mut writer =
-            TiffWriter::new(sink, WriteOptions::auto(ib.estimated_uncompressed_bytes()))?;
+        let mut writer = TiffWriter::new(
+            sink,
+            WriteOptions {
+                byte_order: tiff_core::ByteOrder::LittleEndian,
+                variant: builder.tiff_variant,
+            },
+        )?;
         let handle = writer.add_image(ib)?;
 
         Ok(Self {

@@ -2,7 +2,7 @@
 
 use std::io::{Seek, SeekFrom, Write};
 
-use tiff_core::ByteOrder;
+use tiff_core::{ByteOrder, Tag};
 
 use crate::builder::ImageBuilder;
 use crate::compress;
@@ -10,7 +10,7 @@ use crate::encoder;
 use crate::error::{Error, Result};
 use crate::sample::TiffWriteSample;
 
-const CLASSIC_TIFF_SOFT_LIMIT: u64 = 4_000_000_000;
+const CLASSIC_TIFF_LIMIT: u64 = u32::MAX as u64;
 
 fn checked_len_u64(len: usize, context: &str) -> Result<u64> {
     u64::try_from(len).map_err(|_| Error::Other(format!("{context} length exceeds u64::MAX")))
@@ -34,13 +34,10 @@ fn classic_byte_count_u32(byte_count: u64) -> Result<u32> {
 pub enum TiffVariant {
     Classic,
     BigTiff,
-    /// Auto-detect: use BigTIFF if any added image's estimated uncompressed
-    /// size (plus IFD overhead) would exceed the classic 4 GiB limit.
-    /// The header is written as classic initially; if `add_image` detects
-    /// the threshold would be exceeded, `finish()` returns an error
-    /// recommending explicit BigTIFF. For a seamless experience callers
-    /// should pre-calculate and pass `BigTiff` explicitly, or use
-    /// `WriteOptions::auto(estimated_bytes)`.
+    /// Exact auto-selection.
+    ///
+    /// The writer records block data first and chooses Classic TIFF vs
+    /// BigTIFF from the finalized file layout during `finish()`.
     Auto,
 }
 
@@ -61,16 +58,15 @@ impl Default for WriteOptions {
 }
 
 impl WriteOptions {
-    /// Create options that auto-select BigTIFF based on estimated total bytes.
-    pub fn auto(estimated_bytes: u64) -> Self {
-        let variant = if estimated_bytes >= 4_000_000_000 {
-            TiffVariant::BigTiff
-        } else {
-            TiffVariant::Classic
-        };
+    /// Construct exact auto-selection options.
+    ///
+    /// The `estimated_bytes` parameter is retained for source compatibility,
+    /// but the writer now decides from the exact finalized layout instead of
+    /// an upfront size heuristic.
+    pub fn auto(_estimated_bytes: u64) -> Self {
         Self {
             byte_order: ByteOrder::LittleEndian,
-            variant,
+            variant: TiffVariant::Auto,
         }
     }
 }
@@ -84,8 +80,6 @@ pub struct ImageHandle {
 /// Write state for one IFD.
 struct IfdState {
     builder: ImageBuilder,
-    tags: Vec<tiff_core::Tag>,
-    ifd_result: encoder::IfdWriteResult,
     block_records: Vec<Option<(u64, u64)>>,
 }
 
@@ -93,32 +87,31 @@ struct IfdState {
 pub struct TiffWriter<W: Write + Seek> {
     sink: W,
     byte_order: ByteOrder,
-    variant: TiffVariant,
-    is_bigtiff: bool,
+    requested_variant: TiffVariant,
     header_offset: u64,
-    estimated_total_bytes: u64,
     images: Vec<IfdState>,
     finalized: bool,
 }
 
 impl<W: Write + Seek> TiffWriter<W> {
-    /// Create a new TIFF writer. Writes the file header immediately.
+    /// Create a new TIFF writer.
     ///
-    /// With `TiffVariant::Auto`, classic TIFF is used initially. If the
-    /// cumulative estimated image size exceeds 4 GiB when `add_image` is
-    /// called, the writer returns an error recommending `TiffVariant::BigTiff`.
-    /// Use `WriteOptions::auto(estimated_bytes)` for automatic selection.
+    /// Image data is streamed immediately. The final IFD chain and the header
+    /// are emitted during `finish()`, which allows `TiffVariant::Auto` to
+    /// choose Classic TIFF vs BigTIFF from the exact completed layout.
     pub fn new(mut sink: W, options: WriteOptions) -> Result<Self> {
-        let is_bigtiff = matches!(options.variant, TiffVariant::BigTiff);
-        let header_offset = encoder::write_header(&mut sink, options.byte_order, is_bigtiff)?;
-        let estimated_total_bytes = sink.stream_position()?;
+        let header_offset = sink.stream_position()?;
+        let reserved_header_len = match options.variant {
+            TiffVariant::Classic => encoder::header_len(false),
+            TiffVariant::BigTiff | TiffVariant::Auto => encoder::header_len(true),
+        };
+        sink.write_all(&[0; encoder::BIGTIFF_HEADER_LEN as usize][..reserved_header_len as usize])?;
+
         Ok(Self {
             sink,
             byte_order: options.byte_order,
-            variant: options.variant,
-            is_bigtiff,
+            requested_variant: options.variant,
             header_offset,
-            estimated_total_bytes,
             images: Vec::new(),
             finalized: false,
         })
@@ -131,79 +124,20 @@ impl<W: Write + Seek> TiffWriter<W> {
         }
         builder.validate()?;
 
-        let num_blocks = builder.block_count();
-        let (offsets_tag, byte_counts_tag) = builder.offset_tag_codes();
-        let layout_tags = builder.layout_tags();
-
-        let mut all_extra_tags = builder.extra_tags.clone();
-        if let Some(lerc_tag) = builder.lerc_parameters_tag() {
-            all_extra_tags.push(lerc_tag);
-        }
-
-        let tags = encoder::build_image_tags(&encoder::ImageTagParams {
-            width: builder.width,
-            height: builder.height,
-            samples_per_pixel: builder.samples_per_pixel,
-            bits_per_sample: builder.bits_per_sample,
-            sample_format: builder.sample_format.to_code(),
-            compression: builder.compression.to_code(),
-            photometric: builder.photometric.to_code(),
-            predictor: builder.predictor.to_code(),
-            planar_configuration: builder.planar_configuration.to_code(),
-            subfile_type: builder.subfile_type,
-            extra_tags: &all_extra_tags,
-            offsets_tag_code: offsets_tag,
-            byte_counts_tag_code: byte_counts_tag,
-            num_blocks,
-            layout_tags: &layout_tags,
-            is_bigtiff: self.is_bigtiff,
-        });
-
-        if matches!(self.variant, TiffVariant::Auto) && !self.is_bigtiff {
-            let estimated_image_bytes = checked_add_u64(
-                builder.estimated_uncompressed_bytes(),
-                encoder::estimate_ifd_size(self.byte_order, self.is_bigtiff, &tags),
-                "estimated image size",
-            )?;
-            let projected_total = checked_add_u64(
-                self.estimated_total_bytes,
-                estimated_image_bytes,
-                "estimated TIFF size",
-            )?;
-            if projected_total >= CLASSIC_TIFF_SOFT_LIMIT {
-                return Err(Error::ClassicOffsetOverflow {
-                    offset: projected_total,
-                });
-            }
-            self.estimated_total_bytes = projected_total;
-        }
-
-        let ifd_result = encoder::write_ifd(
-            &mut self.sink,
-            self.byte_order,
-            self.is_bigtiff,
-            &tags,
-            offsets_tag,
-            byte_counts_tag,
-            num_blocks,
-        )?;
-
         let index = self.images.len();
         self.images.push(IfdState {
+            block_records: vec![None; builder.block_count()],
             builder,
-            tags,
-            ifd_result,
-            block_records: vec![None; num_blocks],
         });
 
         Ok(ImageHandle { index })
     }
 
-    /// Write raw bytes between the TIFF header and the first IFD.
+    /// Write raw bytes between the reserved header area and the image data.
     ///
-    /// This is intended for file-level prefix data such as GDAL structural
-    /// metadata in Cloud Optimized GeoTIFFs. Prefix bytes must be written
-    /// before the first image is added.
+    /// When `TiffVariant::Auto` is used, the writer reserves the 16-byte
+    /// BigTIFF header footprint up front so the finalized header can switch
+    /// variants without relocating block data.
     pub fn write_header_prefix(&mut self, bytes: &[u8]) -> Result<()> {
         if self.finalized {
             return Err(Error::AlreadyFinalized);
@@ -215,14 +149,15 @@ impl<W: Write + Seek> TiffWriter<W> {
         }
 
         self.sink.seek(SeekFrom::End(0))?;
-        let prefix_len = checked_len_u64(bytes.len(), "header prefix")?;
-        let projected_end =
-            checked_add_u64(self.estimated_total_bytes, prefix_len, "header prefix size")?;
-        if !self.is_bigtiff {
-            classic_offset_u32(projected_end)?;
+        let prefix_end = checked_add_u64(
+            self.sink.stream_position()?,
+            checked_len_u64(bytes.len(), "header prefix")?,
+            "header prefix size",
+        )?;
+        if matches!(self.requested_variant, TiffVariant::Classic) {
+            classic_offset_u32(prefix_end)?;
         }
         self.sink.write_all(bytes)?;
-        self.estimated_total_bytes = projected_end;
         Ok(())
     }
 
@@ -301,7 +236,6 @@ impl<W: Write + Seek> TiffWriter<W> {
             .images
             .get(handle.index)
             .ok_or(Error::Other("invalid image handle".into()))?;
-
         let total = state.builder.block_count();
         if block_index >= total {
             return Err(Error::BlockIndexOutOfRange {
@@ -312,7 +246,7 @@ impl<W: Write + Seek> TiffWriter<W> {
 
         let offset = self.sink.seek(SeekFrom::End(0))?;
         let byte_count = checked_len_u64(compressed_bytes.len(), "block payload")?;
-        if !self.is_bigtiff {
+        if matches!(self.requested_variant, TiffVariant::Classic) {
             classic_offset_u32(offset)?;
             classic_byte_count_u32(byte_count)?;
         }
@@ -324,16 +258,11 @@ impl<W: Write + Seek> TiffWriter<W> {
             .get_mut(handle.index)
             .ok_or(Error::Other("invalid image handle".into()))?;
         state.block_records[block_index] = Some((offset, byte_count));
-        self.estimated_total_bytes = checked_add_u64(offset, byte_count, "written TIFF size")?
-            .max(self.estimated_total_bytes);
         Ok(())
     }
 
     /// Write a block whose on-disk bytes include a prefix and/or suffix that
     /// must not be reflected in the TIFF block offset/byte-count arrays.
-    ///
-    /// This is used for formats like GDAL-compatible COGs where the logical
-    /// TIFF block payload is wrapped by out-of-band structural metadata.
     pub fn write_block_raw_segmented(
         &mut self,
         handle: &ImageHandle,
@@ -350,7 +279,6 @@ impl<W: Write + Seek> TiffWriter<W> {
             .images
             .get(handle.index)
             .ok_or(Error::Other("invalid image handle".into()))?;
-
         let total = state.builder.block_count();
         if block_index >= total {
             return Err(Error::BlockIndexOutOfRange {
@@ -364,14 +292,15 @@ impl<W: Write + Seek> TiffWriter<W> {
         let byte_count = checked_len_u64(payload.len(), "block payload")?;
         let suffix_len = checked_len_u64(suffix.len(), "block suffix")?;
         let offset = checked_add_u64(start, prefix_len, "block offset")?;
-        let total_written = checked_add_u64(
-            checked_add_u64(prefix_len, byte_count, "segmented block size")?,
+        let end = checked_add_u64(
+            checked_add_u64(offset, byte_count, "segmented block size")?,
             suffix_len,
             "segmented block size",
         )?;
-        if !self.is_bigtiff {
+        if matches!(self.requested_variant, TiffVariant::Classic) {
             classic_offset_u32(offset)?;
             classic_byte_count_u32(byte_count)?;
+            classic_offset_u32(end)?;
         }
 
         self.sink.write_all(prefix)?;
@@ -383,37 +312,136 @@ impl<W: Write + Seek> TiffWriter<W> {
             .get_mut(handle.index)
             .ok_or(Error::Other("invalid image handle".into()))?;
         state.block_records[block_index] = Some((offset, byte_count));
-        self.estimated_total_bytes = checked_add_u64(start, total_written, "written TIFF size")?
-            .max(self.estimated_total_bytes);
         Ok(())
     }
 
-    /// Finalize the TIFF file. Patches all IFDs and chains them together.
+    fn choose_is_bigtiff(&mut self) -> Result<bool> {
+        match self.requested_variant {
+            TiffVariant::Classic => {
+                self.ensure_classic_layout()?;
+                Ok(false)
+            }
+            TiffVariant::BigTiff => Ok(true),
+            TiffVariant::Auto => Ok(!self.classic_layout_fits()?),
+        }
+    }
+
+    fn classic_layout_fits(&mut self) -> Result<bool> {
+        for state in &self.images {
+            for &(offset, byte_count) in state.block_records.iter().flatten() {
+                if offset > CLASSIC_TIFF_LIMIT || byte_count > CLASSIC_TIFF_LIMIT {
+                    return Ok(false);
+                }
+            }
+        }
+
+        let mut current = self.sink.seek(SeekFrom::End(0))?;
+        for state in &self.images {
+            let tags = state.builder.build_tags(false);
+            current = checked_add_u64(
+                current,
+                encoder::estimate_ifd_size(self.byte_order, false, &tags),
+                "classic IFD layout",
+            )?;
+            if current > CLASSIC_TIFF_LIMIT {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn ensure_classic_layout(&mut self) -> Result<()> {
+        for state in &self.images {
+            for &(offset, byte_count) in state.block_records.iter().flatten() {
+                classic_offset_u32(offset)?;
+                classic_byte_count_u32(byte_count)?;
+            }
+        }
+
+        let mut current = self.sink.seek(SeekFrom::End(0))?;
+        for state in &self.images {
+            let tags = state.builder.build_tags(false);
+            current = checked_add_u64(
+                current,
+                encoder::estimate_ifd_size(self.byte_order, false, &tags),
+                "classic IFD layout",
+            )?;
+            classic_offset_u32(current)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_final_ifds(
+        &mut self,
+        is_bigtiff: bool,
+    ) -> Result<Vec<(Vec<Tag>, encoder::IfdWriteResult)>> {
+        let mut results = Vec::with_capacity(self.images.len());
+        for state in &self.images {
+            let tags = state.builder.build_tags(is_bigtiff);
+            let (offsets_tag_code, byte_counts_tag_code) = state.builder.offset_tag_codes();
+            let ifd_result = encoder::write_ifd(
+                &mut self.sink,
+                self.byte_order,
+                is_bigtiff,
+                &tags,
+                offsets_tag_code,
+                byte_counts_tag_code,
+                state.builder.block_count(),
+            )?;
+            results.push((tags, ifd_result));
+        }
+        Ok(results)
+    }
+
+    /// Finalize the TIFF file. Emits the IFD chain and patches the header.
     pub fn finish(mut self) -> Result<W> {
         if self.finalized {
             return Err(Error::AlreadyFinalized);
         }
         self.finalized = true;
 
-        for (img_idx, state) in self.images.iter().enumerate() {
+        for state in &self.images {
             let total = state.builder.block_count();
-            let written = state.block_records.iter().filter(|r| r.is_some()).count();
+            let written = state
+                .block_records
+                .iter()
+                .filter(|record| record.is_some())
+                .count();
             if written != total {
                 return Err(Error::IncompleteImage { written, total });
             }
+        }
 
-            let offsets: Vec<u64> = state.block_records.iter().map(|r| r.unwrap().0).collect();
-            let byte_counts: Vec<u64> = state.block_records.iter().map(|r| r.unwrap().1).collect();
+        let is_bigtiff = self.choose_is_bigtiff()?;
 
+        self.sink.seek(SeekFrom::Start(self.header_offset))?;
+        encoder::write_header(&mut self.sink, self.byte_order, is_bigtiff)?;
+
+        self.sink.seek(SeekFrom::End(0))?;
+        let ifd_results = self.write_final_ifds(is_bigtiff)?;
+
+        for (img_idx, state) in self.images.iter().enumerate() {
+            let offsets: Vec<u64> = state
+                .block_records
+                .iter()
+                .map(|record| record.unwrap().0)
+                .collect();
+            let byte_counts: Vec<u64> = state
+                .block_records
+                .iter()
+                .map(|record| record.unwrap().1)
+                .collect();
+
+            let (tags, ifd_result) = &ifd_results[img_idx];
             let (offsets_tag_code, byte_counts_tag_code) = state.builder.offset_tag_codes();
-            let is_bigtiff = state.ifd_result.is_bigtiff;
 
-            if total == 1 {
-                // Single block: value may be inline
+            if offsets.len() == 1 {
                 if let Some(off) = encoder::find_inline_tag_value_offset(
-                    state.ifd_result.ifd_offset,
+                    ifd_result.ifd_offset,
                     is_bigtiff,
-                    &state.tags,
+                    tags,
                     offsets_tag_code,
                 ) {
                     self.sink.seek(SeekFrom::Start(off))?;
@@ -427,9 +455,9 @@ impl<W: Write + Seek> TiffWriter<W> {
                     }
                 }
                 if let Some(off) = encoder::find_inline_tag_value_offset(
-                    state.ifd_result.ifd_offset,
+                    ifd_result.ifd_offset,
                     is_bigtiff,
-                    &state.tags,
+                    tags,
                     byte_counts_tag_code,
                 ) {
                     self.sink.seek(SeekFrom::Start(off))?;
@@ -445,7 +473,7 @@ impl<W: Write + Seek> TiffWriter<W> {
                     }
                 }
             } else {
-                if let Some(off) = state.ifd_result.offsets_tag_data_offset {
+                if let Some(off) = ifd_result.offsets_tag_data_offset {
                     encoder::patch_block_offsets(
                         &mut self.sink,
                         self.byte_order,
@@ -454,7 +482,7 @@ impl<W: Write + Seek> TiffWriter<W> {
                         &offsets,
                     )?;
                 }
-                if let Some(off) = state.ifd_result.byte_counts_tag_data_offset {
+                if let Some(off) = ifd_result.byte_counts_tag_data_offset {
                     encoder::patch_block_byte_counts(
                         &mut self.sink,
                         self.byte_order,
@@ -465,23 +493,22 @@ impl<W: Write + Seek> TiffWriter<W> {
                 }
             }
 
-            // Chain IFDs
             if img_idx == 0 {
                 encoder::patch_first_ifd(
                     &mut self.sink,
                     self.header_offset,
                     self.byte_order,
                     is_bigtiff,
-                    state.ifd_result.ifd_offset,
+                    ifd_result.ifd_offset,
                 )?;
             } else {
-                let prev = &self.images[img_idx - 1];
+                let prev = &ifd_results[img_idx - 1].1;
                 encoder::patch_next_ifd(
                     &mut self.sink,
                     self.byte_order,
                     is_bigtiff,
-                    prev.ifd_result.next_ifd_pointer_offset,
-                    state.ifd_result.ifd_offset,
+                    prev.next_ifd_pointer_offset,
+                    ifd_result.ifd_offset,
                 )?;
             }
         }
@@ -493,23 +520,73 @@ impl<W: Write + Seek> TiffWriter<W> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Seek, SeekFrom, Write};
 
     use super::*;
     use crate::builder::ImageBuilder;
 
+    #[derive(Default)]
+    struct CountingSink {
+        pos: u64,
+        len: u64,
+    }
+
+    impl Write for CountingSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.pos += buf.len() as u64;
+            self.len = self.len.max(self.pos);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for CountingSink {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            let next = match pos {
+                SeekFrom::Start(offset) => offset as i128,
+                SeekFrom::End(delta) => self.len as i128 + delta as i128,
+                SeekFrom::Current(delta) => self.pos as i128 + delta as i128,
+            };
+            if next < 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "negative seek in CountingSink",
+                ));
+            }
+            self.pos = next as u64;
+            self.len = self.len.max(self.pos);
+            Ok(self.pos)
+        }
+    }
+
     #[test]
-    fn auto_rejects_oversized_classic_images_before_writing_ifd() {
+    fn auto_promotes_to_bigtiff_from_the_final_layout() {
+        let mut writer = TiffWriter::new(CountingSink::default(), WriteOptions::default()).unwrap();
+        let handle = writer
+            .add_image(ImageBuilder::new(1, 1).sample_type::<u8>().strips(1))
+            .unwrap();
+
+        writer
+            .sink
+            .seek(SeekFrom::Start(CLASSIC_TIFF_LIMIT + 1))
+            .unwrap();
+        writer.write_block_raw(&handle, 0, &[1]).unwrap();
+
+        assert!(writer.choose_is_bigtiff().unwrap());
+    }
+
+    #[test]
+    fn auto_keeps_classic_for_small_layouts() {
         let mut writer = TiffWriter::new(Cursor::new(Vec::new()), WriteOptions::default()).unwrap();
-        let err = writer
-            .add_image(
-                ImageBuilder::new(70_000, 70_000)
-                    .sample_type::<u8>()
-                    .strips(70_000),
-            )
-            .unwrap_err();
-        assert!(matches!(err, Error::ClassicOffsetOverflow { .. }));
-        assert_eq!(writer.sink.get_ref().len(), 8);
+        let handle = writer
+            .add_image(ImageBuilder::new(1, 1).sample_type::<u8>().strips(1))
+            .unwrap();
+        writer.write_block(&handle, 0, &[7u8]).unwrap();
+
+        assert!(!writer.choose_is_bigtiff().unwrap());
     }
 
     #[test]

@@ -6,6 +6,9 @@ use tiff_core::{ByteOrder, Tag, TagValue};
 
 use crate::error::Result;
 
+pub const CLASSIC_HEADER_LEN: u64 = 8;
+pub const BIGTIFF_HEADER_LEN: u64 = 16;
+
 fn classic_offset_u32(offset: u64) -> Result<u32> {
     u32::try_from(offset).map_err(|_| crate::error::Error::ClassicOffsetOverflow { offset })
 }
@@ -17,6 +20,14 @@ fn classic_byte_count_u32(byte_count: u64) -> Result<u32> {
 
 /// Write the TIFF header. Classic = 8 bytes, BigTIFF = 16 bytes.
 /// The first-IFD offset is set to 0 and must be patched later.
+pub const fn header_len(is_bigtiff: bool) -> u64 {
+    if is_bigtiff {
+        BIGTIFF_HEADER_LEN
+    } else {
+        CLASSIC_HEADER_LEN
+    }
+}
+
 pub fn write_header<W: Write + Seek>(
     sink: &mut W,
     byte_order: ByteOrder,

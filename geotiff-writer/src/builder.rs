@@ -12,7 +12,7 @@ use ndarray::{ArrayView2, ArrayView3};
 use tiff_core::{
     Compression, PhotometricInterpretation, PlanarConfiguration, Predictor, Tag, TagValue,
 };
-use tiff_writer::{ImageBuilder, TiffWriter, WriteOptions};
+use tiff_writer::{ImageBuilder, TiffVariant, TiffWriter, WriteOptions};
 
 use crate::error::{Error, Result};
 use crate::sample::{NumericSample, WriteSample};
@@ -36,6 +36,7 @@ pub struct GeoTiffBuilder {
     pub(crate) tile_width: Option<u32>,
     pub(crate) tile_height: Option<u32>,
     pub(crate) photometric: PhotometricInterpretation,
+    pub(crate) tiff_variant: TiffVariant,
 }
 
 impl GeoTiffBuilder {
@@ -57,6 +58,7 @@ impl GeoTiffBuilder {
             tile_width: None,
             tile_height: None,
             photometric: PhotometricInterpretation::MinIsBlack,
+            tiff_variant: TiffVariant::Auto,
         }
     }
 
@@ -224,6 +226,12 @@ impl GeoTiffBuilder {
         self
     }
 
+    /// Select the TIFF container variant for emitted output.
+    pub fn tiff_variant(mut self, variant: TiffVariant) -> Self {
+        self.tiff_variant = variant;
+        self
+    }
+
     /// Build the GeoTIFF extra tags from the current metadata.
     pub(crate) fn build_extra_tags(&self) -> Vec<Tag> {
         let mut extra = Vec::new();
@@ -331,8 +339,13 @@ impl GeoTiffBuilder {
         }
 
         let ib = self.to_image_builder::<T>();
-        let mut writer =
-            TiffWriter::new(sink, WriteOptions::auto(ib.estimated_uncompressed_bytes()))?;
+        let mut writer = TiffWriter::new(
+            sink,
+            WriteOptions {
+                byte_order: tiff_core::ByteOrder::LittleEndian,
+                variant: self.tiff_variant,
+            },
+        )?;
         let handle = writer.add_image(ib)?;
 
         let block_count = self.images_block_count::<T>();
@@ -373,8 +386,13 @@ impl GeoTiffBuilder {
         }
 
         let ib = self.to_image_builder::<T>();
-        let mut writer =
-            TiffWriter::new(sink, WriteOptions::auto(ib.estimated_uncompressed_bytes()))?;
+        let mut writer = TiffWriter::new(
+            sink,
+            WriteOptions {
+                byte_order: tiff_core::ByteOrder::LittleEndian,
+                variant: self.tiff_variant,
+            },
+        )?;
         let handle = writer.add_image(ib)?;
 
         let block_count = self.images_block_count::<T>();

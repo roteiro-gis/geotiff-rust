@@ -14,3 +14,4 @@ tiff-writer = { version = "0.3.1", path = "../tiff-writer" }
 tiff-core = { version = "0.3.1", path = "../tiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
+tempfile = "3"

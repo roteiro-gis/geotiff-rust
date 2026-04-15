@@ -3,7 +3,7 @@ use std::io::Cursor;
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
     Compression, Error as GeoTiffWriteError, GeoTiffBuilder, LercAdditionalCompression,
-    LercOptions, ModelType, PlanarConfiguration,
+    LercOptions, ModelType, PlanarConfiguration, TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
@@ -147,16 +147,18 @@ fn planar_and_lerc_geotiffs_roundtrip() {
 }
 
 #[test]
-fn geotiff_writer_uses_bigtiff_for_large_streaming_outputs() {
+fn geotiff_writer_emits_small_bigtiff_when_requested() {
+    let data = Array2::<u8>::from_elem((4, 4), 9);
     let mut buf = Cursor::new(Vec::new());
-    {
-        let _writer = GeoTiffBuilder::new(70_000, 70_000)
-            .tile_writer::<u8, _>(&mut buf)
-            .unwrap();
-    }
+    GeoTiffBuilder::new(4, 4)
+        .tiff_variant(TiffVariant::BigTiff)
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
 
     let bytes = buf.into_inner();
     assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
+    let file = TiffFile::from_bytes(bytes).unwrap();
+    assert!(file.is_bigtiff());
 }
 
 #[test]

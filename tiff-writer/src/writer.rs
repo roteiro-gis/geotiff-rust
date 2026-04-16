@@ -209,11 +209,14 @@ impl<W: Write + Seek> TiffWriter<W> {
         } else {
             compress::compress_block(
                 samples,
-                self.byte_order,
-                state.builder.compression,
-                state.builder.predictor,
-                state.builder.block_samples_per_pixel(),
-                state.builder.block_row_width(),
+                compress::BlockEncodingOptions {
+                    byte_order: self.byte_order,
+                    compression: state.builder.compression,
+                    predictor: state.builder.predictor,
+                    samples_per_pixel: state.builder.block_samples_per_pixel(),
+                    row_width_pixels: state.builder.block_row_width(),
+                    jpeg_options: state.builder.jpeg_options.as_ref(),
+                },
                 block_index,
             )?
         };

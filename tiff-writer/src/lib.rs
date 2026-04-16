@@ -1,7 +1,7 @@
 //! Pure-Rust TIFF/BigTIFF encoder with compression, tiling, and streaming writes.
 //!
 //! Supports:
-//! - **Compression**: None, LZW, Deflate, LERC, LERC+Deflate, LERC+Zstd, ZSTD (feature)
+//! - **Compression**: None, LZW, Deflate, JPEG (feature), LERC, LERC+Deflate, LERC+Zstd, ZSTD (feature)
 //! - **Predictors**: Horizontal differencing, floating-point
 //! - **Layouts**: strips, tiles, multi-IFD, BigTIFF
 //!
@@ -28,7 +28,7 @@ pub mod error;
 pub mod sample;
 pub mod writer;
 
-pub use builder::{DataLayout, ImageBuilder, LercOptions};
+pub use builder::{DataLayout, ImageBuilder, JpegOptions, LercOptions};
 pub use error::{Error, Result};
 pub use sample::TiffWriteSample;
 pub use tiff_core::LercAdditionalCompression;

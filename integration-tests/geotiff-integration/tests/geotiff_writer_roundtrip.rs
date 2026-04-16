@@ -2,11 +2,39 @@ use std::io::Cursor;
 
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
-    Compression, Error as GeoTiffWriteError, GeoTiffBuilder, LercAdditionalCompression,
-    LercOptions, ModelType, PlanarConfiguration, TiffVariant,
+    Compression, Error as GeoTiffWriteError, GeoTiffBuilder, JpegOptions,
+    LercAdditionalCompression, LercOptions, ModelType, PlanarConfiguration, TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
+
+fn assert_u8_bytes_close(
+    actual: &[u8],
+    expected: &[u8],
+    max_abs_delta: u8,
+    max_diff_pixels: usize,
+) {
+    assert_eq!(actual.len(), expected.len(), "byte length mismatch");
+
+    let mut diff_pixels = 0usize;
+    let mut max_seen_delta = 0u8;
+    for (&actual_byte, &expected_byte) in actual.iter().zip(expected.iter()) {
+        let delta = actual_byte.abs_diff(expected_byte);
+        if delta != 0 {
+            diff_pixels += 1;
+            max_seen_delta = max_seen_delta.max(delta);
+        }
+    }
+
+    assert!(
+        max_seen_delta <= max_abs_delta,
+        "max abs delta {max_seen_delta} exceeded {max_abs_delta}"
+    );
+    assert!(
+        diff_pixels <= max_diff_pixels,
+        "differing pixels {diff_pixels} exceeded {max_diff_pixels}"
+    );
+}
 
 #[test]
 fn geotiff_roundtrips_pixels_metadata_and_transform() {
@@ -159,6 +187,92 @@ fn geotiff_writer_emits_small_bigtiff_when_requested() {
     assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), 43);
     let file = TiffFile::from_bytes(bytes).unwrap();
     assert!(file.is_bigtiff());
+}
+
+#[test]
+fn jpeg_geotiff_roundtrips_pixels_metadata_and_streaming_tiles() {
+    let mut rgb = Array3::<u8>::zeros((16, 16, 3));
+    for row in 0..16usize {
+        for col in 0..16usize {
+            let color = match (row / 8, col / 8) {
+                (0, 0) => [255, 0, 0],
+                (0, 1) => [0, 255, 0],
+                (1, 0) => [0, 0, 255],
+                _ => [240, 240, 32],
+            };
+            rgb[[row, col, 0]] = color[0];
+            rgb[[row, col, 1]] = color[1];
+            rgb[[row, col, 2]] = color[2];
+        }
+    }
+
+    let mut buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(16, 16)
+        .bands(3)
+        .photometric(tiff_core::PhotometricInterpretation::Rgb)
+        .planar_configuration(PlanarConfiguration::Planar)
+        .tile_size(16, 16)
+        .jpeg_options(JpegOptions { quality: 90 })
+        .epsg(4326)
+        .pixel_scale(1.0, 1.0)
+        .origin(-180.0, 90.0)
+        .write_3d_to(&mut buf, rgb.view())
+        .unwrap();
+
+    let bytes = buf.into_inner();
+    let tiff = TiffFile::from_bytes(bytes.clone()).unwrap();
+    let ifd = tiff.ifd(0).unwrap();
+    assert_eq!(ifd.compression(), Compression::Jpeg.to_code());
+    assert!(ifd.tag(tiff_core::TAG_JPEG_TABLES).is_none());
+
+    let raster = tiff.read_image::<u8>(0).unwrap();
+    let (values, offset) = raster.into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0));
+    let expected = rgb.iter().copied().collect::<Vec<_>>();
+    assert_u8_bytes_close(&values, &expected, 2, 0);
+
+    let geo = GeoTiffFile::from_bytes(bytes).unwrap();
+    assert_eq!(geo.epsg(), Some(4326));
+    assert_eq!(geo.band_count(), 3);
+
+    let mut single_band = Array2::<u8>::zeros((32, 32));
+    for row in 0..32usize {
+        for col in 0..32usize {
+            single_band[[row, col]] = match (row / 16, col / 16) {
+                (0, 0) => 24,
+                (0, 1) => 96,
+                (1, 0) => 160,
+                _ => 224,
+            };
+        }
+    }
+
+    let mut streaming_buf = Cursor::new(Vec::new());
+    let mut writer = GeoTiffBuilder::new(32, 32)
+        .tile_size(16, 16)
+        .jpeg_options(JpegOptions { quality: 90 })
+        .tile_writer::<u8, _>(&mut streaming_buf)
+        .unwrap();
+    for tile_row in 0..2usize {
+        for tile_col in 0..2usize {
+            let y_off = tile_row * 16;
+            let x_off = tile_col * 16;
+            let tile = single_band
+                .slice(ndarray::s![y_off..y_off + 16, x_off..x_off + 16])
+                .to_owned();
+            writer.write_tile(x_off, y_off, &tile.view()).unwrap();
+        }
+    }
+    writer.finish().unwrap();
+
+    let streaming = TiffFile::from_bytes(streaming_buf.into_inner()).unwrap();
+    let ifd = streaming.ifd(0).unwrap();
+    assert_eq!(ifd.compression(), Compression::Jpeg.to_code());
+    let image = streaming.read_image::<u8>(0).unwrap();
+    let (streaming_values, streaming_offset) = image.into_raw_vec_and_offset();
+    assert_eq!(streaming_offset, Some(0));
+    let expected = single_band.iter().copied().collect::<Vec<_>>();
+    assert_u8_bytes_close(&streaming_values, &expected, 2, 32);
 }
 
 #[test]

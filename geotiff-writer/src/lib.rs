@@ -1,6 +1,6 @@
 //! Pure-Rust GeoTIFF and COG writer with compression, tiling, and overview support.
 //!
-//! Compression: None, LZW, Deflate, LERC, LERC+Deflate, LERC+Zstd, ZSTD (feature).
+//! Compression: None, LZW, Deflate, JPEG (feature), LERC, LERC+Deflate, LERC+Zstd, ZSTD (feature).
 //!
 //! # Example
 //!
@@ -38,4 +38,4 @@ pub use tiff_core::{
     Compression, LercAdditionalCompression, PhotometricInterpretation, PlanarConfiguration,
     Predictor,
 };
-pub use tiff_writer::{LercOptions, TiffVariant};
+pub use tiff_writer::{JpegOptions, LercOptions, TiffVariant};

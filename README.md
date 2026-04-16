@@ -97,19 +97,20 @@ with `bands(...)` and optional
 **Write**
 - Classic TIFF and BigTIFF with auto-detection
 - Strip and tile layouts
-- Compression: Deflate, LZW, ZSTD (optional)
+- Compression: Deflate, LZW, JPEG (optional), LERC, LERC+DEFLATE, ZSTD (optional), LERC+ZSTD (optional)
 - Predictors: horizontal differencing, floating-point byte interleaving
 - Chunky and separate planar multi-band layouts (RGB/RGBA) and all sample types (u8 through f64)
 - Streaming tile-by-tile writes for large rasters
 - GeoTIFF metadata: EPSG, pixel scale, origin, affine transforms, NoData
 - COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
 
-## Codec Priorities
+## Codec Notes
 
-`LERC` read support is in place, including TIFF-side additional `DEFLATE` and
-`ZSTD` wrappers used by libtiff/GDAL. The next codec priority is still
-`JPEG`-in-TIFF write, with TIFF-side `LERC` write following once encode support
-exists in `lerc-rust`.
+`JPEG`-in-TIFF write uses standard compression code `7` with full JPEG
+interchange streams per strip/tile. The supported interoperable layouts are
+single-band chunky output and multi-band separate-planar output, which keeps
+TIFF, GeoTIFF, and COG files compatible with GDAL/libtiff without requiring
+TIFF-side shared `JPEGTables`.
 
 ## Feature flags
 
@@ -117,8 +118,8 @@ exists in `lerc-rust`.
 |---|---|---|
 | `local` | yes | Local file reading via `tiff-reader` (geotiff-reader) |
 | `rayon` | yes | Parallel strip/tile decompression (tiff-reader, geotiff-reader) |
-| `jpeg` | yes | JPEG-in-TIFF support (tiff-reader) |
-| `zstd` | yes | ZSTD compression, including TIFF `LERC+ZSTD` read support (tiff-reader, tiff-writer) |
+| `jpeg` | yes | JPEG-in-TIFF read/write support (tiff-reader, tiff-writer) |
+| `zstd` | yes | ZSTD compression, including TIFF `LERC+ZSTD` read/write support (tiff-reader, tiff-writer) |
 | `cog` | no | HTTP range-backed remote COG open (geotiff-reader) |
 
 ## Testing

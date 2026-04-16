@@ -4,7 +4,7 @@ use std::io::Cursor;
 use tiff_core::{Compression, Predictor};
 use tiff_reader::{TiffFile, TiffSample};
 use tiff_writer::{
-    ImageBuilder, LercOptions, TiffVariant, TiffWriteSample, TiffWriter, WriteOptions,
+    ImageBuilder, JpegOptions, LercOptions, TiffVariant, TiffWriteSample, TiffWriter, WriteOptions,
 };
 
 fn roundtrip_image<T>(image: ImageBuilder, block_index: usize, block: &[T]) -> Vec<T>
@@ -39,6 +39,34 @@ fn padded_tile<T: Copy + Default>(
         tile[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
     }
     tile
+}
+
+fn assert_u8_bytes_close(
+    actual: &[u8],
+    expected: &[u8],
+    max_abs_delta: u8,
+    max_diff_pixels: usize,
+) {
+    assert_eq!(actual.len(), expected.len(), "byte length mismatch");
+
+    let mut diff_pixels = 0usize;
+    let mut max_seen_delta = 0u8;
+    for (&actual_byte, &expected_byte) in actual.iter().zip(expected.iter()) {
+        let delta = actual_byte.abs_diff(expected_byte);
+        if delta != 0 {
+            diff_pixels += 1;
+            max_seen_delta = max_seen_delta.max(delta);
+        }
+    }
+
+    assert!(
+        max_seen_delta <= max_abs_delta,
+        "max abs delta {max_seen_delta} exceeded {max_abs_delta}"
+    );
+    assert!(
+        diff_pixels <= max_diff_pixels,
+        "differing pixels {diff_pixels} exceeded {max_diff_pixels}"
+    );
 }
 
 #[test]
@@ -131,6 +159,98 @@ fn tiled_and_compressed_images_roundtrip() {
         &pixels,
     );
     assert_eq!(deflate, pixels);
+}
+
+#[test]
+fn jpeg_strips_and_planar_rgb_tiles_roundtrip() {
+    let grayscale_rows = [
+        [32u8, 32, 32, 32, 192, 192, 192, 192],
+        [32, 32, 32, 32, 192, 192, 192, 192],
+        [32, 32, 32, 32, 192, 192, 192, 192],
+        [32, 32, 32, 32, 192, 192, 192, 192],
+        [96, 96, 96, 96, 224, 224, 224, 224],
+        [96, 96, 96, 96, 224, 224, 224, 224],
+        [96, 96, 96, 96, 224, 224, 224, 224],
+        [96, 96, 96, 96, 224, 224, 224, 224],
+    ];
+    let grayscale: Vec<u8> = grayscale_rows.into_iter().flatten().collect();
+
+    let mut grayscale_buf = Cursor::new(Vec::new());
+    let mut grayscale_writer =
+        TiffWriter::new(&mut grayscale_buf, WriteOptions::default()).unwrap();
+    let grayscale_handle = grayscale_writer
+        .add_image(
+            ImageBuilder::new(8, 8)
+                .sample_type::<u8>()
+                .compression(Compression::Jpeg)
+                .jpeg_options(JpegOptions { quality: 90 })
+                .strips(4),
+        )
+        .unwrap();
+    grayscale_writer
+        .write_block(&grayscale_handle, 0, &grayscale[..32])
+        .unwrap();
+    grayscale_writer
+        .write_block(&grayscale_handle, 1, &grayscale[32..])
+        .unwrap();
+    grayscale_writer.finish().unwrap();
+
+    let grayscale_file = TiffFile::from_bytes(grayscale_buf.into_inner()).unwrap();
+    let grayscale_ifd = grayscale_file.ifd(0).unwrap();
+    assert_eq!(grayscale_ifd.compression(), Compression::Jpeg.to_code());
+    assert!(grayscale_ifd.tag(tiff_core::TAG_JPEG_TABLES).is_none());
+    let grayscale_image = grayscale_file.read_image::<u8>(0).unwrap();
+    let (grayscale_values, grayscale_offset) = grayscale_image.into_raw_vec_and_offset();
+    assert_eq!(grayscale_offset, Some(0));
+    assert_u8_bytes_close(&grayscale_values, &grayscale, 2, 32);
+
+    let mut rgb = vec![0u8; 16 * 16 * 3];
+    for row in 0..16usize {
+        for col in 0..16usize {
+            let pixel = (row * 16 + col) * 3;
+            let color = match (row / 8, col / 8) {
+                (0, 0) => [255, 0, 0],
+                (0, 1) => [0, 255, 0],
+                (1, 0) => [0, 0, 255],
+                _ => [240, 240, 32],
+            };
+            rgb[pixel..pixel + 3].copy_from_slice(&color);
+        }
+    }
+
+    let mut rgb_buf = Cursor::new(Vec::new());
+    let mut rgb_writer = TiffWriter::new(&mut rgb_buf, WriteOptions::default()).unwrap();
+    let rgb_handle = rgb_writer
+        .add_image(
+            ImageBuilder::new(16, 16)
+                .sample_type::<u8>()
+                .samples_per_pixel(3)
+                .photometric(tiff_core::PhotometricInterpretation::Rgb)
+                .planar_configuration(tiff_core::PlanarConfiguration::Planar)
+                .compression(Compression::Jpeg)
+                .jpeg_options(JpegOptions { quality: 90 })
+                .tiles(16, 16),
+        )
+        .unwrap();
+    for band in 0..3usize {
+        let mut plane = vec![0u8; 16 * 16];
+        for row in 0..16usize {
+            for col in 0..16usize {
+                plane[row * 16 + col] = rgb[(row * 16 + col) * 3 + band];
+            }
+        }
+        rgb_writer.write_block(&rgb_handle, band, &plane).unwrap();
+    }
+    rgb_writer.finish().unwrap();
+
+    let rgb_file = TiffFile::from_bytes(rgb_buf.into_inner()).unwrap();
+    let rgb_ifd = rgb_file.ifd(0).unwrap();
+    assert_eq!(rgb_ifd.compression(), Compression::Jpeg.to_code());
+    assert!(rgb_ifd.tag(tiff_core::TAG_JPEG_TABLES).is_none());
+    let rgb_image = rgb_file.read_image::<u8>(0).unwrap();
+    let (rgb_values, rgb_offset) = rgb_image.into_raw_vec_and_offset();
+    assert_eq!(rgb_offset, Some(0));
+    assert_u8_bytes_close(&rgb_values, &rgb, 2, 0);
 }
 
 #[test]
@@ -257,6 +377,62 @@ fn writer_validation_rejects_zero_samples_and_rgb_band_mismatches() {
         .unwrap_err();
     assert!(
         matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("RGB photometric interpretation"))
+    );
+
+    let mut jpeg_u16_buf = Cursor::new(Vec::new());
+    let mut jpeg_u16_writer = TiffWriter::new(&mut jpeg_u16_buf, WriteOptions::default()).unwrap();
+    let err = jpeg_u16_writer
+        .add_image(
+            ImageBuilder::new(1, 1)
+                .sample_type::<u16>()
+                .compression(Compression::Jpeg),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("8-bit samples"))
+    );
+
+    let mut jpeg_chunky_four_band_buf = Cursor::new(Vec::new());
+    let mut jpeg_chunky_four_band_writer =
+        TiffWriter::new(&mut jpeg_chunky_four_band_buf, WriteOptions::default()).unwrap();
+    let err = jpeg_chunky_four_band_writer
+        .add_image(
+            ImageBuilder::new(1, 1)
+                .sample_type::<u8>()
+                .samples_per_pixel(4)
+                .compression(Compression::Jpeg),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("one sample per encoded block"))
+    );
+
+    let mut jpeg_rgb_buf = Cursor::new(Vec::new());
+    let mut jpeg_rgb_writer = TiffWriter::new(&mut jpeg_rgb_buf, WriteOptions::default()).unwrap();
+    let err = jpeg_rgb_writer
+        .add_image(
+            ImageBuilder::new(1, 1)
+                .sample_type::<u8>()
+                .samples_per_pixel(3)
+                .compression(Compression::Jpeg),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("one sample per encoded block"))
+    );
+
+    let mut jpeg_wide_buf = Cursor::new(Vec::new());
+    let mut jpeg_wide_writer =
+        TiffWriter::new(&mut jpeg_wide_buf, WriteOptions::default()).unwrap();
+    let err = jpeg_wide_writer
+        .add_image(
+            ImageBuilder::new(70_000, 1)
+                .sample_type::<u8>()
+                .compression(Compression::Jpeg),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("block width"))
     );
 }
 

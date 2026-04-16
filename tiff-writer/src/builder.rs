@@ -26,6 +26,19 @@ impl Default for LercOptions {
     }
 }
 
+/// JPEG encoding options for the TIFF writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JpegOptions {
+    /// Quality in the range 1..=100.
+    pub quality: u8,
+}
+
+impl Default for JpegOptions {
+    fn default() -> Self {
+        Self { quality: 75 }
+    }
+}
+
 /// Describes how image data is organized: strips or tiles.
 #[derive(Debug, Clone, Copy)]
 pub enum DataLayout {
@@ -51,6 +64,7 @@ pub struct ImageBuilder {
     pub(crate) extra_tags: Vec<Tag>,
     pub(crate) subfile_type: u32,
     pub(crate) lerc_options: Option<LercOptions>,
+    pub(crate) jpeg_options: Option<JpegOptions>,
 }
 
 impl ImageBuilder {
@@ -72,6 +86,7 @@ impl ImageBuilder {
             extra_tags: Vec::new(),
             subfile_type: 0,
             lerc_options: None,
+            jpeg_options: None,
         }
     }
 
@@ -103,12 +118,18 @@ impl ImageBuilder {
         if !matches!(c, Compression::Lerc) {
             self.lerc_options = None;
         }
+        if !matches!(c, Compression::Jpeg) {
+            self.jpeg_options = None;
+        }
+        if matches!(c, Compression::Lerc | Compression::Jpeg) {
+            self.predictor = Predictor::None;
+        }
         self
     }
 
     pub fn predictor(mut self, p: Predictor) -> Self {
-        // LERC does not use TIFF predictors; ignore the request.
-        if !matches!(self.compression, Compression::Lerc) {
+        // LERC and JPEG do not use TIFF predictors; ignore the request.
+        if !matches!(self.compression, Compression::Lerc | Compression::Jpeg) {
             self.predictor = p;
         }
         self
@@ -160,6 +181,22 @@ impl ImageBuilder {
         self.compression = Compression::Lerc;
         self.predictor = Predictor::None;
         self.lerc_options = Some(options);
+        self.jpeg_options = None;
+        self
+    }
+
+    /// Set JPEG compression with the given options.
+    ///
+    /// This sets `compression = Jpeg` and `predictor = None` (JPEG uses its
+    /// own transform and entropy coding pipeline rather than TIFF predictors).
+    ///
+    /// Multi-band JPEG requires `planar_configuration(Planar)` so each encoded
+    /// strip/tile is a single grayscale component.
+    pub fn jpeg_options(mut self, options: JpegOptions) -> Self {
+        self.compression = Compression::Jpeg;
+        self.predictor = Predictor::None;
+        self.jpeg_options = Some(options);
+        self.lerc_options = None;
         self
     }
 
@@ -369,6 +406,12 @@ impl ImageBuilder {
                 "LERC compression does not support TIFF predictors".into(),
             ));
         }
+        if matches!(self.compression, Compression::OldJpeg) {
+            return Err(crate::error::Error::InvalidConfig(
+                "Old-style JPEG compression is not supported for writing; use Compression::Jpeg"
+                    .into(),
+            ));
+        }
         match self.photometric {
             PhotometricInterpretation::Rgb if self.samples_per_pixel < 3 => {
                 return Err(crate::error::Error::InvalidConfig(format!(
@@ -386,6 +429,76 @@ impl ImageBuilder {
             }
             _ => {}
         }
+        if matches!(self.compression, Compression::Jpeg) {
+            self.validate_jpeg_config()?;
+        }
+        Ok(())
+    }
+
+    fn validate_jpeg_config(&self) -> crate::error::Result<()> {
+        let options = self.jpeg_options.unwrap_or_default();
+        if !(1..=100).contains(&options.quality) {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "JPEG quality must be in the range 1..=100, got {}",
+                options.quality
+            )));
+        }
+        if self.bits_per_sample != 8 {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "JPEG compression requires 8-bit samples, got {} bits",
+                self.bits_per_sample
+            )));
+        }
+        if !matches!(self.sample_format, SampleFormat::Uint) {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "JPEG compression requires unsigned integer samples, got {:?}",
+                self.sample_format
+            )));
+        }
+        if !matches!(self.predictor, Predictor::None) {
+            return Err(crate::error::Error::InvalidConfig(
+                "JPEG compression does not support TIFF predictors".into(),
+            ));
+        }
+
+        let block_width = self.block_row_width();
+        if block_width > u16::MAX as usize {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "JPEG block width must be <= {}, got {}",
+                u16::MAX,
+                block_width
+            )));
+        }
+        let max_block_height = match self.layout {
+            DataLayout::Strips { rows_per_strip } => rows_per_strip.max(1),
+            DataLayout::Tiles { height, .. } => height,
+        };
+        if max_block_height > u16::MAX as u32 {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "JPEG block height must be <= {}, got {}",
+                u16::MAX,
+                max_block_height
+            )));
+        }
+
+        let block_samples_per_pixel = self.block_samples_per_pixel();
+        if block_samples_per_pixel != 1 {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "JPEG write currently supports one sample per encoded block, got {}; use planar configuration for multi-band JPEG",
+                block_samples_per_pixel
+            )));
+        }
+
+        if matches!(
+            self.photometric,
+            PhotometricInterpretation::Palette | PhotometricInterpretation::Mask
+        ) {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "{:?} photometric interpretation is not supported with JPEG compression",
+                self.photometric
+            )));
+        }
+
         Ok(())
     }
 }

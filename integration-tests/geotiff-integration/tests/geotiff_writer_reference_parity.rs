@@ -2,8 +2,8 @@ use std::path::Path;
 
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
-    CogBuilder, Compression, GeoTiffBuilder, PhotometricInterpretation, PlanarConfiguration,
-    Resampling,
+    CogBuilder, Compression, GeoTiffBuilder, JpegOptions, PhotometricInterpretation,
+    PlanarConfiguration, Resampling,
 };
 use ndarray::{Array3, ArrayD};
 use tempfile::NamedTempFile;
@@ -81,6 +81,39 @@ fn assert_gdal_hash_matches(path: &Path, overview_index: Option<usize>) {
     );
 }
 
+fn assert_gdal_u8_pixels_close(path: &Path) {
+    let path_str = path.to_str().unwrap();
+    let expected = reference::run_reference_bytes(env!("CARGO_MANIFEST_DIR"), &["bytes", path_str]);
+    let file = GeoTiffFile::open(path).unwrap();
+    let raster: ArrayD<u8> = file.read_raster().unwrap();
+    let (actual, offset) = raster.into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0), "unexpected array offset for {path_str}");
+    reference::assert_u8_bytes_close(&actual, &expected, 6, 256, path_str);
+}
+
+fn write_generated_jpeg_geotiff(path: &Path) {
+    let mut gray = ndarray::Array2::<u8>::zeros((16, 16));
+    for row in 0..16usize {
+        for col in 0..16usize {
+            gray[[row, col]] = match (row / 8, col / 8) {
+                (0, 0) => 24,
+                (0, 1) => 96,
+                (1, 0) => 160,
+                _ => 224,
+            };
+        }
+    }
+
+    GeoTiffBuilder::new(16, 16)
+        .tile_size(16, 16)
+        .jpeg_options(JpegOptions { quality: 90 })
+        .epsg(4326)
+        .pixel_scale(1.0, 1.0)
+        .origin(-180.0, 90.0)
+        .write_2d(path, gray.view())
+        .unwrap();
+}
+
 #[test]
 fn matches_gdal_for_generated_planar_multiband_cog() {
     if !reference::python_gdal_available() {
@@ -119,4 +152,36 @@ fn matches_gdal_for_generated_planar_multiband_cog() {
     for overview_index in 0..file.overview_count() {
         assert_gdal_hash_matches(fixture.path(), Some(overview_index));
     }
+}
+
+#[test]
+fn matches_gdal_for_generated_jpeg_geotiff() {
+    if !reference::python_gdal_available() {
+        eprintln!("skipping GDAL JPEG parity test because Python GDAL bindings are unavailable");
+        return;
+    }
+
+    let fixture = NamedTempFile::new().unwrap();
+    write_generated_jpeg_geotiff(fixture.path());
+
+    let path_str = fixture.path().to_str().unwrap();
+    let reference_json =
+        reference::run_reference_json(env!("CARGO_MANIFEST_DIR"), &["metadata", path_str]);
+    let file = GeoTiffFile::open(fixture.path()).unwrap();
+
+    assert_eq!(file.epsg(), Some(4326));
+    assert_eq!(
+        file.width() as u64,
+        reference_json["width"].as_u64().unwrap()
+    );
+    assert_eq!(
+        file.height() as u64,
+        reference_json["height"].as_u64().unwrap()
+    );
+    assert_eq!(
+        file.band_count() as u64,
+        reference_json["band_count"].as_u64().unwrap()
+    );
+
+    assert_gdal_u8_pixels_close(fixture.path());
 }

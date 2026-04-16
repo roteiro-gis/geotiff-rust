@@ -35,7 +35,7 @@ pub use geotiff_core::{
     CrsInfo, GeoKeyDirectory, GeoKeyValue, GeoTransform, ModelType, RasterType,
 };
 pub use tiff_core::{
-    Compression, LercAdditionalCompression, PhotometricInterpretation, PlanarConfiguration,
-    Predictor,
+    ColorMap, ColorModel, Compression, ExtraSample, InkSet, LercAdditionalCompression,
+    PhotometricInterpretation, PlanarConfiguration, Predictor, YCbCrPositioning,
 };
 pub use tiff_writer::{JpegOptions, LercOptions, TiffVariant};

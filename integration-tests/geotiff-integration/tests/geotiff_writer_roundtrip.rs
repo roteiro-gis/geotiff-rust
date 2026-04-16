@@ -2,8 +2,9 @@ use std::io::Cursor;
 
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
-    Compression, Error as GeoTiffWriteError, GeoTiffBuilder, JpegOptions,
-    LercAdditionalCompression, LercOptions, ModelType, PlanarConfiguration, TiffVariant,
+    ColorMap, ColorModel, Compression, Error as GeoTiffWriteError, ExtraSample, GeoTiffBuilder,
+    InkSet, JpegOptions, LercAdditionalCompression, LercOptions, ModelType, PlanarConfiguration,
+    TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
@@ -34,6 +35,13 @@ fn assert_u8_bytes_close(
         diff_pixels <= max_diff_pixels,
         "differing pixels {diff_pixels} exceeded {max_diff_pixels}"
     );
+}
+
+fn sample_color_map() -> ColorMap {
+    let red = (0u16..=255).map(|value| value * 257).collect();
+    let green = (0u16..=255).map(|value| 65_535 - value * 257).collect();
+    let blue = (0u16..=255).map(|value| (value / 2) * 257).collect();
+    ColorMap::new(red, green, blue).unwrap()
 }
 
 #[test]
@@ -317,4 +325,58 @@ fn geocentric_epsg_roundtrips_through_reader_metadata() {
     assert_eq!(geo.epsg(), Some(4978));
     assert_eq!(geo.crs().model_type_enum(), ModelType::Geocentric);
     assert_eq!(geo.crs().geocentric_epsg, Some(4978));
+}
+
+#[test]
+fn geotiff_color_model_builder_passthrough_roundtrips() {
+    let palette = Array3::from_shape_vec((2, 2, 2), vec![0u8, 255, 1, 192, 2, 128, 3, 64]).unwrap();
+    let mut palette_buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(2, 2)
+        .bands(2)
+        .photometric(tiff_core::PhotometricInterpretation::Palette)
+        .extra_samples(vec![ExtraSample::UnassociatedAlpha])
+        .color_map(sample_color_map())
+        .write_3d_to(&mut palette_buf, palette.view())
+        .unwrap();
+
+    let palette_file = TiffFile::from_bytes(palette_buf.into_inner()).unwrap();
+    let palette_ifd = palette_file.ifd(0).unwrap();
+    assert!(matches!(
+        palette_ifd.color_model().unwrap(),
+        ColorModel::Palette {
+            color_map,
+            extra_samples
+        } if color_map.len() == 256 && extra_samples == vec![ExtraSample::UnassociatedAlpha]
+    ));
+
+    let cmyk = Array3::from_shape_vec((1, 2, 4), vec![0u8, 64, 128, 255, 255, 128, 64, 0]).unwrap();
+    let mut cmyk_buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(2, 1)
+        .bands(4)
+        .photometric(tiff_core::PhotometricInterpretation::Separated)
+        .ink_set(InkSet::Cmyk)
+        .write_3d_to(&mut cmyk_buf, cmyk.view())
+        .unwrap();
+
+    let cmyk_file = TiffFile::from_bytes(cmyk_buf.into_inner()).unwrap();
+    let cmyk_ifd = cmyk_file.ifd(0).unwrap();
+    assert!(matches!(
+        cmyk_ifd.color_model().unwrap(),
+        ColorModel::Cmyk { extra_samples } if extra_samples.is_empty()
+    ));
+}
+
+#[test]
+fn geotiff_writer_rejects_unsupported_ycbcr_subsampling() {
+    let data = Array3::<u8>::zeros((1, 1, 3));
+    let mut buf = Cursor::new(Vec::new());
+    let err = GeoTiffBuilder::new(1, 1)
+        .bands(3)
+        .photometric(tiff_core::PhotometricInterpretation::YCbCr)
+        .ycbcr_subsampling([2, 2])
+        .write_3d_to(&mut buf, data.view())
+        .unwrap_err();
+    assert!(
+        matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("YCbCr subsampling"))
+    );
 }

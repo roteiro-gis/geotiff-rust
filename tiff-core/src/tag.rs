@@ -268,6 +268,32 @@ impl TagValue {
         match self {
             Self::Double(v) => Some(v.clone()),
             Self::Float(v) => Some(v.iter().map(|&f| f as f64).collect()),
+            Self::Rational(v) => Some(
+                v.iter()
+                    .map(|&[numerator, denominator]| {
+                        if denominator == 0 {
+                            f64::INFINITY
+                        } else {
+                            numerator as f64 / denominator as f64
+                        }
+                    })
+                    .collect(),
+            ),
+            Self::SRational(v) => Some(
+                v.iter()
+                    .map(|&[numerator, denominator]| {
+                        if denominator == 0 {
+                            if numerator >= 0 {
+                                f64::INFINITY
+                            } else {
+                                f64::NEG_INFINITY
+                            }
+                        } else {
+                            numerator as f64 / denominator as f64
+                        }
+                    })
+                    .collect(),
+            ),
             _ => None,
         }
     }
@@ -295,6 +321,14 @@ impl TagValue {
     pub fn as_u32_slice(&self) -> Option<&[u32]> {
         match self {
             Self::Long(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Extract a RATIONAL array without cloning when possible.
+    pub fn as_rational_slice(&self) -> Option<&[[u32; 2]]> {
+        match self {
+            Self::Rational(v) => Some(v.as_slice()),
             _ => None,
         }
     }

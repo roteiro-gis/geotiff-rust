@@ -6,7 +6,7 @@ Pure-Rust TIFF/BigTIFF and GeoTIFF/COG readers and writers. No C libraries, no b
 
 | Crate | Description |
 |---|---|
-| `tiff-core` | Shared types: ByteOrder, TagType, TagValue, TiffSample, compression/predictor enums |
+| `tiff-core` | Shared TIFF types: ByteOrder, tags, sample traits, compression/predictor enums, and color-model metadata |
 | `tiff-reader` | TIFF/BigTIFF decoder with mmap, strip/tile reads, and typed raster decode |
 | `tiff-writer` | TIFF/BigTIFF encoder with streaming writes, compression, predictors, and BigTIFF |
 | `geotiff-core` | Shared GeoTIFF types: GeoKeyDirectory, CRS, GeoTransform, tag constants |
@@ -91,6 +91,7 @@ with `bands(...)` and optional
 - Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional)
 - Parallel decompression via Rayon
 - Typed raster reads into `ndarray::ArrayD` (u8 through f64)
+- Structured photometric/color-model metadata: palette `ColorMap`, `ExtraSamples`, CMYK, and YCbCr
 - GeoKey directory, CRS/EPSG, transforms, NoData, overview discovery
 - Optional HTTP range-backed remote COG access
 
@@ -99,7 +100,8 @@ with `bands(...)` and optional
 - Strip and tile layouts
 - Compression: Deflate, LZW, JPEG (optional), LERC, LERC+DEFLATE, ZSTD (optional), LERC+ZSTD (optional)
 - Predictors: horizontal differencing, floating-point byte interleaving
-- Chunky and separate planar multi-band layouts (RGB/RGBA) and all sample types (u8 through f64)
+- Chunky and separate planar multi-band layouts and all sample types (u8 through f64)
+- Photometric/color-model tags: palette `ColorMap`, `ExtraSamples` alpha, CMYK (`Separated` + `InkSet`), and YCbCr 4:4:4
 - Streaming tile-by-tile writes for large rasters
 - GeoTIFF metadata: EPSG, pixel scale, origin, affine transforms, NoData
 - COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters

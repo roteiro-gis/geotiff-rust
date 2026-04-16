@@ -59,6 +59,11 @@ pub struct ImageBuilder {
     pub(crate) compression: Compression,
     pub(crate) predictor: Predictor,
     pub(crate) photometric: PhotometricInterpretation,
+    pub(crate) extra_samples: Vec<ExtraSample>,
+    pub(crate) color_map: Option<ColorMap>,
+    pub(crate) ink_set: Option<InkSet>,
+    pub(crate) ycbcr_subsampling: Option<[u16; 2]>,
+    pub(crate) ycbcr_positioning: Option<YCbCrPositioning>,
     pub(crate) planar_configuration: PlanarConfiguration,
     pub(crate) layout: DataLayout,
     pub(crate) extra_tags: Vec<Tag>,
@@ -79,6 +84,11 @@ impl ImageBuilder {
             compression: Compression::None,
             predictor: Predictor::None,
             photometric: PhotometricInterpretation::MinIsBlack,
+            extra_samples: Vec::new(),
+            color_map: None,
+            ink_set: None,
+            ycbcr_subsampling: None,
+            ycbcr_positioning: None,
             planar_configuration: PlanarConfiguration::Chunky,
             layout: DataLayout::Strips {
                 rows_per_strip: height.min(256),
@@ -137,6 +147,36 @@ impl ImageBuilder {
 
     pub fn photometric(mut self, p: PhotometricInterpretation) -> Self {
         self.photometric = p;
+        self
+    }
+
+    /// Set TIFF ExtraSamples semantics for channels beyond the base color model.
+    pub fn extra_samples(mut self, extra_samples: Vec<ExtraSample>) -> Self {
+        self.extra_samples = extra_samples;
+        self
+    }
+
+    /// Set a palette ColorMap for `PhotometricInterpretation::Palette`.
+    pub fn color_map(mut self, color_map: ColorMap) -> Self {
+        self.color_map = Some(color_map);
+        self
+    }
+
+    /// Set the InkSet tag for separated photometric data.
+    pub fn ink_set(mut self, ink_set: InkSet) -> Self {
+        self.ink_set = Some(ink_set);
+        self
+    }
+
+    /// Set TIFF YCbCr chroma subsampling factors.
+    pub fn ycbcr_subsampling(mut self, subsampling: [u16; 2]) -> Self {
+        self.ycbcr_subsampling = Some(subsampling);
+        self
+    }
+
+    /// Set TIFF YCbCr sample positioning.
+    pub fn ycbcr_positioning(mut self, positioning: YCbCrPositioning) -> Self {
+        self.ycbcr_positioning = Some(positioning);
         self
     }
 
@@ -279,6 +319,42 @@ impl ImageBuilder {
         if let Some(lerc_tag) = self.lerc_parameters_tag() {
             extra_tags.push(lerc_tag);
         }
+        let extra_samples = self
+            .effective_extra_samples()
+            .expect("ImageBuilder::build_tags requires a validated color model");
+        if !extra_samples.is_empty() {
+            extra_tags.push(Tag::new(
+                TAG_EXTRA_SAMPLES,
+                TagValue::Short(
+                    extra_samples
+                        .iter()
+                        .copied()
+                        .map(ExtraSample::to_code)
+                        .collect(),
+                ),
+            ));
+        }
+        if let Some(color_map) = &self.color_map {
+            extra_tags.push(Tag::new(
+                TAG_COLOR_MAP,
+                TagValue::Short(color_map.encode_tag_values()),
+            ));
+        }
+        if let Some(ink_set) = self.ink_set {
+            extra_tags.push(Tag::new(
+                TAG_INK_SET,
+                TagValue::Short(vec![ink_set.to_code()]),
+            ));
+        }
+        if let Some([h, v]) = self.ycbcr_subsampling {
+            extra_tags.push(Tag::new(TAG_YCBCR_SUBSAMPLING, TagValue::Short(vec![h, v])));
+        }
+        if let Some(positioning) = self.ycbcr_positioning {
+            extra_tags.push(Tag::new(
+                TAG_YCBCR_POSITIONING,
+                TagValue::Short(vec![positioning.to_code()]),
+            ));
+        }
 
         let (offsets_tag_code, byte_counts_tag_code) = self.offset_tag_codes();
         let layout_tags = self.layout_tags();
@@ -412,27 +488,138 @@ impl ImageBuilder {
                     .into(),
             ));
         }
-        match self.photometric {
-            PhotometricInterpretation::Rgb if self.samples_per_pixel < 3 => {
-                return Err(crate::error::Error::InvalidConfig(format!(
-                    "RGB photometric interpretation requires at least 3 samples per pixel, got {}",
-                    self.samples_per_pixel
-                )));
-            }
-            PhotometricInterpretation::Palette | PhotometricInterpretation::Mask
-                if self.samples_per_pixel != 1 =>
-            {
-                return Err(crate::error::Error::InvalidConfig(format!(
-                    "{:?} photometric interpretation requires exactly 1 sample per pixel, got {}",
-                    self.photometric, self.samples_per_pixel
-                )));
-            }
-            _ => {}
-        }
+        self.validate_color_model()?;
         if matches!(self.compression, Compression::Jpeg) {
             self.validate_jpeg_config()?;
         }
         Ok(())
+    }
+
+    fn validate_color_model(&self) -> crate::error::Result<()> {
+        if !matches!(self.photometric, PhotometricInterpretation::Palette)
+            && self.color_map.is_some()
+        {
+            return Err(crate::error::Error::InvalidConfig(
+                "ColorMap is only valid with palette photometric interpretation".into(),
+            ));
+        }
+
+        if !matches!(self.photometric, PhotometricInterpretation::Separated)
+            && self.ink_set.is_some()
+        {
+            return Err(crate::error::Error::InvalidConfig(
+                "InkSet is only valid with separated photometric interpretation".into(),
+            ));
+        }
+
+        let base_samples: u16 = match self.photometric {
+            PhotometricInterpretation::MinIsWhite | PhotometricInterpretation::MinIsBlack => 1,
+            PhotometricInterpretation::Rgb => 3,
+            PhotometricInterpretation::Palette => {
+                let color_map =
+                    self.color_map
+                        .as_ref()
+                        .ok_or(crate::error::Error::InvalidConfig(
+                            "palette photometric interpretation requires a ColorMap".into(),
+                        ))?;
+                let expected_entries =
+                    1usize
+                        .checked_shl(self.bits_per_sample as u32)
+                        .ok_or_else(|| {
+                            crate::error::Error::InvalidConfig(format!(
+                                "palette BitsPerSample {} exceeds usize shift width",
+                                self.bits_per_sample
+                            ))
+                        })?;
+                if color_map.len() != expected_entries {
+                    return Err(crate::error::Error::InvalidConfig(format!(
+                        "palette ColorMap has {} entries but BitsPerSample={} requires {}",
+                        color_map.len(),
+                        self.bits_per_sample,
+                        expected_entries
+                    )));
+                }
+                1
+            }
+            PhotometricInterpretation::Mask => 1,
+            PhotometricInterpretation::Separated => match self.ink_set.unwrap_or(InkSet::Cmyk) {
+                InkSet::Cmyk => 4,
+                InkSet::NotCmyk | InkSet::Unknown(_) => {
+                    return Err(crate::error::Error::InvalidConfig(
+                        "separated photometric interpretation currently requires InkSet::Cmyk"
+                            .into(),
+                    ))
+                }
+            },
+            PhotometricInterpretation::YCbCr => 3,
+            PhotometricInterpretation::CieLab => 3,
+        };
+
+        let _ = self.effective_extra_samples_for_base(base_samples)?;
+
+        if matches!(self.photometric, PhotometricInterpretation::YCbCr) {
+            if !matches!(self.sample_format, SampleFormat::Uint) || self.bits_per_sample != 8 {
+                return Err(crate::error::Error::InvalidConfig(
+                    "YCbCr photometric interpretation requires 8-bit unsigned samples".into(),
+                ));
+            }
+            if let Some(subsampling) = self.ycbcr_subsampling {
+                if subsampling != [1, 1] {
+                    return Err(crate::error::Error::InvalidConfig(format!(
+                        "YCbCr subsampling {:?} is not supported by the current writer",
+                        subsampling
+                    )));
+                }
+            }
+        } else if self.ycbcr_subsampling.is_some() || self.ycbcr_positioning.is_some() {
+            return Err(crate::error::Error::InvalidConfig(
+                "YCbCr-specific tags require YCbCr photometric interpretation".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn effective_extra_samples(&self) -> crate::error::Result<Vec<ExtraSample>> {
+        let base_samples = match self.photometric {
+            PhotometricInterpretation::MinIsWhite | PhotometricInterpretation::MinIsBlack => 1,
+            PhotometricInterpretation::Rgb => 3,
+            PhotometricInterpretation::Palette => 1,
+            PhotometricInterpretation::Mask => 1,
+            PhotometricInterpretation::Separated => 4,
+            PhotometricInterpretation::YCbCr => 3,
+            PhotometricInterpretation::CieLab => 3,
+        };
+        self.effective_extra_samples_for_base(base_samples)
+    }
+
+    fn effective_extra_samples_for_base(
+        &self,
+        base_samples: u16,
+    ) -> crate::error::Result<Vec<ExtraSample>> {
+        let implied_extra_samples = self
+            .samples_per_pixel
+            .checked_sub(base_samples)
+            .ok_or_else(|| {
+                crate::error::Error::InvalidConfig(format!(
+                    "{} photometric interpretation requires at least {} samples, got {}",
+                    photometric_name(self.photometric),
+                    base_samples,
+                    self.samples_per_pixel
+                ))
+            })?;
+        if self.extra_samples.len() > implied_extra_samples as usize {
+            return Err(crate::error::Error::InvalidConfig(format!(
+                "{} photometric interpretation has {} total channels but {} ExtraSamples",
+                photometric_name(self.photometric),
+                self.samples_per_pixel,
+                self.extra_samples.len()
+            )));
+        }
+
+        let mut extra_samples = self.extra_samples.clone();
+        extra_samples.resize(implied_extra_samples as usize, ExtraSample::Unspecified);
+        Ok(extra_samples)
     }
 
     fn validate_jpeg_config(&self) -> crate::error::Result<()> {
@@ -500,5 +687,18 @@ impl ImageBuilder {
         }
 
         Ok(())
+    }
+}
+
+fn photometric_name(photometric: PhotometricInterpretation) -> &'static str {
+    match photometric {
+        PhotometricInterpretation::MinIsWhite => "MinIsWhite",
+        PhotometricInterpretation::MinIsBlack => "MinIsBlack",
+        PhotometricInterpretation::Rgb => "RGB",
+        PhotometricInterpretation::Palette => "Palette",
+        PhotometricInterpretation::Mask => "TransparencyMask",
+        PhotometricInterpretation::Separated => "Separated",
+        PhotometricInterpretation::YCbCr => "YCbCr",
+        PhotometricInterpretation::CieLab => "CIELab",
     }
 }

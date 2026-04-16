@@ -330,9 +330,19 @@ impl TiffFile {
         self.source.as_ref()
     }
 
+    /// Parse an IFD at an arbitrary file offset.
+    pub fn read_ifd_at_offset(&self, offset: u64) -> Result<Ifd> {
+        ifd::parse_ifd_at(self.source.as_ref(), &self.header, offset)
+    }
+
     /// Decode an image into native-endian interleaved sample bytes.
     pub fn read_image_bytes(&self, ifd_index: usize) -> Result<Vec<u8>> {
         let ifd = self.ifd(ifd_index)?;
+        self.read_image_bytes_from_ifd(ifd)
+    }
+
+    /// Decode an arbitrary IFD into native-endian interleaved sample bytes.
+    pub fn read_image_bytes_from_ifd(&self, ifd: &Ifd) -> Result<Vec<u8>> {
         let layout = ifd.raster_layout()?;
         self.decode_window_bytes(
             ifd,
@@ -355,6 +365,19 @@ impl TiffFile {
         cols: usize,
     ) -> Result<Vec<u8>> {
         let ifd = self.ifd(ifd_index)?;
+        self.read_window_bytes_from_ifd(ifd, row_off, col_off, rows, cols)
+    }
+
+    /// Decode a pixel window from an arbitrary IFD into native-endian
+    /// interleaved sample bytes.
+    pub fn read_window_bytes_from_ifd(
+        &self,
+        ifd: &Ifd,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<u8>> {
         let layout = ifd.raster_layout()?;
         let window = validate_window(&layout, row_off, col_off, rows, cols)?;
         self.decode_window_bytes(ifd, window)
@@ -399,6 +422,18 @@ impl TiffFile {
         cols: usize,
     ) -> Result<ArrayD<T>> {
         let ifd = self.ifd(ifd_index)?;
+        self.read_window_from_ifd(ifd, row_off, col_off, rows, cols)
+    }
+
+    /// Decode a window from an arbitrary IFD into a typed ndarray.
+    pub fn read_window_from_ifd<T: TiffSample>(
+        &self,
+        ifd: &Ifd,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
         let layout = ifd.raster_layout()?;
         let window = validate_window(&layout, row_off, col_off, rows, cols)?;
         if !T::matches_layout(&layout) {
@@ -429,6 +464,11 @@ impl TiffFile {
     /// Multi-band rasters are returned as shape `[height, width, samples_per_pixel]`.
     pub fn read_image<T: TiffSample>(&self, ifd_index: usize) -> Result<ArrayD<T>> {
         let ifd = self.ifd(ifd_index)?;
+        self.read_image_from_ifd(ifd)
+    }
+
+    /// Decode an arbitrary IFD into a typed ndarray.
+    pub fn read_image_from_ifd<T: TiffSample>(&self, ifd: &Ifd) -> Result<ArrayD<T>> {
         let layout = ifd.raster_layout()?;
         if !T::matches_layout(&layout) {
             return Err(Error::TypeMismatch {
@@ -440,7 +480,7 @@ impl TiffFile {
             });
         }
 
-        self.read_window(ifd_index, 0, 0, layout.height, layout.width)
+        self.read_window_from_ifd(ifd, 0, 0, layout.height, layout.width)
     }
 }
 

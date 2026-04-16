@@ -7,7 +7,7 @@ use std::path::Path;
 use geotiff_core::geokeys::{self, GeoKeyDirectory, GeoKeyValue};
 use geotiff_core::tags;
 use geotiff_core::transform::GeoTransform;
-use geotiff_core::{ModelType, RasterType};
+use geotiff_core::{CrsInfo, ModelType, RasterType};
 use ndarray::{ArrayView2, ArrayView3};
 use tiff_core::{
     ColorMap, Compression, ExtraSample, InkSet, PhotometricInterpretation, PlanarConfiguration,
@@ -101,28 +101,85 @@ impl GeoTiffBuilder {
                 }
             });
 
-        self.geokeys.set(
-            geokeys::GT_MODEL_TYPE,
-            GeoKeyValue::Short(model_type.code()),
-        );
         match model_type {
-            ModelType::Projected => {
-                self.geokeys.remove(geokeys::GEOGRAPHIC_TYPE);
-                self.geokeys
-                    .set(geokeys::PROJECTED_CS_TYPE, GeoKeyValue::Short(code));
-            }
-            ModelType::Geographic | ModelType::Geocentric | ModelType::Unknown(_) => {
-                self.geokeys.remove(geokeys::PROJECTED_CS_TYPE);
-                self.geokeys
-                    .set(geokeys::GEOGRAPHIC_TYPE, GeoKeyValue::Short(code));
-            }
+            ModelType::Projected => self = self.projected_epsg(code),
+            ModelType::Geographic => self = self.geographic_epsg(code),
+            ModelType::Geocentric | ModelType::Unknown(_) => self = self.geocentric_epsg(code),
         }
         self
     }
 
+    /// Apply a structured CRS model directly.
+    pub fn crs(mut self, crs: CrsInfo) -> Self {
+        crs.apply_to_geokeys(&mut self.geokeys);
+        self
+    }
+
+    /// Set a projected CRS by EPSG code.
+    pub fn projected_epsg(mut self, code: u16) -> Self {
+        self.geokeys.set(
+            geokeys::GT_MODEL_TYPE,
+            GeoKeyValue::Short(ModelType::Projected.code()),
+        );
+        self.geokeys
+            .set(geokeys::PROJECTED_CRS_TYPE, GeoKeyValue::Short(code));
+        self.geokeys.remove(geokeys::GEODETIC_CRS_TYPE);
+        self
+    }
+
+    /// Set a geographic CRS by EPSG code.
+    pub fn geographic_epsg(mut self, code: u16) -> Self {
+        self.geokeys.set(
+            geokeys::GT_MODEL_TYPE,
+            GeoKeyValue::Short(ModelType::Geographic.code()),
+        );
+        self.geokeys.remove(geokeys::PROJECTED_CRS_TYPE);
+        self.geokeys
+            .set(geokeys::GEODETIC_CRS_TYPE, GeoKeyValue::Short(code));
+        self
+    }
+
     /// Set a geocentric CRS by EPSG code.
-    pub fn geocentric_epsg(self, code: u16) -> Self {
-        self.model_type(ModelType::Geocentric).epsg(code)
+    pub fn geocentric_epsg(mut self, code: u16) -> Self {
+        self.geokeys.set(
+            geokeys::GT_MODEL_TYPE,
+            GeoKeyValue::Short(ModelType::Geocentric.code()),
+        );
+        self.geokeys.remove(geokeys::PROJECTED_CRS_TYPE);
+        self.geokeys
+            .set(geokeys::GEODETIC_CRS_TYPE, GeoKeyValue::Short(code));
+        self
+    }
+
+    /// Set a vertical CRS by EPSG code. When combined with a horizontal CRS
+    /// this forms a compound CRS.
+    pub fn vertical_epsg(mut self, code: u16) -> Self {
+        self.geokeys
+            .set(geokeys::VERTICAL_CS_TYPE, GeoKeyValue::Short(code));
+        self
+    }
+
+    /// Set the vertical datum code.
+    pub fn vertical_datum(mut self, code: u16) -> Self {
+        self.geokeys
+            .set(geokeys::VERTICAL_DATUM, GeoKeyValue::Short(code));
+        self
+    }
+
+    /// Set the vertical units code.
+    pub fn vertical_units(mut self, code: u16) -> Self {
+        self.geokeys
+            .set(geokeys::VERTICAL_UNITS, GeoKeyValue::Short(code));
+        self
+    }
+
+    /// Set the vertical CRS citation string.
+    pub fn vertical_citation(mut self, citation: &str) -> Self {
+        self.geokeys.set(
+            geokeys::VERTICAL_CITATION,
+            GeoKeyValue::Ascii(citation.to_string()),
+        );
+        self
     }
 
     /// Set the model type explicitly.

@@ -32,7 +32,8 @@ pub use tile_writer::StreamingTileWriter;
 
 // Re-export core types for convenience
 pub use geotiff_core::{
-    CrsInfo, GeoKeyDirectory, GeoKeyValue, GeoTransform, ModelType, RasterType,
+    CrsInfo, CrsKind, GeoKeyDirectory, GeoKeyValue, GeoTransform, HorizontalCrs, ModelType,
+    RasterType, VerticalCrs,
 };
 pub use tiff_core::{
     ColorMap, ColorModel, Compression, ExtraSample, InkSet, LercAdditionalCompression,

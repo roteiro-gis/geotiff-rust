@@ -30,6 +30,9 @@ pub enum Error {
     #[error("overview index {0} not found")]
     OverviewNotFound(usize),
 
+    #[error("overview index {0} is stored in a SubIFD and has no top-level TIFF IFD index")]
+    OverviewHasNoTopLevelIfdIndex(usize),
+
     #[error("band index {0} is out of bounds")]
     BandOutOfBounds(usize),
 

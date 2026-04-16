@@ -11,8 +11,8 @@ pub use tiff_core::constants::{
     TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_LERC_PARAMETERS, TAG_PHOTOMETRIC_INTERPRETATION,
     TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_REFERENCE_BLACK_WHITE, TAG_ROWS_PER_STRIP,
     TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
-    TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_YCBCR_POSITIONING,
-    TAG_YCBCR_SUBSAMPLING,
+    TAG_SUB_IFDS, TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH,
+    TAG_YCBCR_POSITIONING, TAG_YCBCR_SUBSAMPLING,
 };
 pub use tiff_core::RasterLayout;
 
@@ -378,6 +378,11 @@ impl Ifd {
         self.tag_u64_list(TAG_TILE_BYTE_COUNTS)
     }
 
+    /// SubIFD offsets as normalized `u64`s.
+    pub fn sub_ifd_offsets(&self) -> Option<Vec<u64>> {
+        self.tag_u64_list(TAG_SUB_IFDS)
+    }
+
     /// Normalize and validate the raster layout for typed reads.
     pub fn raster_layout(&self) -> Result<RasterLayout> {
         let width = self.width();
@@ -499,6 +504,12 @@ pub fn parse_ifd_chain(source: &dyn TiffSource, header: &TiffHeader) -> Result<V
     }
 
     Ok(ifds)
+}
+
+/// Parse a single IFD at the given file offset.
+pub fn parse_ifd_at(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result<Ifd> {
+    let (tags, _) = read_ifd(source, header, offset)?;
+    Ok(Ifd { tags, index: 0 })
 }
 
 fn read_ifd(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result<(Vec<Tag>, u64)> {

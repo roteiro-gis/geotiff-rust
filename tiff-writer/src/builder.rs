@@ -189,6 +189,9 @@ impl ImageBuilder {
     ///
     /// This sets `compression = Jpeg` and `predictor = None` (JPEG uses its
     /// own transform and entropy coding pipeline rather than TIFF predictors).
+    ///
+    /// Multi-band JPEG requires `planar_configuration(Planar)` so each encoded
+    /// strip/tile is a single grayscale component.
     pub fn jpeg_options(mut self, options: JpegOptions) -> Self {
         self.compression = Compression::Jpeg;
         self.predictor = Predictor::None;
@@ -479,20 +482,11 @@ impl ImageBuilder {
         }
 
         let block_samples_per_pixel = self.block_samples_per_pixel();
-        if !matches!(block_samples_per_pixel, 1 | 3) {
+        if block_samples_per_pixel != 1 {
             return Err(crate::error::Error::InvalidConfig(format!(
-                "JPEG block encoding supports 1 or 3 samples per block, got {}; use planar configuration for multi-band JPEG beyond RGB",
+                "JPEG write currently supports one sample per encoded block, got {}; use planar configuration for multi-band JPEG",
                 block_samples_per_pixel
             )));
-        }
-
-        if matches!(self.planar_configuration, PlanarConfiguration::Chunky)
-            && self.samples_per_pixel == 3
-            && !matches!(self.photometric, PhotometricInterpretation::Rgb)
-        {
-            return Err(crate::error::Error::InvalidConfig(
-                "chunky 3-sample JPEG requires RGB photometric interpretation".into(),
-            ));
         }
 
         if matches!(

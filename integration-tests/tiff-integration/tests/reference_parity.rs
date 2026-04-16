@@ -244,17 +244,15 @@ fn write_generated_planar_fixture(path: &std::path::Path) {
 }
 
 fn write_generated_jpeg_fixture(path: &std::path::Path) {
-    let mut rgb = vec![0u8; 16 * 16 * 3];
+    let mut gray = vec![0u8; 16 * 16];
     for row in 0..16usize {
         for col in 0..16usize {
-            let pixel = (row * 16 + col) * 3;
-            let color = match (row / 8, col / 8) {
-                (0, 0) => [255, 0, 0],
-                (0, 1) => [0, 255, 0],
-                (1, 0) => [0, 0, 255],
-                _ => [240, 240, 32],
+            gray[row * 16 + col] = match (row / 8, col / 8) {
+                (0, 0) => 24,
+                (0, 1) => 96,
+                (1, 0) => 160,
+                _ => 224,
             };
-            rgb[pixel..pixel + 3].copy_from_slice(&color);
         }
     }
 
@@ -263,13 +261,11 @@ fn write_generated_jpeg_fixture(path: &std::path::Path) {
     let mut tiff_writer = TiffWriter::new(writer, WriteOptions::default()).unwrap();
     let image = ImageBuilder::new(16, 16)
         .sample_type::<u8>()
-        .samples_per_pixel(3)
-        .photometric(PhotometricInterpretation::Rgb)
         .compression(Compression::Jpeg)
         .jpeg_options(JpegOptions { quality: 90 })
         .tiles(16, 16);
     let handle = tiff_writer.add_image(image).unwrap();
-    tiff_writer.write_block(&handle, 0, &rgb).unwrap();
+    tiff_writer.write_block(&handle, 0, &gray).unwrap();
     tiff_writer.finish().unwrap();
 }
 

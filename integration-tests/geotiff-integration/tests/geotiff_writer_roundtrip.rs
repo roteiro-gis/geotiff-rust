@@ -210,6 +210,7 @@ fn jpeg_geotiff_roundtrips_pixels_metadata_and_streaming_tiles() {
     GeoTiffBuilder::new(16, 16)
         .bands(3)
         .photometric(tiff_core::PhotometricInterpretation::Rgb)
+        .planar_configuration(PlanarConfiguration::Planar)
         .tile_size(16, 16)
         .jpeg_options(JpegOptions { quality: 90 })
         .epsg(4326)
@@ -228,7 +229,7 @@ fn jpeg_geotiff_roundtrips_pixels_metadata_and_streaming_tiles() {
     let (values, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0));
     let expected = rgb.iter().copied().collect::<Vec<_>>();
-    assert_u8_bytes_close(&values, &expected, 6, 256);
+    assert_u8_bytes_close(&values, &expected, 2, 0);
 
     let geo = GeoTiffFile::from_bytes(bytes).unwrap();
     assert_eq!(geo.epsg(), Some(4326));

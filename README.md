@@ -107,9 +107,10 @@ with `bands(...)` and optional
 ## Codec Notes
 
 `JPEG`-in-TIFF write uses standard compression code `7` with full JPEG
-interchange streams per strip/tile, which keeps TIFF, GeoTIFF, and COG output
-interoperable with GDAL/libtiff without requiring TIFF-side shared
-`JPEGTables`.
+interchange streams per strip/tile. The supported interoperable layouts are
+single-band chunky output and multi-band separate-planar output, which keeps
+TIFF, GeoTIFF, and COG files compatible with GDAL/libtiff without requiring
+TIFF-side shared `JPEGTables`.
 
 ## Feature flags
 

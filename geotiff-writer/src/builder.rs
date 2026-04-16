@@ -220,6 +220,9 @@ impl GeoTiffBuilder {
     ///
     /// This sets `compression = Jpeg` and `predictor = None` (JPEG uses its
     /// own transform and entropy coding pipeline rather than TIFF predictors).
+    ///
+    /// Multi-band JPEG requires `planar_configuration(Planar)` so each encoded
+    /// strip/tile is a single grayscale component.
     pub fn jpeg_options(mut self, options: JpegOptions) -> Self {
         self.compression = Compression::Jpeg;
         self.predictor = Predictor::None;

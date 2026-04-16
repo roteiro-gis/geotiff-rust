@@ -92,30 +92,25 @@ fn assert_gdal_u8_pixels_close(path: &Path) {
 }
 
 fn write_generated_jpeg_geotiff(path: &Path) {
-    let mut rgb = Array3::<u8>::zeros((16, 16, 3));
+    let mut gray = ndarray::Array2::<u8>::zeros((16, 16));
     for row in 0..16usize {
         for col in 0..16usize {
-            let color = match (row / 8, col / 8) {
-                (0, 0) => [255, 0, 0],
-                (0, 1) => [0, 255, 0],
-                (1, 0) => [0, 0, 255],
-                _ => [240, 240, 32],
+            gray[[row, col]] = match (row / 8, col / 8) {
+                (0, 0) => 24,
+                (0, 1) => 96,
+                (1, 0) => 160,
+                _ => 224,
             };
-            rgb[[row, col, 0]] = color[0];
-            rgb[[row, col, 1]] = color[1];
-            rgb[[row, col, 2]] = color[2];
         }
     }
 
     GeoTiffBuilder::new(16, 16)
-        .bands(3)
-        .photometric(PhotometricInterpretation::Rgb)
         .tile_size(16, 16)
         .jpeg_options(JpegOptions { quality: 90 })
         .epsg(4326)
         .pixel_scale(1.0, 1.0)
         .origin(-180.0, 90.0)
-        .write_3d(path, rgb.view())
+        .write_2d(path, gray.view())
         .unwrap();
 }
 

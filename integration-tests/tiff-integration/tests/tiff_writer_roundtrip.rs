@@ -162,7 +162,7 @@ fn tiled_and_compressed_images_roundtrip() {
 }
 
 #[test]
-fn jpeg_strips_and_rgb_tiles_roundtrip() {
+fn jpeg_strips_and_planar_rgb_tiles_roundtrip() {
     let grayscale_rows = [
         [32u8, 32, 32, 32, 192, 192, 192, 192],
         [32, 32, 32, 32, 192, 192, 192, 192],
@@ -226,12 +226,21 @@ fn jpeg_strips_and_rgb_tiles_roundtrip() {
                 .sample_type::<u8>()
                 .samples_per_pixel(3)
                 .photometric(tiff_core::PhotometricInterpretation::Rgb)
+                .planar_configuration(tiff_core::PlanarConfiguration::Planar)
                 .compression(Compression::Jpeg)
                 .jpeg_options(JpegOptions { quality: 90 })
                 .tiles(16, 16),
         )
         .unwrap();
-    rgb_writer.write_block(&rgb_handle, 0, &rgb).unwrap();
+    for band in 0..3usize {
+        let mut plane = vec![0u8; 16 * 16];
+        for row in 0..16usize {
+            for col in 0..16usize {
+                plane[row * 16 + col] = rgb[(row * 16 + col) * 3 + band];
+            }
+        }
+        rgb_writer.write_block(&rgb_handle, band, &plane).unwrap();
+    }
     rgb_writer.finish().unwrap();
 
     let rgb_file = TiffFile::from_bytes(rgb_buf.into_inner()).unwrap();
@@ -241,7 +250,7 @@ fn jpeg_strips_and_rgb_tiles_roundtrip() {
     let rgb_image = rgb_file.read_image::<u8>(0).unwrap();
     let (rgb_values, rgb_offset) = rgb_image.into_raw_vec_and_offset();
     assert_eq!(rgb_offset, Some(0));
-    assert_u8_bytes_close(&rgb_values, &rgb, 6, 256);
+    assert_u8_bytes_close(&rgb_values, &rgb, 2, 0);
 }
 
 #[test]
@@ -395,7 +404,7 @@ fn writer_validation_rejects_zero_samples_and_rgb_band_mismatches() {
         )
         .unwrap_err();
     assert!(
-        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("1 or 3 samples per block"))
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("one sample per encoded block"))
     );
 
     let mut jpeg_rgb_buf = Cursor::new(Vec::new());
@@ -409,7 +418,7 @@ fn writer_validation_rejects_zero_samples_and_rgb_band_mismatches() {
         )
         .unwrap_err();
     assert!(
-        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("RGB photometric interpretation"))
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("one sample per encoded block"))
     );
 
     let mut jpeg_wide_buf = Cursor::new(Vec::new());

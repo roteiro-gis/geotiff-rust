@@ -17,6 +17,7 @@ pub const TAG_TILE_WIDTH: u16 = 322;
 pub const TAG_TILE_LENGTH: u16 = 323;
 pub const TAG_TILE_OFFSETS: u16 = 324;
 pub const TAG_TILE_BYTE_COUNTS: u16 = 325;
+pub const TAG_SUB_IFDS: u16 = 330;
 pub const TAG_INK_SET: u16 = 332;
 pub const TAG_EXTRA_SAMPLES: u16 = 338;
 pub const TAG_SAMPLE_FORMAT: u16 = 339;

@@ -92,7 +92,8 @@ with `bands(...)` and optional
 - Parallel decompression via Rayon
 - Typed raster reads into `ndarray::ArrayD` (u8 through f64)
 - Structured photometric/color-model metadata: palette `ColorMap`, `ExtraSamples`, CMYK, and YCbCr
-- GeoKey directory, CRS/EPSG, transforms, NoData, overview discovery
+- GeoKey directory, structured CRS metadata (projected, geographic, geocentric, vertical, compound), transforms, NoData
+- Overview discovery from both reduced-resolution top-level IFDs and SubIFD trees
 - Optional HTTP range-backed remote COG access
 
 **Write**
@@ -103,7 +104,7 @@ with `bands(...)` and optional
 - Chunky and separate planar multi-band layouts and all sample types (u8 through f64)
 - Photometric/color-model tags: palette `ColorMap`, `ExtraSamples` alpha, CMYK (`Separated` + `InkSet`), and YCbCr 4:4:4
 - Streaming tile-by-tile writes for large rasters
-- GeoTIFF metadata: EPSG, pixel scale, origin, affine transforms, NoData
+- GeoTIFF metadata: projected/geographic/geocentric/vertical compound CRS keys, pixel scale, origin, affine transforms, NoData
 - COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
 
 ## Codec Notes

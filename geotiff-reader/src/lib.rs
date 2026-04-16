@@ -62,7 +62,14 @@ pub struct GeoTiffFile {
     geokeys: GeoKeyDirectory,
     transform: Option<GeoTransform>,
     base_ifd_index: usize,
-    overview_ifds: Vec<usize>,
+    overview_ifds: Vec<GeoImageIfd>,
+}
+
+#[cfg(feature = "local")]
+#[derive(Debug, Clone)]
+struct GeoImageIfd {
+    top_level_ifd_index: Option<usize>,
+    ifd: tiff_reader::Ifd,
 }
 
 #[cfg(feature = "local")]
@@ -125,20 +132,11 @@ impl GeoTiffFile {
             });
         let base_ifd_index = find_base_ifd_index(tiff.ifds(), metadata_ifd_index);
         let base_ifd = tiff.ifd(base_ifd_index)?;
+        let overview_ifds =
+            collect_overview_ifds(&tiff, base_ifd, base_ifd_index, metadata_ifd_index)?;
         let geo_bounds = transform
             .as_ref()
             .map(|gt| gt.bounds(base_ifd.width(), base_ifd.height()));
-        let overview_ifds = tiff
-            .ifds()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, candidate)| {
-                (index != base_ifd_index
-                    && index != metadata_ifd_index
-                    && is_overview_ifd(base_ifd, candidate))
-                .then_some(index)
-            })
-            .collect();
 
         let geo_metadata = GeoMetadata {
             epsg,
@@ -235,11 +233,23 @@ impl GeoTiffFile {
         self.overview_ifds.len()
     }
 
-    /// Returns the TIFF IFD index of the requested overview.
+    /// Returns the top-level TIFF IFD index of the requested overview.
+    ///
+    /// Overviews stored in SubIFDs return
+    /// `Error::OverviewHasNoTopLevelIfdIndex`.
     pub fn overview_ifd_index(&self, overview_index: usize) -> Result<usize> {
         self.overview_ifds
             .get(overview_index)
-            .copied()
+            .ok_or(Error::OverviewNotFound(overview_index))?
+            .top_level_ifd_index
+            .ok_or(Error::OverviewHasNoTopLevelIfdIndex(overview_index))
+    }
+
+    /// Returns the parsed TIFF IFD metadata for the requested overview.
+    pub fn overview_ifd(&self, overview_index: usize) -> Result<&tiff_reader::Ifd> {
+        self.overview_ifds
+            .get(overview_index)
+            .map(|overview| &overview.ifd)
             .ok_or(Error::OverviewNotFound(overview_index))
     }
 
@@ -270,8 +280,13 @@ impl GeoTiffFile {
 
     /// Decode an overview raster into a typed ndarray.
     pub fn read_overview<T: TiffSample>(&self, overview_index: usize) -> Result<ArrayD<T>> {
-        let ifd_index = self.overview_ifd_index(overview_index)?;
-        self.tiff.read_image::<T>(ifd_index).map_err(Into::into)
+        let overview = self
+            .overview_ifds
+            .get(overview_index)
+            .ok_or(Error::OverviewNotFound(overview_index))?;
+        self.tiff
+            .read_image_from_ifd::<T>(&overview.ifd)
+            .map_err(Into::into)
     }
 
     /// Decode an overview pixel window into a typed ndarray.
@@ -283,9 +298,12 @@ impl GeoTiffFile {
         rows: usize,
         cols: usize,
     ) -> Result<ArrayD<T>> {
-        let ifd_index = self.overview_ifd_index(overview_index)?;
+        let overview = self
+            .overview_ifds
+            .get(overview_index)
+            .ok_or(Error::OverviewNotFound(overview_index))?;
         self.tiff
-            .read_window::<T>(ifd_index, row_off, col_off, rows, cols)
+            .read_window_from_ifd::<T>(&overview.ifd, row_off, col_off, rows, cols)
             .map_err(Into::into)
     }
 }
@@ -308,6 +326,43 @@ fn is_overview_ifd(base: &tiff_reader::Ifd, candidate: &tiff_reader::Ifd) -> boo
     has_reduced_resolution_flag(candidate)
         || (candidate.tag(TAG_NEW_SUBFILE_TYPE).is_none()
             && candidate.tag(TAG_SUBFILE_TYPE).is_none())
+}
+
+#[cfg(feature = "local")]
+fn collect_overview_ifds(
+    tiff: &TiffFile,
+    base_ifd: &tiff_reader::Ifd,
+    base_ifd_index: usize,
+    metadata_ifd_index: usize,
+) -> Result<Vec<GeoImageIfd>> {
+    let mut overviews: Vec<GeoImageIfd> = tiff
+        .ifds()
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            *index != base_ifd_index
+                && *index != metadata_ifd_index
+                && is_overview_ifd(base_ifd, candidate)
+        })
+        .map(|(index, candidate)| GeoImageIfd {
+            top_level_ifd_index: Some(index),
+            ifd: candidate.clone(),
+        })
+        .collect();
+
+    if let Some(offsets) = base_ifd.sub_ifd_offsets() {
+        for offset in offsets {
+            let candidate = tiff.read_ifd_at_offset(offset)?;
+            if is_overview_ifd(base_ifd, &candidate) {
+                overviews.push(GeoImageIfd {
+                    top_level_ifd_index: None,
+                    ifd: candidate,
+                });
+            }
+        }
+    }
+
+    Ok(overviews)
 }
 
 #[cfg(feature = "local")]
@@ -629,6 +684,23 @@ mod tests {
         panic!("tag {tag_code} not found in classic TIFF");
     }
 
+    fn overwrite_first_ifd_next_pointer(bytes: &mut [u8], value: u32) {
+        let entry_count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        let pointer_offset = 10 + entry_count * 12;
+        bytes[pointer_offset..pointer_offset + 4].copy_from_slice(&le_u32(value));
+    }
+
+    fn first_ifd_next_pointer(bytes: &[u8]) -> u32 {
+        let entry_count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        let pointer_offset = 10 + entry_count * 12;
+        u32::from_le_bytes([
+            bytes[pointer_offset],
+            bytes[pointer_offset + 1],
+            bytes[pointer_offset + 2],
+            bytes[pointer_offset + 3],
+        ])
+    }
+
     fn build_geotiff_with_overview() -> Vec<u8> {
         let base = TestIfdSpec {
             image_data: vec![10u8, 20, 30, 40],
@@ -686,6 +758,70 @@ mod tests {
         };
 
         build_classic_tiff(&[base, overview])
+    }
+
+    fn build_geotiff_with_subifd_overview() -> Vec<u8> {
+        let base = TestIfdSpec {
+            image_data: vec![10u8, 20, 30, 40],
+            entries: vec![
+                (256u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (330u16, 4u16, 1u32, le_u32(0).to_vec()),
+                (
+                    33550u16,
+                    12u16,
+                    3u32,
+                    [2.0, 2.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    33922u16,
+                    12u16,
+                    6u32,
+                    [0.0, 0.0, 0.0, 100.0, 200.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    34735u16,
+                    3u16,
+                    12u32,
+                    [1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326]
+                        .iter()
+                        .flat_map(|value| le_u16(*value))
+                        .collect(),
+                ),
+            ],
+        };
+        let overview = TestIfdSpec {
+            image_data: vec![99u8],
+            entries: vec![
+                (254u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (256u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(1).to_vec()),
+            ],
+        };
+
+        let mut bytes = build_classic_tiff(&[base, overview]);
+        let child_ifd_offset = first_ifd_next_pointer(&bytes);
+        overwrite_classic_inline_long_tag(&mut bytes, 330, child_ifd_offset);
+        overwrite_first_ifd_next_pointer(&mut bytes, 0);
+        bytes
     }
 
     fn build_cog_like_geotiff_with_ghost_ifd() -> Vec<u8> {
@@ -805,6 +941,24 @@ mod tests {
         let file = GeoTiffFile::from_bytes(build_geotiff_with_overview()).unwrap();
         assert_eq!(file.overview_count(), 1);
         assert_eq!(file.overview_ifd_index(0).unwrap(), 1);
+
+        let overview = file.read_overview::<u8>(0).unwrap();
+        assert_eq!(overview.shape(), &[1, 1]);
+        let (values, offset) = overview.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![99]);
+    }
+
+    #[test]
+    fn discovers_and_reads_subifd_overviews() {
+        let file = GeoTiffFile::from_bytes(build_geotiff_with_subifd_overview()).unwrap();
+        assert_eq!(file.overview_count(), 1);
+        assert!(matches!(
+            file.overview_ifd_index(0).unwrap_err(),
+            crate::error::Error::OverviewHasNoTopLevelIfdIndex(0)
+        ));
+        assert_eq!(file.overview_ifd(0).unwrap().width(), 1);
+        assert_eq!(file.overview_ifd(0).unwrap().height(), 1);
 
         let overview = file.read_overview::<u8>(0).unwrap();
         assert_eq!(overview.shape(), &[1, 1]);

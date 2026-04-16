@@ -10,16 +10,21 @@
 // Well-known GeoKey IDs.
 pub const GT_MODEL_TYPE: u16 = 1024;
 pub const GT_RASTER_TYPE: u16 = 1025;
+pub const GT_CITATION: u16 = 1026;
 pub const GEODETIC_CRS_TYPE: u16 = 2048;
 pub const GEOGRAPHIC_TYPE: u16 = GEODETIC_CRS_TYPE;
+pub const GEODETIC_CITATION: u16 = 2049;
 pub const GEOG_CITATION: u16 = 2049;
+pub const GEODETIC_DATUM: u16 = 2050;
 pub const GEOG_GEODETIC_DATUM: u16 = 2050;
 pub const GEOG_ANGULAR_UNITS: u16 = 2054;
+pub const PROJECTED_CRS_TYPE: u16 = 3072;
 pub const PROJECTED_CS_TYPE: u16 = 3072;
 pub const PROJ_CITATION: u16 = 3073;
 pub const PROJECTION: u16 = 3074;
 pub const PROJ_COORD_TRANS: u16 = 3075;
 pub const PROJ_LINEAR_UNITS: u16 = 3076;
+pub const VERTICAL_CITATION: u16 = 4097;
 pub const VERTICAL_CS_TYPE: u16 = 4096;
 pub const VERTICAL_DATUM: u16 = 4098;
 pub const VERTICAL_UNITS: u16 = 4099;

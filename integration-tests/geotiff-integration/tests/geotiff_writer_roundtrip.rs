@@ -2,9 +2,9 @@ use std::io::Cursor;
 
 use geotiff_reader::GeoTiffFile;
 use geotiff_writer::{
-    ColorMap, ColorModel, Compression, Error as GeoTiffWriteError, ExtraSample, GeoTiffBuilder,
-    InkSet, JpegOptions, LercAdditionalCompression, LercOptions, ModelType, PlanarConfiguration,
-    TiffVariant,
+    ColorMap, ColorModel, Compression, CrsKind, Error as GeoTiffWriteError, ExtraSample,
+    GeoTiffBuilder, InkSet, JpegOptions, LercAdditionalCompression, LercOptions, ModelType,
+    PlanarConfiguration, TiffVariant,
 };
 use ndarray::{Array2, Array3};
 use tiff_reader::TiffFile;
@@ -324,7 +324,36 @@ fn geocentric_epsg_roundtrips_through_reader_metadata() {
     let geo = GeoTiffFile::from_bytes(buf.into_inner()).unwrap();
     assert_eq!(geo.epsg(), Some(4978));
     assert_eq!(geo.crs().model_type_enum(), ModelType::Geocentric);
-    assert_eq!(geo.crs().geocentric_epsg, Some(4978));
+    assert_eq!(geo.crs().geocentric_epsg(), Some(4978));
+}
+
+#[test]
+fn compound_vertical_crs_roundtrips_through_reader_metadata() {
+    let data = Array2::<u8>::from_elem((1, 1), 7);
+    let mut buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(1, 1)
+        .projected_epsg(26916)
+        .vertical_epsg(5703)
+        .vertical_datum(5103)
+        .vertical_units(9001)
+        .vertical_citation("NAVD88 height")
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let geo = GeoTiffFile::from_bytes(buf.into_inner()).unwrap();
+    assert_eq!(geo.epsg(), Some(26916));
+    assert_eq!(geo.crs().projected_epsg(), Some(26916));
+    assert_eq!(geo.crs().vertical_epsg(), Some(5703));
+    assert_eq!(geo.crs().vertical_datum(), Some(5103));
+    assert_eq!(geo.crs().vertical_units(), Some(9001));
+    assert_eq!(geo.crs().vertical_citation(), Some("NAVD88 height"));
+    assert!(matches!(
+        geo.crs().crs_kind(),
+        CrsKind::Compound {
+            model_type: ModelType::Projected,
+            ..
+        }
+    ));
 }
 
 #[test]

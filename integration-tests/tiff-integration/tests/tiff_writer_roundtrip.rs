@@ -1,7 +1,9 @@
 use std::fmt::Debug;
 use std::io::Cursor;
 
-use tiff_core::{Compression, Predictor};
+use tiff_core::{
+    ColorMap, ColorModel, Compression, ExtraSample, InkSet, Predictor, YCbCrPositioning,
+};
 use tiff_reader::{TiffFile, TiffSample};
 use tiff_writer::{
     ImageBuilder, JpegOptions, LercOptions, TiffVariant, TiffWriteSample, TiffWriter, WriteOptions,
@@ -67,6 +69,13 @@ fn assert_u8_bytes_close(
         diff_pixels <= max_diff_pixels,
         "differing pixels {diff_pixels} exceeded {max_diff_pixels}"
     );
+}
+
+fn sample_color_map() -> ColorMap {
+    let red = (0u16..=255).map(|value| value * 257).collect();
+    let green = (0u16..=255).map(|value| 65_535 - value * 257).collect();
+    let blue = (0u16..=255).map(|value| (value / 2) * 257).collect();
+    ColorMap::new(red, green, blue).unwrap()
 }
 
 #[test]
@@ -254,6 +263,127 @@ fn jpeg_strips_and_planar_rgb_tiles_roundtrip() {
 }
 
 #[test]
+fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
+    let mut palette_buf = Cursor::new(Vec::new());
+    let mut palette_writer = TiffWriter::new(&mut palette_buf, WriteOptions::default()).unwrap();
+    let palette_handle = palette_writer
+        .add_image(
+            ImageBuilder::new(2, 2)
+                .sample_type::<u8>()
+                .samples_per_pixel(2)
+                .photometric(tiff_core::PhotometricInterpretation::Palette)
+                .extra_samples(vec![ExtraSample::UnassociatedAlpha])
+                .color_map(sample_color_map())
+                .strips(2),
+        )
+        .unwrap();
+    palette_writer
+        .write_block(&palette_handle, 0, &[0u8, 255, 1, 192, 2, 128, 3, 64])
+        .unwrap();
+    palette_writer.finish().unwrap();
+
+    let palette_file = TiffFile::from_bytes(palette_buf.into_inner()).unwrap();
+    let palette_ifd = palette_file.ifd(0).unwrap();
+    match palette_ifd.color_model().unwrap() {
+        ColorModel::Palette {
+            color_map,
+            extra_samples,
+        } => {
+            assert_eq!(color_map.len(), 256);
+            assert_eq!(extra_samples, vec![ExtraSample::UnassociatedAlpha]);
+        }
+        other => panic!("unexpected palette color model: {other:?}"),
+    }
+    let palette_image = palette_file.read_image::<u8>(0).unwrap();
+    let (palette_values, palette_offset) = palette_image.into_raw_vec_and_offset();
+    assert_eq!(palette_offset, Some(0));
+    assert_eq!(palette_values, vec![0, 255, 1, 192, 2, 128, 3, 64]);
+
+    let mut rgba_buf = Cursor::new(Vec::new());
+    let mut rgba_writer = TiffWriter::new(&mut rgba_buf, WriteOptions::default()).unwrap();
+    let rgba_handle = rgba_writer
+        .add_image(
+            ImageBuilder::new(2, 1)
+                .sample_type::<u8>()
+                .samples_per_pixel(4)
+                .photometric(tiff_core::PhotometricInterpretation::Rgb)
+                .extra_samples(vec![ExtraSample::AssociatedAlpha])
+                .strips(1),
+        )
+        .unwrap();
+    rgba_writer
+        .write_block(&rgba_handle, 0, &[255u8, 0, 0, 200, 0, 255, 0, 64])
+        .unwrap();
+    rgba_writer.finish().unwrap();
+
+    let rgba_file = TiffFile::from_bytes(rgba_buf.into_inner()).unwrap();
+    let rgba_ifd = rgba_file.ifd(0).unwrap();
+    assert!(matches!(
+        rgba_ifd.color_model().unwrap(),
+        ColorModel::Rgb {
+            extra_samples
+        } if extra_samples == vec![ExtraSample::AssociatedAlpha]
+    ));
+
+    let mut cmyk_buf = Cursor::new(Vec::new());
+    let mut cmyk_writer = TiffWriter::new(&mut cmyk_buf, WriteOptions::default()).unwrap();
+    let cmyk_handle = cmyk_writer
+        .add_image(
+            ImageBuilder::new(2, 1)
+                .sample_type::<u8>()
+                .samples_per_pixel(4)
+                .photometric(tiff_core::PhotometricInterpretation::Separated)
+                .ink_set(InkSet::Cmyk)
+                .strips(1),
+        )
+        .unwrap();
+    cmyk_writer
+        .write_block(&cmyk_handle, 0, &[0u8, 64, 128, 255, 255, 128, 64, 0])
+        .unwrap();
+    cmyk_writer.finish().unwrap();
+
+    let cmyk_file = TiffFile::from_bytes(cmyk_buf.into_inner()).unwrap();
+    let cmyk_ifd = cmyk_file.ifd(0).unwrap();
+    assert!(matches!(
+        cmyk_ifd.color_model().unwrap(),
+        ColorModel::Cmyk { extra_samples } if extra_samples.is_empty()
+    ));
+
+    let mut ycbcr_buf = Cursor::new(Vec::new());
+    let mut ycbcr_writer = TiffWriter::new(&mut ycbcr_buf, WriteOptions::default()).unwrap();
+    let ycbcr_handle = ycbcr_writer
+        .add_image(
+            ImageBuilder::new(2, 1)
+                .sample_type::<u8>()
+                .samples_per_pixel(3)
+                .photometric(tiff_core::PhotometricInterpretation::YCbCr)
+                .ycbcr_subsampling([1, 1])
+                .ycbcr_positioning(YCbCrPositioning::Cosited)
+                .strips(1),
+        )
+        .unwrap();
+    ycbcr_writer
+        .write_block(&ycbcr_handle, 0, &[16u8, 128, 128, 200, 90, 240])
+        .unwrap();
+    ycbcr_writer.finish().unwrap();
+
+    let ycbcr_file = TiffFile::from_bytes(ycbcr_buf.into_inner()).unwrap();
+    let ycbcr_ifd = ycbcr_file.ifd(0).unwrap();
+    assert!(matches!(
+        ycbcr_ifd.color_model().unwrap(),
+        ColorModel::YCbCr {
+            subsampling,
+            positioning: YCbCrPositioning::Cosited,
+            extra_samples
+        } if subsampling == [1, 1] && extra_samples.is_empty()
+    ));
+    let ycbcr_image = ycbcr_file.read_image::<u8>(0).unwrap();
+    let (ycbcr_values, ycbcr_offset) = ycbcr_image.into_raw_vec_and_offset();
+    assert_eq!(ycbcr_offset, Some(0));
+    assert_eq!(ycbcr_values, vec![16, 128, 128, 200, 90, 240]);
+}
+
+#[test]
 fn multi_ifd_and_planar_rgb_roundtrip() {
     let mut buf = Cursor::new(Vec::new());
     let mut writer = TiffWriter::new(&mut buf, WriteOptions::default()).unwrap();
@@ -433,6 +563,34 @@ fn writer_validation_rejects_zero_samples_and_rgb_band_mismatches() {
         .unwrap_err();
     assert!(
         matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("block width"))
+    );
+
+    let mut palette_buf = Cursor::new(Vec::new());
+    let mut palette_writer = TiffWriter::new(&mut palette_buf, WriteOptions::default()).unwrap();
+    let err = palette_writer
+        .add_image(
+            ImageBuilder::new(1, 1)
+                .sample_type::<u8>()
+                .photometric(tiff_core::PhotometricInterpretation::Palette),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("ColorMap"))
+    );
+
+    let mut ycbcr_buf = Cursor::new(Vec::new());
+    let mut ycbcr_writer = TiffWriter::new(&mut ycbcr_buf, WriteOptions::default()).unwrap();
+    let err = ycbcr_writer
+        .add_image(
+            ImageBuilder::new(1, 1)
+                .sample_type::<u8>()
+                .samples_per_pixel(3)
+                .photometric(tiff_core::PhotometricInterpretation::YCbCr)
+                .ycbcr_subsampling([2, 2]),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, tiff_writer::Error::InvalidConfig(message) if message.contains("YCbCr subsampling"))
     );
 }
 

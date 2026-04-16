@@ -7,14 +7,19 @@ use crate::source::TiffSource;
 use crate::tag::{parse_tag_bigtiff, parse_tag_classic, Tag};
 
 pub use tiff_core::constants::{
-    TAG_BITS_PER_SAMPLE, TAG_COMPRESSION, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_LERC_PARAMETERS,
-    TAG_PHOTOMETRIC_INTERPRETATION, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_ROWS_PER_STRIP,
+    TAG_BITS_PER_SAMPLE, TAG_COLOR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH,
+    TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_LERC_PARAMETERS, TAG_PHOTOMETRIC_INTERPRETATION,
+    TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_REFERENCE_BLACK_WHITE, TAG_ROWS_PER_STRIP,
     TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
-    TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH,
+    TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_YCBCR_POSITIONING,
+    TAG_YCBCR_SUBSAMPLING,
 };
 pub use tiff_core::RasterLayout;
 
-pub use tiff_core::LercAdditionalCompression;
+pub use tiff_core::{
+    ColorMap, ColorModel, ExtraSample, InkSet, LercAdditionalCompression,
+    PhotometricInterpretation, YCbCrPositioning,
+};
 
 /// Parsed TIFF `LercParameters` tag payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +76,12 @@ impl Ifd {
     /// Photometric interpretation.
     pub fn photometric_interpretation(&self) -> Option<u16> {
         self.tag_u16(TAG_PHOTOMETRIC_INTERPRETATION)
+    }
+
+    /// Typed photometric interpretation, defaulting to `MinIsBlack` when the
+    /// TIFF tag is omitted.
+    pub fn photometric_interpretation_enum(&self) -> Option<PhotometricInterpretation> {
+        PhotometricInterpretation::from_code(self.photometric_interpretation().unwrap_or(1))
     }
 
     /// Number of samples (bands) per pixel.
@@ -144,6 +155,207 @@ impl Ifd {
             version: values[0],
             additional_compression,
         }))
+    }
+
+    /// TIFF ExtraSamples semantics.
+    pub fn extra_samples(&self) -> Result<Vec<ExtraSample>> {
+        let Some(tag) = self.tag(TAG_EXTRA_SAMPLES) else {
+            return Ok(Vec::new());
+        };
+        let values = tag.value.as_u16_slice().ok_or(Error::UnexpectedTagType {
+            tag: TAG_EXTRA_SAMPLES,
+            expected: "SHORT",
+            actual: tag.tag_type.to_code(),
+        })?;
+        Ok(values.iter().copied().map(ExtraSample::from_code).collect())
+    }
+
+    /// TIFF ColorMap values for palette images.
+    pub fn color_map(&self) -> Result<Option<ColorMap>> {
+        let Some(tag) = self.tag(TAG_COLOR_MAP) else {
+            return Ok(None);
+        };
+        let values = tag.value.as_u16_slice().ok_or(Error::UnexpectedTagType {
+            tag: TAG_COLOR_MAP,
+            expected: "SHORT",
+            actual: tag.tag_type.to_code(),
+        })?;
+        ColorMap::from_tag_values(values)
+            .map(Some)
+            .map_err(|reason| Error::InvalidTagValue {
+                tag: TAG_COLOR_MAP,
+                reason,
+            })
+    }
+
+    /// TIFF InkSet semantics for separated photometric data.
+    pub fn ink_set(&self) -> Result<Option<InkSet>> {
+        let Some(tag) = self.tag(TAG_INK_SET) else {
+            return Ok(None);
+        };
+        let value = tag.value.as_u16().ok_or(Error::UnexpectedTagType {
+            tag: TAG_INK_SET,
+            expected: "SHORT",
+            actual: tag.tag_type.to_code(),
+        })?;
+        Ok(Some(InkSet::from_code(value)))
+    }
+
+    /// TIFF YCbCr chroma subsampling factors.
+    pub fn ycbcr_subsampling(&self) -> Result<Option<[u16; 2]>> {
+        let Some(tag) = self.tag(TAG_YCBCR_SUBSAMPLING) else {
+            return Ok(None);
+        };
+        let values = tag.value.as_u16_slice().ok_or(Error::UnexpectedTagType {
+            tag: TAG_YCBCR_SUBSAMPLING,
+            expected: "SHORT",
+            actual: tag.tag_type.to_code(),
+        })?;
+        match values {
+            [h, v] => Ok(Some([*h, *v])),
+            _ => Err(Error::InvalidTagValue {
+                tag: TAG_YCBCR_SUBSAMPLING,
+                reason: format!("expected 2 SHORT values, found {}", values.len()),
+            }),
+        }
+    }
+
+    /// TIFF YCbCr sample positioning.
+    pub fn ycbcr_positioning(&self) -> Result<Option<YCbCrPositioning>> {
+        let Some(tag) = self.tag(TAG_YCBCR_POSITIONING) else {
+            return Ok(None);
+        };
+        let value = tag.value.as_u16().ok_or(Error::UnexpectedTagType {
+            tag: TAG_YCBCR_POSITIONING,
+            expected: "SHORT",
+            actual: tag.tag_type.to_code(),
+        })?;
+        Ok(Some(YCbCrPositioning::from_code(value)))
+    }
+
+    /// TIFF ReferenceBlackWhite values normalized to `f64`.
+    pub fn reference_black_white(&self) -> Result<Option<[f64; 6]>> {
+        let Some(tag) = self.tag(TAG_REFERENCE_BLACK_WHITE) else {
+            return Ok(None);
+        };
+        let values = tag.value.as_f64_vec().ok_or(Error::UnexpectedTagType {
+            tag: TAG_REFERENCE_BLACK_WHITE,
+            expected: "RATIONAL or DOUBLE",
+            actual: tag.tag_type.to_code(),
+        })?;
+        match values.as_slice() {
+            [a, b, c, d, e, f] => Ok(Some([*a, *b, *c, *d, *e, *f])),
+            _ => Err(Error::InvalidTagValue {
+                tag: TAG_REFERENCE_BLACK_WHITE,
+                reason: format!("expected 6 values, found {}", values.len()),
+            }),
+        }
+    }
+
+    /// Structured color-model metadata synthesized from TIFF photometric and
+    /// ancillary color tags.
+    pub fn color_model(&self) -> Result<ColorModel> {
+        let photometric = self
+            .photometric_interpretation_enum()
+            .ok_or(Error::InvalidTagValue {
+                tag: TAG_PHOTOMETRIC_INTERPRETATION,
+                reason: format!(
+                    "unsupported photometric interpretation {}",
+                    self.photometric_interpretation().unwrap_or(1)
+                ),
+            })?;
+        let samples_per_pixel = self.samples_per_pixel();
+        let extra_samples = self.extra_samples()?;
+
+        match photometric {
+            PhotometricInterpretation::MinIsWhite => Ok(ColorModel::Grayscale {
+                white_is_zero: true,
+                extra_samples: resolve_fixed_model_extra_samples(
+                    photometric,
+                    samples_per_pixel,
+                    1,
+                    extra_samples,
+                )?,
+            }),
+            PhotometricInterpretation::MinIsBlack => Ok(ColorModel::Grayscale {
+                white_is_zero: false,
+                extra_samples: resolve_fixed_model_extra_samples(
+                    photometric,
+                    samples_per_pixel,
+                    1,
+                    extra_samples,
+                )?,
+            }),
+            PhotometricInterpretation::Rgb => Ok(ColorModel::Rgb {
+                extra_samples: resolve_fixed_model_extra_samples(
+                    photometric,
+                    samples_per_pixel,
+                    3,
+                    extra_samples,
+                )?,
+            }),
+            PhotometricInterpretation::Palette => {
+                let color_map = self.color_map()?.ok_or(Error::InvalidImageLayout(
+                    "palette TIFF is missing ColorMap".into(),
+                ))?;
+                Ok(ColorModel::Palette {
+                    color_map,
+                    extra_samples: resolve_fixed_model_extra_samples(
+                        photometric,
+                        samples_per_pixel,
+                        1,
+                        extra_samples,
+                    )?,
+                })
+            }
+            PhotometricInterpretation::Mask => Ok(ColorModel::TransparencyMask),
+            PhotometricInterpretation::Separated => {
+                let ink_set = self.ink_set()?.unwrap_or(InkSet::Cmyk);
+                if ink_set == InkSet::Cmyk {
+                    let extra_samples = resolve_fixed_model_extra_samples(
+                        photometric,
+                        samples_per_pixel,
+                        4,
+                        extra_samples,
+                    )?;
+                    Ok(ColorModel::Cmyk { extra_samples })
+                } else {
+                    let color_channels = samples_per_pixel
+                        .checked_sub(extra_samples.len() as u16)
+                        .ok_or_else(|| {
+                            Error::InvalidImageLayout(format!(
+                                "{} photometric interpretation defines more ExtraSamples than total channels",
+                                photometric_name(photometric)
+                            ))
+                        })?;
+                    Ok(ColorModel::Separated {
+                        ink_set,
+                        color_channels,
+                        extra_samples,
+                    })
+                }
+            }
+            PhotometricInterpretation::YCbCr => Ok(ColorModel::YCbCr {
+                subsampling: self.ycbcr_subsampling()?.unwrap_or([1, 1]),
+                positioning: self
+                    .ycbcr_positioning()?
+                    .unwrap_or(YCbCrPositioning::Centered),
+                extra_samples: resolve_fixed_model_extra_samples(
+                    photometric,
+                    samples_per_pixel,
+                    3,
+                    extra_samples,
+                )?,
+            }),
+            PhotometricInterpretation::CieLab => Ok(ColorModel::CieLab {
+                extra_samples: resolve_fixed_model_extra_samples(
+                    photometric,
+                    samples_per_pixel,
+                    3,
+                    extra_samples,
+                )?,
+            }),
+        }
     }
 
     /// Strip offsets as normalized `u64`s.
@@ -226,6 +438,8 @@ impl Ifd {
         if !matches!(predictor, 1..=3) {
             return Err(Error::UnsupportedPredictor(predictor));
         }
+
+        validate_color_model(self, samples_per_pixel as u16, first_bits)?;
 
         Ok(RasterLayout {
             width: width as usize,
@@ -341,6 +555,128 @@ fn normalize_u16_values(
     }
 }
 
+fn resolve_fixed_model_extra_samples(
+    photometric: PhotometricInterpretation,
+    samples_per_pixel: u16,
+    base_samples: u16,
+    mut extra_samples: Vec<ExtraSample>,
+) -> Result<Vec<ExtraSample>> {
+    let implied_extra_samples = samples_per_pixel.checked_sub(base_samples).ok_or_else(|| {
+        Error::InvalidImageLayout(format!(
+            "{} photometric interpretation requires at least {base_samples} samples, got {samples_per_pixel}",
+            photometric_name(photometric)
+        ))
+    })?;
+    if extra_samples.len() > implied_extra_samples as usize {
+        return Err(Error::InvalidImageLayout(format!(
+            "{} photometric interpretation has {} total channels but {} ExtraSamples",
+            photometric_name(photometric),
+            samples_per_pixel,
+            extra_samples.len()
+        )));
+    }
+    extra_samples.resize(implied_extra_samples as usize, ExtraSample::Unspecified);
+    Ok(extra_samples)
+}
+
+fn photometric_name(photometric: PhotometricInterpretation) -> &'static str {
+    match photometric {
+        PhotometricInterpretation::MinIsWhite => "MinIsWhite",
+        PhotometricInterpretation::MinIsBlack => "MinIsBlack",
+        PhotometricInterpretation::Rgb => "RGB",
+        PhotometricInterpretation::Palette => "Palette",
+        PhotometricInterpretation::Mask => "TransparencyMask",
+        PhotometricInterpretation::Separated => "Separated",
+        PhotometricInterpretation::YCbCr => "YCbCr",
+        PhotometricInterpretation::CieLab => "CIELab",
+    }
+}
+
+fn validate_color_model(ifd: &Ifd, samples_per_pixel: u16, bits_per_sample: u16) -> Result<()> {
+    let color_model = ifd.color_model()?;
+
+    match &color_model {
+        ColorModel::Grayscale { extra_samples, .. } => {
+            validate_expected_samples(samples_per_pixel, 1, extra_samples.len())?;
+        }
+        ColorModel::Palette {
+            color_map,
+            extra_samples,
+        } => {
+            let expected_entries = 1usize.checked_shl(bits_per_sample as u32).ok_or_else(|| {
+                Error::InvalidImageLayout(format!(
+                    "palette BitsPerSample {bits_per_sample} exceeds usize shift width"
+                ))
+            })?;
+            if color_map.len() != expected_entries {
+                return Err(Error::InvalidImageLayout(format!(
+                    "palette ColorMap has {} entries but BitsPerSample={} requires {}",
+                    color_map.len(),
+                    bits_per_sample,
+                    expected_entries
+                )));
+            }
+            validate_expected_samples(samples_per_pixel, 1, extra_samples.len())?;
+        }
+        ColorModel::Rgb { extra_samples } => {
+            validate_expected_samples(samples_per_pixel, 3, extra_samples.len())?;
+        }
+        ColorModel::TransparencyMask => {
+            validate_expected_samples(samples_per_pixel, 1, 0)?;
+        }
+        ColorModel::Cmyk { extra_samples } => {
+            validate_expected_samples(samples_per_pixel, 4, extra_samples.len())?;
+        }
+        ColorModel::Separated {
+            color_channels,
+            extra_samples,
+            ..
+        } => {
+            if *color_channels == 0 {
+                return Err(Error::InvalidImageLayout(
+                    "separated photometric interpretation must have at least one base ink channel"
+                        .into(),
+                ));
+            }
+            validate_expected_samples(samples_per_pixel, *color_channels, extra_samples.len())?;
+        }
+        ColorModel::YCbCr {
+            subsampling,
+            extra_samples,
+            ..
+        } => {
+            if *subsampling != [1, 1] {
+                return Err(Error::InvalidImageLayout(format!(
+                    "YCbCr subsampling {:?} is not supported for typed raster reads",
+                    subsampling
+                )));
+            }
+            validate_expected_samples(samples_per_pixel, 3, extra_samples.len())?;
+        }
+        ColorModel::CieLab { extra_samples } => {
+            validate_expected_samples(samples_per_pixel, 3, extra_samples.len())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_expected_samples(
+    samples_per_pixel: u16,
+    base_samples: u16,
+    extra_sample_count: usize,
+) -> Result<()> {
+    let expected_samples = base_samples
+        .checked_add(extra_sample_count as u16)
+        .ok_or_else(|| Error::InvalidImageLayout("samples per pixel overflow".into()))?;
+    if samples_per_pixel != expected_samples {
+        return Err(Error::InvalidImageLayout(format!(
+            "SamplesPerPixel={samples_per_pixel} does not match color model base channels {base_samples} plus {extra_sample_count} ExtraSamples"
+        )));
+    }
+    Ok(())
+}
+
 /// Parse classic TIFF IFD entries (12 bytes each).
 fn parse_tags_classic(
     cursor: &mut Cursor<'_>,
@@ -398,8 +734,10 @@ fn parse_tags_bigtiff(
 #[cfg(test)]
 mod tests {
     use super::{
-        Ifd, LercAdditionalCompression, RasterLayout, TAG_BITS_PER_SAMPLE, TAG_IMAGE_LENGTH,
-        TAG_IMAGE_WIDTH, TAG_LERC_PARAMETERS, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
+        ColorModel, ExtraSample, Ifd, InkSet, LercAdditionalCompression, RasterLayout,
+        TAG_BITS_PER_SAMPLE, TAG_COLOR_MAP, TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH,
+        TAG_INK_SET, TAG_LERC_PARAMETERS, TAG_PHOTOMETRIC_INTERPRETATION, TAG_SAMPLES_PER_PIXEL,
+        TAG_SAMPLE_FORMAT, TAG_YCBCR_SUBSAMPLING,
     };
     use crate::tag::{Tag, TagType, TagValue};
 
@@ -520,6 +858,98 @@ mod tests {
         assert_eq!(
             params.additional_compression,
             LercAdditionalCompression::Zstd
+        );
+    }
+
+    #[test]
+    fn parses_palette_color_model_and_extra_alpha() {
+        let ifd = make_ifd(vec![
+            Tag::new(TAG_IMAGE_WIDTH, TagValue::Long(vec![2])),
+            Tag::new(TAG_IMAGE_LENGTH, TagValue::Long(vec![2])),
+            Tag::new(TAG_SAMPLES_PER_PIXEL, TagValue::Short(vec![2])),
+            Tag::new(TAG_BITS_PER_SAMPLE, TagValue::Short(vec![8, 8])),
+            Tag::new(TAG_SAMPLE_FORMAT, TagValue::Short(vec![1, 1])),
+            Tag::new(TAG_PHOTOMETRIC_INTERPRETATION, TagValue::Short(vec![3])),
+            Tag::new(TAG_EXTRA_SAMPLES, TagValue::Short(vec![2])),
+            Tag::new(
+                TAG_COLOR_MAP,
+                TagValue::Short(
+                    (0u16..256)
+                        .chain((0u16..256).map(|value| value.saturating_mul(2)))
+                        .chain((0u16..256).map(|value| value.saturating_mul(3)))
+                        .collect(),
+                ),
+            ),
+        ]);
+
+        let model = ifd.color_model().unwrap();
+        match model {
+            ColorModel::Palette {
+                color_map,
+                extra_samples,
+            } => {
+                assert_eq!(color_map.len(), 256);
+                assert_eq!(extra_samples, vec![ExtraSample::UnassociatedAlpha]);
+            }
+            other => panic!("unexpected color model: {other:?}"),
+        }
+
+        let layout = ifd.raster_layout().unwrap();
+        assert_eq!(layout.samples_per_pixel, 2);
+    }
+
+    #[test]
+    fn parses_cmyk_color_model() {
+        let ifd = make_ifd(vec![
+            Tag::new(TAG_IMAGE_WIDTH, TagValue::Long(vec![1])),
+            Tag::new(TAG_IMAGE_LENGTH, TagValue::Long(vec![1])),
+            Tag::new(TAG_SAMPLES_PER_PIXEL, TagValue::Short(vec![4])),
+            Tag::new(TAG_BITS_PER_SAMPLE, TagValue::Short(vec![8, 8, 8, 8])),
+            Tag::new(TAG_SAMPLE_FORMAT, TagValue::Short(vec![1, 1, 1, 1])),
+            Tag::new(TAG_PHOTOMETRIC_INTERPRETATION, TagValue::Short(vec![5])),
+            Tag::new(TAG_INK_SET, TagValue::Short(vec![1])),
+        ]);
+
+        assert!(matches!(
+            ifd.color_model().unwrap(),
+            ColorModel::Cmyk { .. }
+        ));
+        assert_eq!(ifd.ink_set().unwrap(), Some(InkSet::Cmyk));
+        assert_eq!(ifd.raster_layout().unwrap().samples_per_pixel, 4);
+    }
+
+    #[test]
+    fn rejects_palette_without_colormap() {
+        let ifd = make_ifd(vec![
+            Tag::new(TAG_IMAGE_WIDTH, TagValue::Long(vec![1])),
+            Tag::new(TAG_IMAGE_LENGTH, TagValue::Long(vec![1])),
+            Tag::new(TAG_SAMPLES_PER_PIXEL, TagValue::Short(vec![1])),
+            Tag::new(TAG_BITS_PER_SAMPLE, TagValue::Short(vec![8])),
+            Tag::new(TAG_SAMPLE_FORMAT, TagValue::Short(vec![1])),
+            Tag::new(TAG_PHOTOMETRIC_INTERPRETATION, TagValue::Short(vec![3])),
+        ]);
+
+        let error = ifd.raster_layout().unwrap_err();
+        assert!(
+            matches!(error, crate::error::Error::InvalidImageLayout(message) if message.contains("ColorMap"))
+        );
+    }
+
+    #[test]
+    fn rejects_subsampled_ycbcr_for_typed_reads() {
+        let ifd = make_ifd(vec![
+            Tag::new(TAG_IMAGE_WIDTH, TagValue::Long(vec![2])),
+            Tag::new(TAG_IMAGE_LENGTH, TagValue::Long(vec![2])),
+            Tag::new(TAG_SAMPLES_PER_PIXEL, TagValue::Short(vec![3])),
+            Tag::new(TAG_BITS_PER_SAMPLE, TagValue::Short(vec![8, 8, 8])),
+            Tag::new(TAG_SAMPLE_FORMAT, TagValue::Short(vec![1, 1, 1])),
+            Tag::new(TAG_PHOTOMETRIC_INTERPRETATION, TagValue::Short(vec![6])),
+            Tag::new(TAG_YCBCR_SUBSAMPLING, TagValue::Short(vec![2, 2])),
+        ]);
+
+        let error = ifd.raster_layout().unwrap_err();
+        assert!(
+            matches!(error, crate::error::Error::InvalidImageLayout(message) if message.contains("YCbCr subsampling"))
         );
     }
 }

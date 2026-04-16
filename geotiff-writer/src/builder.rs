@@ -10,7 +10,8 @@ use geotiff_core::transform::GeoTransform;
 use geotiff_core::{ModelType, RasterType};
 use ndarray::{ArrayView2, ArrayView3};
 use tiff_core::{
-    Compression, PhotometricInterpretation, PlanarConfiguration, Predictor, Tag, TagValue,
+    ColorMap, Compression, ExtraSample, InkSet, PhotometricInterpretation, PlanarConfiguration,
+    Predictor, Tag, TagValue, YCbCrPositioning,
 };
 use tiff_writer::{ImageBuilder, JpegOptions, TiffVariant, TiffWriter, WriteOptions};
 
@@ -33,6 +34,11 @@ pub struct GeoTiffBuilder {
     pub(crate) predictor: Predictor,
     pub(crate) lerc_options: Option<tiff_writer::LercOptions>,
     pub(crate) jpeg_options: Option<JpegOptions>,
+    pub(crate) extra_samples: Vec<ExtraSample>,
+    pub(crate) color_map: Option<ColorMap>,
+    pub(crate) ink_set: Option<InkSet>,
+    pub(crate) ycbcr_subsampling: Option<[u16; 2]>,
+    pub(crate) ycbcr_positioning: Option<YCbCrPositioning>,
     pub(crate) planar_configuration: PlanarConfiguration,
     pub(crate) tile_width: Option<u32>,
     pub(crate) tile_height: Option<u32>,
@@ -56,6 +62,11 @@ impl GeoTiffBuilder {
             predictor: Predictor::None,
             lerc_options: None,
             jpeg_options: None,
+            extra_samples: Vec::new(),
+            color_map: None,
+            ink_set: None,
+            ycbcr_subsampling: None,
+            ycbcr_positioning: None,
             planar_configuration: PlanarConfiguration::Chunky,
             tile_width: None,
             tile_height: None,
@@ -250,6 +261,36 @@ impl GeoTiffBuilder {
         self
     }
 
+    /// Set TIFF ExtraSamples semantics for channels beyond the base color model.
+    pub fn extra_samples(mut self, extra_samples: Vec<ExtraSample>) -> Self {
+        self.extra_samples = extra_samples;
+        self
+    }
+
+    /// Set a palette ColorMap for `PhotometricInterpretation::Palette`.
+    pub fn color_map(mut self, color_map: ColorMap) -> Self {
+        self.color_map = Some(color_map);
+        self
+    }
+
+    /// Set the InkSet tag for separated photometric data.
+    pub fn ink_set(mut self, ink_set: InkSet) -> Self {
+        self.ink_set = Some(ink_set);
+        self
+    }
+
+    /// Set TIFF YCbCr chroma subsampling factors.
+    pub fn ycbcr_subsampling(mut self, subsampling: [u16; 2]) -> Self {
+        self.ycbcr_subsampling = Some(subsampling);
+        self
+    }
+
+    /// Set TIFF YCbCr sample positioning.
+    pub fn ycbcr_positioning(mut self, positioning: YCbCrPositioning) -> Self {
+        self.ycbcr_positioning = Some(positioning);
+        self
+    }
+
     /// Select the TIFF container variant for emitted output.
     pub fn tiff_variant(mut self, variant: TiffVariant) -> Self {
         self.tiff_variant = variant;
@@ -319,6 +360,22 @@ impl GeoTiffBuilder {
             .predictor(self.predictor)
             .planar_configuration(self.planar_configuration)
             .photometric(self.photometric);
+
+        if !self.extra_samples.is_empty() {
+            ib = ib.extra_samples(self.extra_samples.clone());
+        }
+        if let Some(color_map) = &self.color_map {
+            ib = ib.color_map(color_map.clone());
+        }
+        if let Some(ink_set) = self.ink_set {
+            ib = ib.ink_set(ink_set);
+        }
+        if let Some(subsampling) = self.ycbcr_subsampling {
+            ib = ib.ycbcr_subsampling(subsampling);
+        }
+        if let Some(positioning) = self.ycbcr_positioning {
+            ib = ib.ycbcr_positioning(positioning);
+        }
 
         if let Some(opts) = self.lerc_options {
             ib = ib.lerc_options(opts);

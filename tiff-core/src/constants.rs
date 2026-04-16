@@ -12,12 +12,18 @@ pub const TAG_ROWS_PER_STRIP: u16 = 278;
 pub const TAG_STRIP_BYTE_COUNTS: u16 = 279;
 pub const TAG_PLANAR_CONFIGURATION: u16 = 284;
 pub const TAG_PREDICTOR: u16 = 317;
+pub const TAG_COLOR_MAP: u16 = 320;
 pub const TAG_TILE_WIDTH: u16 = 322;
 pub const TAG_TILE_LENGTH: u16 = 323;
 pub const TAG_TILE_OFFSETS: u16 = 324;
 pub const TAG_TILE_BYTE_COUNTS: u16 = 325;
+pub const TAG_INK_SET: u16 = 332;
+pub const TAG_EXTRA_SAMPLES: u16 = 338;
 pub const TAG_SAMPLE_FORMAT: u16 = 339;
 pub const TAG_JPEG_TABLES: u16 = 347;
+pub const TAG_YCBCR_SUBSAMPLING: u16 = 530;
+pub const TAG_YCBCR_POSITIONING: u16 = 531;
+pub const TAG_REFERENCE_BLACK_WHITE: u16 = 532;
 pub const TAG_LERC_PARAMETERS: u16 = 50674;
 
 /// TIFF compression scheme.
@@ -141,6 +147,9 @@ pub enum PhotometricInterpretation {
     Rgb,
     Palette,
     Mask,
+    Separated,
+    YCbCr,
+    CieLab,
 }
 
 impl PhotometricInterpretation {
@@ -151,6 +160,9 @@ impl PhotometricInterpretation {
             2 => Some(Self::Rgb),
             3 => Some(Self::Palette),
             4 => Some(Self::Mask),
+            5 => Some(Self::Separated),
+            6 => Some(Self::YCbCr),
+            8 => Some(Self::CieLab),
             _ => None,
         }
     }
@@ -162,8 +174,191 @@ impl PhotometricInterpretation {
             Self::Rgb => 2,
             Self::Palette => 3,
             Self::Mask => 4,
+            Self::Separated => 5,
+            Self::YCbCr => 6,
+            Self::CieLab => 8,
         }
     }
+}
+
+/// TIFF ExtraSamples semantic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExtraSample {
+    Unspecified,
+    AssociatedAlpha,
+    UnassociatedAlpha,
+    Unknown(u16),
+}
+
+impl ExtraSample {
+    pub fn from_code(code: u16) -> Self {
+        match code {
+            0 => Self::Unspecified,
+            1 => Self::AssociatedAlpha,
+            2 => Self::UnassociatedAlpha,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub fn to_code(self) -> u16 {
+        match self {
+            Self::Unspecified => 0,
+            Self::AssociatedAlpha => 1,
+            Self::UnassociatedAlpha => 2,
+            Self::Unknown(code) => code,
+        }
+    }
+}
+
+/// TIFF YCbCr chroma sample positioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum YCbCrPositioning {
+    Centered,
+    Cosited,
+    Unknown(u16),
+}
+
+impl YCbCrPositioning {
+    pub fn from_code(code: u16) -> Self {
+        match code {
+            1 => Self::Centered,
+            2 => Self::Cosited,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub fn to_code(self) -> u16 {
+        match self {
+            Self::Centered => 1,
+            Self::Cosited => 2,
+            Self::Unknown(code) => code,
+        }
+    }
+}
+
+/// TIFF InkSet semantics for separated photometric data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InkSet {
+    Cmyk,
+    NotCmyk,
+    Unknown(u16),
+}
+
+impl InkSet {
+    pub fn from_code(code: u16) -> Self {
+        match code {
+            1 => Self::Cmyk,
+            2 => Self::NotCmyk,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub fn to_code(self) -> u16 {
+        match self {
+            Self::Cmyk => 1,
+            Self::NotCmyk => 2,
+            Self::Unknown(code) => code,
+        }
+    }
+}
+
+/// TIFF palette ColorMap values split into RGB planes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorMap {
+    red: Vec<u16>,
+    green: Vec<u16>,
+    blue: Vec<u16>,
+}
+
+impl ColorMap {
+    pub fn new(red: Vec<u16>, green: Vec<u16>, blue: Vec<u16>) -> Result<Self, String> {
+        let len = red.len();
+        if green.len() != len || blue.len() != len {
+            return Err(format!(
+                "ColorMap planes must have equal length, got red={}, green={}, blue={}",
+                red.len(),
+                green.len(),
+                blue.len()
+            ));
+        }
+        Ok(Self { red, green, blue })
+    }
+
+    pub fn from_tag_values(values: &[u16]) -> Result<Self, String> {
+        if values.len() % 3 != 0 {
+            return Err(format!(
+                "ColorMap tag length must be divisible by 3, got {} values",
+                values.len()
+            ));
+        }
+        let plane_len = values.len() / 3;
+        Self::new(
+            values[..plane_len].to_vec(),
+            values[plane_len..plane_len * 2].to_vec(),
+            values[plane_len * 2..].to_vec(),
+        )
+    }
+
+    pub fn len(&self) -> usize {
+        self.red.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.red.is_empty()
+    }
+
+    pub fn red(&self) -> &[u16] {
+        &self.red
+    }
+
+    pub fn green(&self) -> &[u16] {
+        &self.green
+    }
+
+    pub fn blue(&self) -> &[u16] {
+        &self.blue
+    }
+
+    pub fn encode_tag_values(&self) -> Vec<u16> {
+        let mut values = Vec::with_capacity(self.len() * 3);
+        values.extend_from_slice(&self.red);
+        values.extend_from_slice(&self.green);
+        values.extend_from_slice(&self.blue);
+        values
+    }
+}
+
+/// Structured interpretation of TIFF photometric and ancillary color tags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColorModel {
+    Grayscale {
+        white_is_zero: bool,
+        extra_samples: Vec<ExtraSample>,
+    },
+    Palette {
+        color_map: ColorMap,
+        extra_samples: Vec<ExtraSample>,
+    },
+    Rgb {
+        extra_samples: Vec<ExtraSample>,
+    },
+    TransparencyMask,
+    Cmyk {
+        extra_samples: Vec<ExtraSample>,
+    },
+    Separated {
+        ink_set: InkSet,
+        color_channels: u16,
+        extra_samples: Vec<ExtraSample>,
+    },
+    YCbCr {
+        subsampling: [u16; 2],
+        positioning: YCbCrPositioning,
+        extra_samples: Vec<ExtraSample>,
+    },
+    CieLab {
+        extra_samples: Vec<ExtraSample>,
+    },
 }
 
 /// TIFF planar configuration.
@@ -248,5 +443,35 @@ mod tests {
             assert_eq!(expected.to_code(), code);
         }
         assert_eq!(LercAdditionalCompression::from_code(99), None);
+    }
+
+    #[test]
+    fn photometric_roundtrips_extended_color_models() {
+        for (code, expected) in [
+            (5, PhotometricInterpretation::Separated),
+            (6, PhotometricInterpretation::YCbCr),
+            (8, PhotometricInterpretation::CieLab),
+        ] {
+            assert_eq!(PhotometricInterpretation::from_code(code), Some(expected));
+            assert_eq!(expected.to_code(), code);
+        }
+    }
+
+    #[test]
+    fn color_map_splits_tag_values_into_rgb_planes() {
+        let values = vec![1u16, 2, 10, 20, 100, 200];
+        let color_map = ColorMap::from_tag_values(&values).unwrap();
+        assert_eq!(color_map.red(), &[1, 2]);
+        assert_eq!(color_map.green(), &[10, 20]);
+        assert_eq!(color_map.blue(), &[100, 200]);
+        assert_eq!(color_map.encode_tag_values(), values);
+    }
+
+    #[test]
+    fn extra_sample_and_ink_set_roundtrip() {
+        assert_eq!(ExtraSample::from_code(1), ExtraSample::AssociatedAlpha);
+        assert_eq!(ExtraSample::UnassociatedAlpha.to_code(), 2);
+        assert_eq!(InkSet::from_code(1), InkSet::Cmyk);
+        assert_eq!(InkSet::NotCmyk.to_code(), 2);
     }
 }

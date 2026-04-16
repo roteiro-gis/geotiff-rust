@@ -53,6 +53,9 @@ pub use tag::{Tag, TagValue};
 pub use tiff_core::constants;
 pub use tiff_core::sample::TiffSample;
 pub use tiff_core::TagType;
+pub use tiff_core::{
+    ColorMap, ColorModel, ExtraSample, InkSet, PhotometricInterpretation, YCbCrPositioning,
+};
 
 /// Configuration for opening a TIFF file.
 #[derive(Debug, Clone, Copy)]

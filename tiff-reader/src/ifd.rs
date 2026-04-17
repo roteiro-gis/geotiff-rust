@@ -427,12 +427,10 @@ impl Ifd {
                 "mixed SampleFormat values are not supported".into(),
             ));
         }
-        if !matches!(first_bits, 8 | 16 | 32 | 64) {
-            return Err(Error::UnsupportedBitsPerSample(first_bits));
-        }
         if !matches!(first_format, 1..=3) {
             return Err(Error::UnsupportedSampleFormat(first_format));
         }
+        validate_sample_encoding(first_format, first_bits)?;
 
         let planar_configuration = self.planar_configuration();
         if !matches!(planar_configuration, 1 | 2) {
@@ -443,6 +441,11 @@ impl Ifd {
         if !matches!(predictor, 1..=3) {
             return Err(Error::UnsupportedPredictor(predictor));
         }
+        if first_bits < 8 && predictor != 1 {
+            return Err(Error::InvalidImageLayout(
+                "predictors are not supported for sub-byte sample encodings".into(),
+            ));
+        }
 
         validate_color_model(self, samples_per_pixel as u16, first_bits)?;
 
@@ -451,10 +454,63 @@ impl Ifd {
             height: height as usize,
             samples_per_pixel,
             bits_per_sample: first_bits,
-            bytes_per_sample: (first_bits / 8) as usize,
+            bytes_per_sample: usize::from(first_bits.div_ceil(8)),
             sample_format: first_format,
             planar_configuration,
             predictor,
+        })
+    }
+
+    /// Normalize the raster layout produced by high-level pixel reads.
+    ///
+    /// This layout reflects color-decoded output rather than the on-disk sample
+    /// organization. For example, palette and YCbCr rasters decode to RGB
+    /// pixels, and sub-byte integer rasters expand to 8-bit samples.
+    pub fn decoded_raster_layout(&self) -> Result<RasterLayout> {
+        let storage = self.raster_layout()?;
+        let color_model = self.color_model()?;
+        let decoded_samples = match &color_model {
+            ColorModel::Palette { extra_samples, .. } => 3 + extra_samples.len(),
+            ColorModel::Cmyk { extra_samples } => 3 + extra_samples.len(),
+            ColorModel::YCbCr { extra_samples, .. } => 3 + extra_samples.len(),
+            ColorModel::Grayscale { extra_samples, .. } => 1 + extra_samples.len(),
+            ColorModel::Rgb { extra_samples } => 3 + extra_samples.len(),
+            ColorModel::Separated {
+                color_channels,
+                extra_samples,
+                ..
+            } => *color_channels as usize + extra_samples.len(),
+            ColorModel::CieLab { extra_samples } => 3 + extra_samples.len(),
+            ColorModel::TransparencyMask => 1,
+        };
+        let (sample_format, bits_per_sample) = match &color_model {
+            ColorModel::Palette { color_map, .. } => {
+                if color_map_is_u8_equivalent(color_map) {
+                    (1, 8)
+                } else {
+                    (1, 16)
+                }
+            }
+            ColorModel::YCbCr { .. } | ColorModel::Cmyk { .. } => {
+                if storage.sample_format != 1 {
+                    return Err(Error::InvalidImageLayout(
+                        "decoded YCbCr/CMYK reads require unsigned integer source samples".into(),
+                    ));
+                }
+                (1, decoded_uint_bits(storage.bits_per_sample))
+            }
+            _ => (storage.sample_format, decoded_bits(storage.sample_format, storage.bits_per_sample)?),
+        };
+
+        Ok(RasterLayout {
+            width: storage.width,
+            height: storage.height,
+            samples_per_pixel: decoded_samples,
+            bits_per_sample,
+            bytes_per_sample: usize::from(bits_per_sample.div_ceil(8)),
+            sample_format,
+            planar_configuration: 1,
+            predictor: 1,
         })
     }
 
@@ -509,7 +565,10 @@ pub fn parse_ifd_chain(source: &dyn TiffSource, header: &TiffHeader) -> Result<V
 /// Parse a single IFD at the given file offset.
 pub fn parse_ifd_at(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result<Ifd> {
     let (tags, _) = read_ifd(source, header, offset)?;
-    Ok(Ifd { tags, index: 0 })
+    Ok(Ifd {
+        tags,
+        index: usize::try_from(offset).unwrap_or(usize::MAX),
+    })
 }
 
 fn read_ifd(source: &dyn TiffSource, header: &TiffHeader, offset: u64) -> Result<(Vec<Tag>, u64)> {
@@ -603,6 +662,41 @@ fn photometric_name(photometric: PhotometricInterpretation) -> &'static str {
     }
 }
 
+fn validate_sample_encoding(sample_format: u16, bits_per_sample: u16) -> Result<()> {
+    let supported = match sample_format {
+        1 => matches!(bits_per_sample, 1 | 2 | 4 | 8 | 16 | 32 | 64),
+        2 => matches!(bits_per_sample, 8 | 16 | 32 | 64),
+        3 => matches!(bits_per_sample, 32 | 64),
+        _ => false,
+    };
+    if !supported {
+        return Err(Error::UnsupportedBitsPerSample(bits_per_sample));
+    }
+    Ok(())
+}
+
+fn decoded_uint_bits(bits_per_sample: u16) -> u16 {
+    bits_per_sample.max(8)
+}
+
+fn decoded_bits(sample_format: u16, bits_per_sample: u16) -> Result<u16> {
+    if sample_format == 1 {
+        Ok(decoded_uint_bits(bits_per_sample))
+    } else {
+        validate_sample_encoding(sample_format, bits_per_sample)?;
+        Ok(bits_per_sample)
+    }
+}
+
+fn color_map_is_u8_equivalent(color_map: &ColorMap) -> bool {
+    color_map
+        .red()
+        .iter()
+        .chain(color_map.green().iter())
+        .chain(color_map.blue().iter())
+        .all(|&value| value % 257 == 0)
+}
+
 fn validate_color_model(ifd: &Ifd, samples_per_pixel: u16, bits_per_sample: u16) -> Result<()> {
     let color_model = ifd.color_model()?;
 
@@ -656,11 +750,21 @@ fn validate_color_model(ifd: &Ifd, samples_per_pixel: u16, bits_per_sample: u16)
             extra_samples,
             ..
         } => {
-            if *subsampling != [1, 1] {
+            if subsampling.contains(&0) {
                 return Err(Error::InvalidImageLayout(format!(
-                    "YCbCr subsampling {:?} is not supported for typed raster reads",
+                    "YCbCr subsampling {:?} must be positive",
                     subsampling
                 )));
+            }
+            if *subsampling != [1, 1] && !extra_samples.is_empty() {
+                return Err(Error::InvalidImageLayout(
+                    "subsampled YCbCr with ExtraSamples is not supported".into(),
+                ));
+            }
+            if *subsampling != [1, 1] && ifd.predictor() != 1 {
+                return Err(Error::InvalidImageLayout(
+                    "subsampled YCbCr does not support TIFF predictors".into(),
+                ));
             }
             validate_expected_samples(samples_per_pixel, 3, extra_samples.len())?;
         }
@@ -947,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_subsampled_ycbcr_for_typed_reads() {
+    fn accepts_subsampled_ycbcr_storage_layouts() {
         let ifd = make_ifd(vec![
             Tag::new(TAG_IMAGE_WIDTH, TagValue::Long(vec![2])),
             Tag::new(TAG_IMAGE_LENGTH, TagValue::Long(vec![2])),
@@ -958,9 +1062,8 @@ mod tests {
             Tag::new(TAG_YCBCR_SUBSAMPLING, TagValue::Short(vec![2, 2])),
         ]);
 
-        let error = ifd.raster_layout().unwrap_err();
-        assert!(
-            matches!(error, crate::error::Error::InvalidImageLayout(message) if message.contains("YCbCr subsampling"))
-        );
+        let layout = ifd.raster_layout().unwrap();
+        assert_eq!(layout.samples_per_pixel, 3);
+        assert_eq!(ifd.decoded_raster_layout().unwrap().samples_per_pixel, 3);
     }
 }

@@ -297,7 +297,19 @@ fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
     let palette_image = palette_file.read_image::<u8>(0).unwrap();
     let (palette_values, palette_offset) = palette_image.into_raw_vec_and_offset();
     assert_eq!(palette_offset, Some(0));
-    assert_eq!(palette_values, vec![0, 255, 1, 192, 2, 128, 3, 64]);
+    assert_eq!(
+        palette_values,
+        vec![
+            0, 255, 0, 255, //
+            1, 254, 0, 192, //
+            2, 253, 1, 128, //
+            3, 252, 1, 64
+        ]
+    );
+    let palette_samples = palette_file.read_image_samples::<u8>(0).unwrap();
+    let (palette_sample_values, palette_sample_offset) = palette_samples.into_raw_vec_and_offset();
+    assert_eq!(palette_sample_offset, Some(0));
+    assert_eq!(palette_sample_values, vec![0, 255, 1, 192, 2, 128, 3, 64]);
 
     let mut rgba_buf = Cursor::new(Vec::new());
     let mut rgba_writer = TiffWriter::new(&mut rgba_buf, WriteOptions::default()).unwrap();
@@ -348,6 +360,10 @@ fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
         cmyk_ifd.color_model().unwrap(),
         ColorModel::Cmyk { extra_samples } if extra_samples.is_empty()
     ));
+    let cmyk_image = cmyk_file.read_image::<u8>(0).unwrap();
+    let (cmyk_values, cmyk_offset) = cmyk_image.into_raw_vec_and_offset();
+    assert_eq!(cmyk_offset, Some(0));
+    assert_eq!(cmyk_values, vec![0, 0, 0, 0, 127, 191]);
 
     let mut ycbcr_buf = Cursor::new(Vec::new());
     let mut ycbcr_writer = TiffWriter::new(&mut ycbcr_buf, WriteOptions::default()).unwrap();
@@ -380,7 +396,11 @@ fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
     let ycbcr_image = ycbcr_file.read_image::<u8>(0).unwrap();
     let (ycbcr_values, ycbcr_offset) = ycbcr_image.into_raw_vec_and_offset();
     assert_eq!(ycbcr_offset, Some(0));
-    assert_eq!(ycbcr_values, vec![16, 128, 128, 200, 90, 240]);
+    assert_eq!(ycbcr_values, vec![16, 16, 16, 255, 133, 133]);
+    let ycbcr_samples = ycbcr_file.read_image_samples::<u8>(0).unwrap();
+    let (ycbcr_sample_values, ycbcr_sample_offset) = ycbcr_samples.into_raw_vec_and_offset();
+    assert_eq!(ycbcr_sample_offset, Some(0));
+    assert_eq!(ycbcr_sample_values, vec![16, 128, 128, 200, 90, 240]);
 }
 
 #[test]

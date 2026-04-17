@@ -40,6 +40,8 @@ use geokeys::GeoKeyDirectory;
 #[cfg(feature = "local")]
 use ndarray::ArrayD;
 #[cfg(feature = "local")]
+use std::collections::HashSet;
+#[cfg(feature = "local")]
 use std::path::Path;
 #[cfg(feature = "local")]
 use tiff_reader::{OpenOptions as TiffOpenOptions, TagValue, TiffFile, TiffSample};
@@ -278,6 +280,26 @@ impl GeoTiffFile {
             .map_err(Into::into)
     }
 
+    /// Decode the base-resolution raster into storage-domain typed samples.
+    pub fn read_raster_samples<T: TiffSample>(&self) -> Result<ArrayD<T>> {
+        self.tiff
+            .read_image_samples::<T>(self.base_ifd_index)
+            .map_err(Into::into)
+    }
+
+    /// Decode a base-resolution pixel window into storage-domain typed samples.
+    pub fn read_window_samples<T: TiffSample>(
+        &self,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        self.tiff
+            .read_window_samples::<T>(self.base_ifd_index, row_off, col_off, rows, cols)
+            .map_err(Into::into)
+    }
+
     /// Decode an overview raster into a typed ndarray.
     pub fn read_overview<T: TiffSample>(&self, overview_index: usize) -> Result<ArrayD<T>> {
         let overview = self
@@ -286,6 +308,20 @@ impl GeoTiffFile {
             .ok_or(Error::OverviewNotFound(overview_index))?;
         self.tiff
             .read_image_from_ifd::<T>(&overview.ifd)
+            .map_err(Into::into)
+    }
+
+    /// Decode an overview raster into storage-domain typed samples.
+    pub fn read_overview_samples<T: TiffSample>(
+        &self,
+        overview_index: usize,
+    ) -> Result<ArrayD<T>> {
+        let overview = self
+            .overview_ifds
+            .get(overview_index)
+            .ok_or(Error::OverviewNotFound(overview_index))?;
+        self.tiff
+            .read_image_samples_from_ifd::<T>(&overview.ifd)
             .map_err(Into::into)
     }
 
@@ -304,6 +340,24 @@ impl GeoTiffFile {
             .ok_or(Error::OverviewNotFound(overview_index))?;
         self.tiff
             .read_window_from_ifd::<T>(&overview.ifd, row_off, col_off, rows, cols)
+            .map_err(Into::into)
+    }
+
+    /// Decode an overview pixel window into storage-domain typed samples.
+    pub fn read_overview_window_samples<T: TiffSample>(
+        &self,
+        overview_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        let overview = self
+            .overview_ifds
+            .get(overview_index)
+            .ok_or(Error::OverviewNotFound(overview_index))?;
+        self.tiff
+            .read_window_samples_from_ifd::<T>(&overview.ifd, row_off, col_off, rows, cols)
             .map_err(Into::into)
     }
 }
@@ -351,18 +405,46 @@ fn collect_overview_ifds(
         .collect();
 
     if let Some(offsets) = base_ifd.sub_ifd_offsets() {
-        for offset in offsets {
-            let candidate = tiff.read_ifd_at_offset(offset)?;
-            if is_overview_ifd(base_ifd, &candidate) {
-                overviews.push(GeoImageIfd {
-                    top_level_ifd_index: None,
-                    ifd: candidate,
-                });
-            }
-        }
+        let mut seen_offsets = HashSet::new();
+        collect_subifd_overviews(tiff, base_ifd, &offsets, &mut seen_offsets, &mut overviews)?;
     }
 
+    overviews.sort_by(|lhs, rhs| {
+        rhs.ifd
+            .width()
+            .cmp(&lhs.ifd.width())
+            .then_with(|| rhs.ifd.height().cmp(&lhs.ifd.height()))
+            .then_with(|| lhs.top_level_ifd_index.cmp(&rhs.top_level_ifd_index))
+    });
+
     Ok(overviews)
+}
+
+#[cfg(feature = "local")]
+fn collect_subifd_overviews(
+    tiff: &TiffFile,
+    base_ifd: &tiff_reader::Ifd,
+    offsets: &[u64],
+    seen_offsets: &mut HashSet<u64>,
+    overviews: &mut Vec<GeoImageIfd>,
+) -> Result<()> {
+    for &offset in offsets {
+        if !seen_offsets.insert(offset) {
+            continue;
+        }
+
+        let candidate = tiff.read_ifd_at_offset(offset)?;
+        if is_overview_ifd(base_ifd, &candidate) {
+            overviews.push(GeoImageIfd {
+                top_level_ifd_index: None,
+                ifd: candidate.clone(),
+            });
+        }
+        if let Some(child_offsets) = candidate.sub_ifd_offsets() {
+            collect_subifd_overviews(tiff, base_ifd, &child_offsets, seen_offsets, overviews)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "local")]
@@ -690,9 +772,39 @@ mod tests {
         bytes[pointer_offset..pointer_offset + 4].copy_from_slice(&le_u32(value));
     }
 
+    fn overwrite_classic_inline_long_tag_at(
+        bytes: &mut [u8],
+        ifd_offset: usize,
+        tag_code: u16,
+        value: u32,
+    ) {
+        let entry_count = u16::from_le_bytes([bytes[ifd_offset], bytes[ifd_offset + 1]]) as usize;
+        let mut offset = ifd_offset + 2;
+        for _ in 0..entry_count {
+            let code = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            if code == tag_code {
+                bytes[offset + 8..offset + 12].copy_from_slice(&le_u32(value));
+                return;
+            }
+            offset += 12;
+        }
+        panic!("tag {tag_code} not found in classic TIFF at offset {ifd_offset}");
+    }
+
     fn first_ifd_next_pointer(bytes: &[u8]) -> u32 {
         let entry_count = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
         let pointer_offset = 10 + entry_count * 12;
+        u32::from_le_bytes([
+            bytes[pointer_offset],
+            bytes[pointer_offset + 1],
+            bytes[pointer_offset + 2],
+            bytes[pointer_offset + 3],
+        ])
+    }
+
+    fn ifd_next_pointer(bytes: &[u8], ifd_offset: usize) -> u32 {
+        let entry_count = u16::from_le_bytes([bytes[ifd_offset], bytes[ifd_offset + 1]]) as usize;
+        let pointer_offset = ifd_offset + 2 + entry_count * 12;
         u32::from_le_bytes([
             bytes[pointer_offset],
             bytes[pointer_offset + 1],
@@ -820,6 +932,92 @@ mod tests {
         let mut bytes = build_classic_tiff(&[base, overview]);
         let child_ifd_offset = first_ifd_next_pointer(&bytes);
         overwrite_classic_inline_long_tag(&mut bytes, 330, child_ifd_offset);
+        overwrite_first_ifd_next_pointer(&mut bytes, 0);
+        bytes
+    }
+
+    fn build_geotiff_with_nested_subifd_overviews() -> Vec<u8> {
+        let base = TestIfdSpec {
+            image_data: (1u8..=16).collect(),
+            entries: vec![
+                (256u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(16).to_vec()),
+                (330u16, 4u16, 1u32, le_u32(0).to_vec()),
+                (
+                    33550u16,
+                    12u16,
+                    3u32,
+                    [2.0, 2.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    33922u16,
+                    12u16,
+                    6u32,
+                    [0.0, 0.0, 0.0, 100.0, 200.0, 0.0]
+                        .iter()
+                        .flat_map(|value| le_f64(*value))
+                        .collect(),
+                ),
+                (
+                    34735u16,
+                    3u16,
+                    12u32,
+                    [1u16, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, 4326]
+                        .iter()
+                        .flat_map(|value| le_u16(*value))
+                        .collect(),
+                ),
+            ],
+        };
+        let overview = TestIfdSpec {
+            image_data: vec![50u8, 60, 70, 80],
+            entries: vec![
+                (254u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (256u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (330u16, 4u16, 1u32, le_u32(0).to_vec()),
+            ],
+        };
+        let nested = TestIfdSpec {
+            image_data: vec![99u8],
+            entries: vec![
+                (254u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (256u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(1).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(1).to_vec()),
+            ],
+        };
+
+        let mut bytes = build_classic_tiff(&[base, overview, nested]);
+        let child_ifd_offset = first_ifd_next_pointer(&bytes);
+        let grandchild_ifd_offset = ifd_next_pointer(&bytes, child_ifd_offset as usize);
+        overwrite_classic_inline_long_tag(&mut bytes, 330, child_ifd_offset);
+        overwrite_classic_inline_long_tag_at(
+            &mut bytes,
+            child_ifd_offset as usize,
+            330,
+            grandchild_ifd_offset,
+        );
         overwrite_first_ifd_next_pointer(&mut bytes, 0);
         bytes
     }
@@ -965,6 +1163,28 @@ mod tests {
         let (values, offset) = overview.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![99]);
+    }
+
+    #[test]
+    fn discovers_nested_subifd_overviews() {
+        let file = GeoTiffFile::from_bytes(build_geotiff_with_nested_subifd_overviews()).unwrap();
+        assert_eq!(file.overview_count(), 2);
+        assert_eq!(file.overview_ifd(0).unwrap().width(), 2);
+        assert_eq!(file.overview_ifd(1).unwrap().width(), 1);
+        assert!(matches!(
+            file.overview_ifd_index(0).unwrap_err(),
+            crate::error::Error::OverviewHasNoTopLevelIfdIndex(0)
+        ));
+        assert!(matches!(
+            file.overview_ifd_index(1).unwrap_err(),
+            crate::error::Error::OverviewHasNoTopLevelIfdIndex(1)
+        ));
+
+        let first = file.read_overview::<u8>(0).unwrap();
+        assert_eq!(first.shape(), &[2, 2]);
+        let second = file.read_overview::<u8>(1).unwrap();
+        assert_eq!(second.shape(), &[1, 1]);
+        assert_eq!(second[[0, 0]], 99);
     }
 
     #[test]

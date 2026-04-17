@@ -69,8 +69,8 @@ fn assert_gdal_hash_matches(path: &Path, overview_index: Option<usize>) {
     let expected_hash = reference_json["hash"].as_str().unwrap();
 
     let raster: ArrayD<u8> = match overview_index {
-        Some(index) => file.read_overview(index).unwrap(),
-        None => file.read_raster().unwrap(),
+        Some(index) => file.read_decoded_overview(index).unwrap(),
+        None => file.read_decoded_raster().unwrap(),
     };
     assert_shape(&raster, width, height, band_count);
     let (actual_len, actual_hash) = reference::array_hash(&raster);
@@ -85,7 +85,7 @@ fn assert_gdal_u8_pixels_close(path: &Path) {
     let path_str = path.to_str().unwrap();
     let expected = reference::run_reference_bytes(env!("CARGO_MANIFEST_DIR"), &["bytes", path_str]);
     let file = GeoTiffFile::open(path).unwrap();
-    let raster: ArrayD<u8> = file.read_raster().unwrap();
+    let raster: ArrayD<u8> = file.read_decoded_raster().unwrap();
     let (actual, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0), "unexpected array offset for {path_str}");
     reference::assert_u8_bytes_close(&actual, &expected, 6, 256, path_str);

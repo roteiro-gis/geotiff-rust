@@ -7,7 +7,7 @@ Pure-Rust TIFF/BigTIFF and GeoTIFF/COG readers and writers. No C libraries, no b
 | Crate | Description |
 |---|---|
 | `tiff-core` | Shared TIFF types: ByteOrder, tags, sample traits, compression/predictor enums, and color-model metadata |
-| `tiff-reader` | TIFF/BigTIFF decoder with mmap, strip/tile reads, decoded pixel reads, and raw sample access |
+| `tiff-reader` | TIFF/BigTIFF decoder with mmap, strip/tile reads, storage-domain reads, and explicit decoded pixel access |
 | `tiff-writer` | TIFF/BigTIFF encoder with streaming writes, compression, predictors, and BigTIFF |
 | `geotiff-core` | Shared GeoTIFF types: GeoKeyDirectory, CRS, GeoTransform, tag constants |
 | `geotiff-reader` | GeoTIFF reader with CRS/transform extraction, overview discovery, and optional HTTP COG access |
@@ -22,6 +22,11 @@ let file = GeoTiffFile::open("dem.tif")?;
 println!("EPSG: {:?}, bounds: {:?}", file.epsg(), file.geo_bounds());
 let raster: ndarray::ArrayD<f32> = file.read_raster()?;
 ```
+
+Use `read_decoded_raster` / `read_decoded_window` on `GeoTiffFile` and
+`read_decoded_image` / `read_decoded_window` on `TiffFile` when you want
+palette expansion or color-space conversion (for example palette TIFF,
+YCbCr, or CMYK) instead of storage-domain samples.
 
 ## Writing
 
@@ -90,8 +95,8 @@ with `bands(...)` and optional
 - Chunky and separate planar sample layouts
 - Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional)
 - Parallel decompression via Rayon
-- Decoded pixel reads into `ndarray::ArrayD` for standard TIFF color models, including palette expansion, YCbCr/CMYK conversion, and sub-byte grayscale/palette decode
-- Storage-domain typed sample reads via `read_*_samples` for 8/16/32/64-bit samples (u8 through f64)
+- Storage-domain typed sample reads via `read_*` / `read_*_samples`
+- Explicit decoded pixel reads via `read_decoded_*` for standard TIFF color models, including palette expansion, YCbCr/CMYK conversion, and sub-byte grayscale/palette decode
 - Structured photometric/color-model metadata: palette `ColorMap`, `ExtraSamples`, CMYK, and YCbCr
 - GeoKey directory, structured CRS metadata (projected, geographic, geocentric, vertical, compound), transforms, NoData
 - Overview discovery from both reduced-resolution top-level IFDs and recursive base-image SubIFD-backed overview trees

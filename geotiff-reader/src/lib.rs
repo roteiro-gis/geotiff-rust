@@ -260,14 +260,14 @@ impl GeoTiffFile {
         self.base_ifd_index
     }
 
-    /// Decode the base-resolution raster into a typed ndarray.
+    /// Decode the base-resolution raster into storage-domain typed samples.
     pub fn read_raster<T: TiffSample>(&self) -> Result<ArrayD<T>> {
         self.tiff
             .read_image::<T>(self.base_ifd_index)
             .map_err(Into::into)
     }
 
-    /// Decode a base-resolution pixel window into a typed ndarray.
+    /// Decode a base-resolution pixel window into storage-domain typed samples.
     pub fn read_window<T: TiffSample>(
         &self,
         row_off: usize,
@@ -280,7 +280,29 @@ impl GeoTiffFile {
             .map_err(Into::into)
     }
 
+    /// Decode the base-resolution raster into color-decoded typed pixels.
+    pub fn read_decoded_raster<T: TiffSample>(&self) -> Result<ArrayD<T>> {
+        self.tiff
+            .read_decoded_image::<T>(self.base_ifd_index)
+            .map_err(Into::into)
+    }
+
+    /// Decode a base-resolution pixel window into color-decoded typed pixels.
+    pub fn read_decoded_window<T: TiffSample>(
+        &self,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        self.tiff
+            .read_decoded_window::<T>(self.base_ifd_index, row_off, col_off, rows, cols)
+            .map_err(Into::into)
+    }
+
     /// Decode the base-resolution raster into storage-domain typed samples.
+    ///
+    /// This is an explicit alias for [`Self::read_raster`].
     pub fn read_raster_samples<T: TiffSample>(&self) -> Result<ArrayD<T>> {
         self.tiff
             .read_image_samples::<T>(self.base_ifd_index)
@@ -288,6 +310,8 @@ impl GeoTiffFile {
     }
 
     /// Decode a base-resolution pixel window into storage-domain typed samples.
+    ///
+    /// This is an explicit alias for [`Self::read_window`].
     pub fn read_window_samples<T: TiffSample>(
         &self,
         row_off: usize,
@@ -300,7 +324,7 @@ impl GeoTiffFile {
             .map_err(Into::into)
     }
 
-    /// Decode an overview raster into a typed ndarray.
+    /// Decode an overview raster into storage-domain typed samples.
     pub fn read_overview<T: TiffSample>(&self, overview_index: usize) -> Result<ArrayD<T>> {
         let overview = self
             .overview_ifds
@@ -311,11 +335,21 @@ impl GeoTiffFile {
             .map_err(Into::into)
     }
 
+    /// Decode an overview raster into color-decoded typed pixels.
+    pub fn read_decoded_overview<T: TiffSample>(&self, overview_index: usize) -> Result<ArrayD<T>> {
+        let overview = self
+            .overview_ifds
+            .get(overview_index)
+            .ok_or(Error::OverviewNotFound(overview_index))?;
+        self.tiff
+            .read_decoded_image_from_ifd::<T>(&overview.ifd)
+            .map_err(Into::into)
+    }
+
     /// Decode an overview raster into storage-domain typed samples.
-    pub fn read_overview_samples<T: TiffSample>(
-        &self,
-        overview_index: usize,
-    ) -> Result<ArrayD<T>> {
+    ///
+    /// This is an explicit alias for [`Self::read_overview`].
+    pub fn read_overview_samples<T: TiffSample>(&self, overview_index: usize) -> Result<ArrayD<T>> {
         let overview = self
             .overview_ifds
             .get(overview_index)
@@ -325,7 +359,7 @@ impl GeoTiffFile {
             .map_err(Into::into)
     }
 
-    /// Decode an overview pixel window into a typed ndarray.
+    /// Decode an overview pixel window into storage-domain typed samples.
     pub fn read_overview_window<T: TiffSample>(
         &self,
         overview_index: usize,
@@ -343,7 +377,27 @@ impl GeoTiffFile {
             .map_err(Into::into)
     }
 
+    /// Decode an overview pixel window into color-decoded typed pixels.
+    pub fn read_decoded_overview_window<T: TiffSample>(
+        &self,
+        overview_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        let overview = self
+            .overview_ifds
+            .get(overview_index)
+            .ok_or(Error::OverviewNotFound(overview_index))?;
+        self.tiff
+            .read_decoded_window_from_ifd::<T>(&overview.ifd, row_off, col_off, rows, cols)
+            .map_err(Into::into)
+    }
+
     /// Decode an overview pixel window into storage-domain typed samples.
+    ///
+    /// This is an explicit alias for [`Self::read_overview_window`].
     pub fn read_overview_window_samples<T: TiffSample>(
         &self,
         overview_index: usize,

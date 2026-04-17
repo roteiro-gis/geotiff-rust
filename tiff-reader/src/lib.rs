@@ -23,17 +23,17 @@
 //! println!("  height: {}", ifd.height());
 //! println!("  bits per sample: {:?}", ifd.bits_per_sample());
 //!
-//! let pixels: ndarray::ArrayD<u16> = file.read_image(0).unwrap();
+//! let samples: ndarray::ArrayD<u16> = file.read_image(0).unwrap();
 //! ```
 
 mod block_decode;
 pub mod cache;
-mod pixel;
 pub mod error;
 pub mod filters;
 pub mod header;
 pub mod ifd;
 pub mod io;
+mod pixel;
 pub mod source;
 pub mod strip;
 pub mod tag;
@@ -336,14 +336,26 @@ impl TiffFile {
         ifd::parse_ifd_at(self.source.as_ref(), &self.header, offset)
     }
 
-    /// Decode an image into native-endian interleaved pixel bytes.
+    /// Decode an image into native-endian interleaved storage sample bytes.
     pub fn read_image_bytes(&self, ifd_index: usize) -> Result<Vec<u8>> {
         let ifd = self.ifd(ifd_index)?;
         self.read_image_bytes_from_ifd(ifd)
     }
 
-    /// Decode an arbitrary IFD into native-endian interleaved pixel bytes.
+    /// Decode an arbitrary IFD into native-endian interleaved storage sample bytes.
     pub fn read_image_bytes_from_ifd(&self, ifd: &Ifd) -> Result<Vec<u8>> {
+        self.read_image_sample_bytes_from_ifd(ifd)
+    }
+
+    /// Decode an image into native-endian interleaved color-decoded pixel bytes.
+    pub fn read_decoded_image_bytes(&self, ifd_index: usize) -> Result<Vec<u8>> {
+        let ifd = self.ifd(ifd_index)?;
+        self.read_decoded_image_bytes_from_ifd(ifd)
+    }
+
+    /// Decode an arbitrary IFD into native-endian interleaved color-decoded
+    /// pixel bytes.
+    pub fn read_decoded_image_bytes_from_ifd(&self, ifd: &Ifd) -> Result<Vec<u8>> {
         let layout = ifd.decoded_raster_layout()?;
         self.decode_window_pixel_bytes(
             ifd,
@@ -357,12 +369,17 @@ impl TiffFile {
     }
 
     /// Decode an image into native-endian interleaved storage sample bytes.
+    ///
+    /// This is an explicit alias for [`Self::read_image_bytes`].
     pub fn read_image_sample_bytes(&self, ifd_index: usize) -> Result<Vec<u8>> {
         let ifd = self.ifd(ifd_index)?;
         self.read_image_sample_bytes_from_ifd(ifd)
     }
 
-    /// Decode an arbitrary IFD into native-endian interleaved storage sample bytes.
+    /// Decode an arbitrary IFD into native-endian interleaved storage sample
+    /// bytes.
+    ///
+    /// This is an explicit alias for [`Self::read_image_bytes_from_ifd`].
     pub fn read_image_sample_bytes_from_ifd(&self, ifd: &Ifd) -> Result<Vec<u8>> {
         let layout = ifd.raster_layout()?;
         self.decode_window_sample_bytes(
@@ -376,7 +393,8 @@ impl TiffFile {
         )
     }
 
-    /// Decode a pixel window into native-endian interleaved pixel bytes.
+    /// Decode a pixel window into native-endian interleaved storage sample
+    /// bytes.
     pub fn read_window_bytes(
         &self,
         ifd_index: usize,
@@ -389,7 +407,24 @@ impl TiffFile {
         self.read_window_bytes_from_ifd(ifd, row_off, col_off, rows, cols)
     }
 
-    /// Decode a pixel window into native-endian interleaved storage sample bytes.
+    /// Decode a pixel window into native-endian interleaved color-decoded pixel
+    /// bytes.
+    pub fn read_decoded_window_bytes(
+        &self,
+        ifd_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<u8>> {
+        let ifd = self.ifd(ifd_index)?;
+        self.read_decoded_window_bytes_from_ifd(ifd, row_off, col_off, rows, cols)
+    }
+
+    /// Decode a pixel window into native-endian interleaved storage sample
+    /// bytes.
+    ///
+    /// This is an explicit alias for [`Self::read_window_bytes`].
     pub fn read_window_sample_bytes(
         &self,
         ifd_index: usize,
@@ -403,8 +438,21 @@ impl TiffFile {
     }
 
     /// Decode a pixel window from an arbitrary IFD into native-endian
-    /// interleaved pixel bytes.
+    /// interleaved storage sample bytes.
     pub fn read_window_bytes_from_ifd(
+        &self,
+        ifd: &Ifd,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<u8>> {
+        self.read_window_sample_bytes_from_ifd(ifd, row_off, col_off, rows, cols)
+    }
+
+    /// Decode a pixel window from an arbitrary IFD into native-endian
+    /// interleaved color-decoded pixel bytes.
+    pub fn read_decoded_window_bytes_from_ifd(
         &self,
         ifd: &Ifd,
         row_off: usize,
@@ -419,6 +467,8 @@ impl TiffFile {
 
     /// Decode a pixel window from an arbitrary IFD into native-endian
     /// interleaved storage sample bytes.
+    ///
+    /// This is an explicit alias for [`Self::read_window_bytes_from_ifd`].
     pub fn read_window_sample_bytes_from_ifd(
         &self,
         ifd: &Ifd,
@@ -461,15 +511,20 @@ impl TiffFile {
     fn decode_window_pixel_bytes(&self, ifd: &Ifd, window: Window) -> Result<Vec<u8>> {
         let storage_layout = ifd.raster_layout()?;
         let sample_bytes = self.decode_window_sample_bytes(ifd, window)?;
-        let (_, pixels) =
-            pixel::decode_pixels(ifd, &storage_layout, window.cols, window.rows, &sample_bytes)?;
+        let (_, pixels) = pixel::decode_pixels(
+            ifd,
+            &storage_layout,
+            window.cols,
+            window.rows,
+            &sample_bytes,
+        )?;
         Ok(pixels)
     }
 
-    /// Decode a window into a typed ndarray.
+    /// Decode a window into a typed ndarray of storage-domain samples.
     ///
-    /// Single-channel decoded rasters are returned as shape `[rows, cols]`.
-    /// Multi-channel decoded rasters are returned as shape `[rows, cols, channels]`.
+    /// Single-band rasters are returned as shape `[rows, cols]`.
+    /// Multi-band rasters are returned as shape `[rows, cols, samples_per_pixel]`.
     pub fn read_window<T: TiffSample>(
         &self,
         ifd_index: usize,
@@ -482,8 +537,38 @@ impl TiffFile {
         self.read_window_from_ifd(ifd, row_off, col_off, rows, cols)
     }
 
-    /// Decode a window from an arbitrary IFD into a typed ndarray.
+    /// Decode a window from an arbitrary IFD into a typed ndarray of
+    /// storage-domain samples.
     pub fn read_window_from_ifd<T: TiffSample>(
+        &self,
+        ifd: &Ifd,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        self.read_window_samples_from_ifd(ifd, row_off, col_off, rows, cols)
+    }
+
+    /// Decode a window into a typed ndarray of color-decoded pixels.
+    ///
+    /// Single-channel decoded rasters are returned as shape `[rows, cols]`.
+    /// Multi-channel decoded rasters are returned as shape `[rows, cols, channels]`.
+    pub fn read_decoded_window<T: TiffSample>(
+        &self,
+        ifd_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        let ifd = self.ifd(ifd_index)?;
+        self.read_decoded_window_from_ifd(ifd, row_off, col_off, rows, cols)
+    }
+
+    /// Decode a window from an arbitrary IFD into a typed ndarray of
+    /// color-decoded pixels.
+    pub fn read_decoded_window_from_ifd<T: TiffSample>(
         &self,
         ifd: &Ifd,
         row_off: usize,
@@ -561,21 +646,36 @@ impl TiffFile {
             vec![window.rows, window.cols, layout.samples_per_pixel]
         };
         ArrayD::from_shape_vec(IxDyn(&shape), values).map_err(|e| {
-            Error::InvalidImageLayout(format!("failed to build ndarray from decoded raster: {e}"))
+            Error::InvalidImageLayout(format!("failed to build ndarray from storage raster: {e}"))
         })
     }
 
-    /// Decode an image into a typed ndarray.
+    /// Decode an image into a typed ndarray of storage-domain samples.
     ///
-    /// Single-channel decoded rasters are returned as shape `[height, width]`.
-    /// Multi-channel decoded rasters are returned as shape `[height, width, channels]`.
+    /// Single-band rasters are returned as shape `[height, width]`.
+    /// Multi-band rasters are returned as shape `[height, width, samples_per_pixel]`.
     pub fn read_image<T: TiffSample>(&self, ifd_index: usize) -> Result<ArrayD<T>> {
         let ifd = self.ifd(ifd_index)?;
         self.read_image_from_ifd(ifd)
     }
 
-    /// Decode an arbitrary IFD into a typed ndarray.
+    /// Decode an arbitrary IFD into a typed ndarray of storage-domain samples.
     pub fn read_image_from_ifd<T: TiffSample>(&self, ifd: &Ifd) -> Result<ArrayD<T>> {
+        self.read_image_samples_from_ifd(ifd)
+    }
+
+    /// Decode an image into a typed ndarray of color-decoded pixels.
+    ///
+    /// Single-channel decoded rasters are returned as shape `[height, width]`.
+    /// Multi-channel decoded rasters are returned as shape
+    /// `[height, width, channels]`.
+    pub fn read_decoded_image<T: TiffSample>(&self, ifd_index: usize) -> Result<ArrayD<T>> {
+        let ifd = self.ifd(ifd_index)?;
+        self.read_decoded_image_from_ifd(ifd)
+    }
+
+    /// Decode an arbitrary IFD into a typed ndarray of color-decoded pixels.
+    pub fn read_decoded_image_from_ifd<T: TiffSample>(&self, ifd: &Ifd) -> Result<ArrayD<T>> {
         let layout = ifd.decoded_raster_layout()?;
         if !T::matches_layout(&layout) {
             return Err(Error::TypeMismatch {
@@ -587,16 +687,20 @@ impl TiffFile {
             });
         }
 
-        self.read_window_from_ifd(ifd, 0, 0, layout.height, layout.width)
+        self.read_decoded_window_from_ifd(ifd, 0, 0, layout.height, layout.width)
     }
 
     /// Decode an image into a typed ndarray of storage-domain samples.
+    ///
+    /// This is an explicit alias for [`Self::read_image`].
     pub fn read_image_samples<T: TiffSample>(&self, ifd_index: usize) -> Result<ArrayD<T>> {
         let ifd = self.ifd(ifd_index)?;
         self.read_image_samples_from_ifd(ifd)
     }
 
     /// Decode an arbitrary IFD into a typed ndarray of storage-domain samples.
+    ///
+    /// This is an explicit alias for [`Self::read_image_from_ifd`].
     pub fn read_image_samples_from_ifd<T: TiffSample>(&self, ifd: &Ifd) -> Result<ArrayD<T>> {
         let layout = ifd.raster_layout()?;
         if !T::matches_layout(&layout) {
@@ -1120,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_subbyte_palette_pixels_and_exposes_unpacked_sample_bytes() {
+    fn keeps_subbyte_palette_reads_raw_and_offers_explicit_decoded_pixels() {
         let mut color_map = Vec::new();
         color_map.extend((0u16..16).map(|value| value * 17 * 257));
         color_map.extend((0u16..16).map(|value| (15 - value) * 17 * 257));
@@ -1132,12 +1236,23 @@ mod tests {
             &[
                 (258, 3, 1, inline_short(4)),
                 (262, 3, 1, inline_short(3)),
-                (320, 3, color_map.len() as u32, color_map.iter().flat_map(|value| le_u16(*value)).collect()),
+                (
+                    320,
+                    3,
+                    color_map.len() as u32,
+                    color_map.iter().flat_map(|value| le_u16(*value)).collect(),
+                ),
             ],
         );
         let file = TiffFile::from_bytes(data).unwrap();
 
         let image = file.read_image::<u8>(0).unwrap();
+        assert_eq!(image.shape(), &[1, 4]);
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![0, 1, 2, 3]);
+
+        let image = file.read_decoded_image::<u8>(0).unwrap();
         assert_eq!(image.shape(), &[1, 4, 3]);
         let (values, offset) = image.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
@@ -1156,13 +1271,18 @@ mod tests {
     }
 
     #[test]
-    fn decodes_subsampled_ycbcr_pixels_and_preserves_sample_reads() {
+    fn keeps_subsampled_ycbcr_reads_raw_and_offers_explicit_decoded_pixels() {
         let data = build_stripped_tiff(
             2,
             2,
             &[10u8, 20, 30, 40, 128, 128],
             &[
-                (258, 3, 3, [8u16, 8, 8].into_iter().flat_map(le_u16).collect()),
+                (
+                    258,
+                    3,
+                    3,
+                    [8u16, 8, 8].into_iter().flat_map(le_u16).collect(),
+                ),
                 (262, 3, 1, inline_short(6)),
                 (277, 3, 1, inline_short(3)),
                 (530, 3, 2, [2u16, 2].into_iter().flat_map(le_u16).collect()),
@@ -1171,6 +1291,20 @@ mod tests {
         let file = TiffFile::from_bytes(data).unwrap();
 
         let image = file.read_image::<u8>(0).unwrap();
+        assert_eq!(image.shape(), &[2, 2, 3]);
+        let (values, offset) = image.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(
+            values,
+            vec![
+                10, 128, 128, //
+                20, 128, 128, //
+                30, 128, 128, //
+                40, 128, 128
+            ]
+        );
+
+        let image = file.read_decoded_image::<u8>(0).unwrap();
         assert_eq!(image.shape(), &[2, 2, 3]);
         let (rgb, offset) = image.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));

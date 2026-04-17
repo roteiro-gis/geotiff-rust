@@ -294,7 +294,7 @@ fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
         }
         other => panic!("unexpected palette color model: {other:?}"),
     }
-    let palette_image = palette_file.read_image::<u8>(0).unwrap();
+    let palette_image = palette_file.read_decoded_image::<u8>(0).unwrap();
     let (palette_values, palette_offset) = palette_image.into_raw_vec_and_offset();
     assert_eq!(palette_offset, Some(0));
     assert_eq!(
@@ -360,7 +360,7 @@ fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
         cmyk_ifd.color_model().unwrap(),
         ColorModel::Cmyk { extra_samples } if extra_samples.is_empty()
     ));
-    let cmyk_image = cmyk_file.read_image::<u8>(0).unwrap();
+    let cmyk_image = cmyk_file.read_decoded_image::<u8>(0).unwrap();
     let (cmyk_values, cmyk_offset) = cmyk_image.into_raw_vec_and_offset();
     assert_eq!(cmyk_offset, Some(0));
     assert_eq!(cmyk_values, vec![0, 0, 0, 0, 127, 191]);
@@ -393,7 +393,7 @@ fn palette_rgba_cmyk_and_ycbcr_metadata_roundtrip() {
             extra_samples
         } if subsampling == [1, 1] && extra_samples.is_empty()
     ));
-    let ycbcr_image = ycbcr_file.read_image::<u8>(0).unwrap();
+    let ycbcr_image = ycbcr_file.read_decoded_image::<u8>(0).unwrap();
     let (ycbcr_values, ycbcr_offset) = ycbcr_image.into_raw_vec_and_offset();
     assert_eq!(ycbcr_offset, Some(0));
     assert_eq!(ycbcr_values, vec![16, 16, 16, 255, 133, 133]);

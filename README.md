@@ -7,11 +7,11 @@ Pure-Rust TIFF/BigTIFF and GeoTIFF/COG readers and writers. No C libraries, no b
 | Crate | Description |
 |---|---|
 | `tiff-core` | Shared TIFF types: ByteOrder, tags, sample traits, compression/predictor enums, and color-model metadata |
-| `tiff-reader` | TIFF/BigTIFF decoder with mmap, strip/tile reads, and typed raster decode |
+| `tiff-reader` | TIFF/BigTIFF decoder with mmap, strip/tile reads, and typed raw-sample raster decode |
 | `tiff-writer` | TIFF/BigTIFF encoder with streaming writes, compression, predictors, and BigTIFF |
 | `geotiff-core` | Shared GeoTIFF types: GeoKeyDirectory, CRS, GeoTransform, tag constants |
 | `geotiff-reader` | GeoTIFF reader with CRS/transform extraction, overview discovery, and optional HTTP COG access |
-| `geotiff-writer` | GeoTIFF/COG writer with fluent builder, streaming tile writes, and overview generation |
+| `geotiff-writer` | GeoTIFF/COG writer with fluent builder, tile-wise GeoTIFF writes, and overview generation |
 
 ## Reading
 
@@ -90,10 +90,11 @@ with `bands(...)` and optional
 - Chunky and separate planar sample layouts
 - Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional)
 - Parallel decompression via Rayon
-- Typed raster reads into `ndarray::ArrayD` (u8 through f64)
+- Typed raw-sample reads into `ndarray::ArrayD` for 8/16/32/64-bit samples (u8 through f64)
 - Structured photometric/color-model metadata: palette `ColorMap`, `ExtraSamples`, CMYK, and YCbCr
+- Palette/YCbCr typed reads currently expose raw indices/triplets rather than palette-expanded or colorspace-converted pixels
 - GeoKey directory, structured CRS metadata (projected, geographic, geocentric, vertical, compound), transforms, NoData
-- Overview discovery from both reduced-resolution top-level IFDs and SubIFD trees
+- Overview discovery from both reduced-resolution top-level IFDs and base-image SubIFD-backed overviews
 - Optional HTTP range-backed remote COG access
 
 **Write**
@@ -103,9 +104,10 @@ with `bands(...)` and optional
 - Predictors: horizontal differencing, floating-point byte interleaving
 - Chunky and separate planar multi-band layouts and all sample types (u8 through f64)
 - Photometric/color-model tags: palette `ColorMap`, `ExtraSamples` alpha, CMYK (`Separated` + `InkSet`), and YCbCr 4:4:4
-- Streaming tile-by-tile writes for large rasters
+- Streaming tile-by-tile GeoTIFF writes for large rasters
 - GeoTIFF metadata: projected/geographic/geocentric/vertical compound CRS keys, pixel scale, origin, affine transforms, NoData
 - COG output with GDAL-compatible ghost-area metadata, overview generation (nearest-neighbor, average), and multi-band chunky/planar rasters
+- Buffered tile-wise COG assembly via `CogTileWriter` (the base raster is accumulated in memory before final emission)
 
 ## Codec Notes
 

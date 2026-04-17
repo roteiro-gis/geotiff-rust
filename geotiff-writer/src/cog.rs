@@ -488,13 +488,9 @@ impl CogBuilder {
         let ovr_w = (self.inner.width as usize).div_ceil(level as usize) as u32;
         let ovr_h = (self.inner.height as usize).div_ceil(level as usize) as u32;
 
-        let mut builder = ImageBuilder::new(ovr_w, ovr_h)
-            .sample_type::<T>()
-            .samples_per_pixel(self.inner.bands as u16)
-            .compression(self.inner.compression)
-            .predictor(self.inner.predictor)
-            .photometric(self.inner.photometric)
-            .planar_configuration(self.inner.planar_configuration)
+        let mut builder = self
+            .inner
+            .to_sized_image_builder::<T>(ovr_w, ovr_h)
             .tiles(tile_width, tile_height)
             .overview();
 
@@ -510,6 +506,20 @@ impl CogBuilder {
         }
 
         builder
+    }
+
+    fn validate_images<T: NumericSample>(
+        &self,
+        overview_levels: &[u32],
+        tile_width: u32,
+        tile_height: u32,
+    ) -> Result<()> {
+        self.inner.to_image_builder::<T>().validate()?;
+        for &level in overview_levels {
+            self.overview_image_builder::<T>(level, tile_width, tile_height)
+                .validate()?;
+        }
+        Ok(())
     }
 
     fn build_images<T: NumericSample>(
@@ -600,6 +610,7 @@ impl CogBuilder {
         let tw = self.inner.tile_width.unwrap_or(256) as usize;
         let th = self.inner.tile_height.unwrap_or(256) as usize;
         let overview_levels = self.normalized_overview_levels()?;
+        self.validate_images::<T>(&overview_levels, tw as u32, th as u32)?;
         let nodata = parse_nodata_value::<T>(&self.inner.nodata);
         let prefix = gdal_structural_metadata_bytes(self.inner.planar_configuration);
         let mut spool = BlockSpool::new()?;
@@ -648,7 +659,7 @@ impl CogBuilder {
         Ok(())
     }
 
-    /// Create a streaming COG tile writer.
+    /// Create a buffered COG tile writer.
     pub fn tile_writer<T: NumericSample, W: Write + Seek>(
         &self,
         sink: W,
@@ -656,7 +667,7 @@ impl CogBuilder {
         CogTileWriter::new(self.clone(), sink)
     }
 
-    /// Create a streaming COG tile writer to a file.
+    /// Create a buffered COG tile writer to a file.
     pub fn tile_writer_file<T: NumericSample, P: AsRef<Path>>(
         &self,
         path: P,
@@ -667,7 +678,10 @@ impl CogBuilder {
     }
 }
 
-/// Streaming COG tile writer.
+/// Buffered COG tile writer.
+///
+/// Tiles are written incrementally into an in-memory full-resolution raster,
+/// and the final COG layout is emitted on `finish()`.
 pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     sink: W,
     cog: CogBuilder,
@@ -697,6 +711,7 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         let tiles_across = (cog.inner.width as usize).div_ceil(tw as usize);
         let tiles_down = (cog.inner.height as usize).div_ceil(th as usize);
         let overview_levels = cog.normalized_overview_levels()?;
+        cog.validate_images::<T>(&overview_levels, tw, th)?;
         let nodata_value = parse_nodata_value::<T>(&cog.inner.nodata);
         let fill_value = nodata_value.unwrap_or_else(T::zero);
 

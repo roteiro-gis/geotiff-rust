@@ -410,7 +410,17 @@ impl GeoTiffBuilder {
 
     /// Build an ImageBuilder from this GeoTiffBuilder for a given sample type.
     pub(crate) fn to_image_builder<T: WriteSample>(&self) -> ImageBuilder {
-        let mut ib = ImageBuilder::new(self.width, self.height)
+        self.to_sized_image_builder::<T>(self.width, self.height)
+    }
+
+    /// Build an ImageBuilder with overridden raster dimensions while
+    /// preserving codec, color-model, layout, and GeoTIFF metadata settings.
+    pub(crate) fn to_sized_image_builder<T: WriteSample>(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> ImageBuilder {
+        let mut ib = ImageBuilder::new(width, height)
             .sample_type::<T>()
             .samples_per_pixel(self.bands as u16)
             .compression(self.compression)

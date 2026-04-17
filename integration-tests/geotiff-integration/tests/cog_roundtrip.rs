@@ -259,6 +259,54 @@ fn cog_validates_and_dedupes_overview_levels() {
 }
 
 #[test]
+fn cog_reuses_writer_validation_for_invalid_layouts() {
+    let rgb = Array3::<u8>::zeros((16, 16, 3));
+    let mut chunky_jpeg_buf = Cursor::new(Vec::new());
+    let err = CogBuilder::new(
+        GeoTiffBuilder::new(16, 16)
+            .bands(3)
+            .photometric(PhotometricInterpretation::Rgb)
+            .tile_size(16, 16)
+            .jpeg_options(JpegOptions { quality: 90 }),
+    )
+    .write_3d_to(&mut chunky_jpeg_buf, rgb.view())
+    .unwrap_err();
+    assert!(
+        matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("one sample per encoded block"))
+    );
+
+    let mut chunky_jpeg_streaming_buf = Cursor::new(Vec::new());
+    let err = match CogBuilder::new(
+        GeoTiffBuilder::new(16, 16)
+            .bands(3)
+            .photometric(PhotometricInterpretation::Rgb)
+            .tile_size(16, 16)
+            .jpeg_options(JpegOptions { quality: 90 }),
+    )
+    .tile_writer::<u8, _>(&mut chunky_jpeg_streaming_buf)
+    {
+        Ok(_) => panic!("expected invalid chunky JPEG COG tile writer to fail validation"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("one sample per encoded block"))
+    );
+
+    let palette = Array2::<u8>::zeros((16, 16));
+    let mut palette_buf = Cursor::new(Vec::new());
+    let err = CogBuilder::new(
+        GeoTiffBuilder::new(16, 16)
+            .photometric(PhotometricInterpretation::Palette)
+            .tile_size(16, 16),
+    )
+    .write_2d_to(&mut palette_buf, palette.view())
+    .unwrap_err();
+    assert!(
+        matches!(err, GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(message)) if message.contains("ColorMap"))
+    );
+}
+
+#[test]
 fn cog_average_overviews_ignore_nodata_for_oneshot_and_streaming_writes() {
     let nodata = -1.0f32;
     let oneshot = Array2::from_shape_vec(

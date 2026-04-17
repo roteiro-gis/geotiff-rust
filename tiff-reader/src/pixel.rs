@@ -27,7 +27,9 @@ pub(crate) fn decode_pixels(
     let expected_input_len = pixel_count
         .checked_mul(input_channels)
         .and_then(|samples| samples.checked_mul(storage_layout.bytes_per_sample))
-        .ok_or_else(|| Error::InvalidImageLayout("decoded sample buffer length overflows usize".into()))?;
+        .ok_or_else(|| {
+            Error::InvalidImageLayout("decoded sample buffer length overflows usize".into())
+        })?;
     if sample_bytes.len() != expected_input_len {
         return Err(Error::InvalidImageLayout(format!(
             "decoded sample buffer length {} does not match expected {expected_input_len}",
@@ -39,7 +41,9 @@ pub(crate) fn decode_pixels(
         pixel_count
             .checked_mul(decoded_layout.samples_per_pixel)
             .and_then(|samples| samples.checked_mul(decoded_layout.bytes_per_sample))
-            .ok_or_else(|| Error::InvalidImageLayout("decoded output buffer length overflows usize".into()))?,
+            .ok_or_else(|| {
+                Error::InvalidImageLayout("decoded output buffer length overflows usize".into())
+            })?,
     );
 
     match color_model {
@@ -172,8 +176,11 @@ pub(crate) fn decode_pixels(
                     read_uint_sample(sample_bytes, storage_layout, pixel, 3),
                     storage_layout.bits_per_sample,
                 );
-                for value in [(1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k)]
-                {
+                for value in [
+                    (1.0 - c) * (1.0 - k),
+                    (1.0 - m) * (1.0 - k),
+                    (1.0 - y) * (1.0 - k),
+                ] {
                     write_uint_sample(
                         &mut out,
                         denormalize_uint_sample(value, decoded_layout.bits_per_sample),
@@ -191,22 +198,23 @@ pub(crate) fn decode_pixels(
                 );
             }
         }
-        ColorModel::YCbCr {
-            extra_samples, ..
-        } => {
+        ColorModel::YCbCr { extra_samples, .. } => {
             if Compression::from_code(ifd.compression()) == Some(Compression::Jpeg) {
                 return Ok((decoded_layout, sample_bytes.to_vec()));
             }
-            let reference_black_white =
-                ifd.reference_black_white()?
-                    .unwrap_or_else(|| default_reference_black_white(storage_layout.bits_per_sample));
+            let reference_black_white = ifd
+                .reference_black_white()?
+                .unwrap_or_else(|| default_reference_black_white(storage_layout.bits_per_sample));
             let chroma_denominator = bit_max(storage_layout.bits_per_sample) as f64;
             for pixel in 0..pixel_count {
                 let y = read_uint_sample(sample_bytes, storage_layout, pixel, 0) as f64;
                 let cb = read_uint_sample(sample_bytes, storage_layout, pixel, 1) as f64;
                 let cr = read_uint_sample(sample_bytes, storage_layout, pixel, 2) as f64;
-                let y_norm =
-                    normalize_reference_sample(y, reference_black_white[0], reference_black_white[1]);
+                let y_norm = normalize_reference_sample(
+                    y,
+                    reference_black_white[0],
+                    reference_black_white[1],
+                );
                 let cb_delta = (cb - reference_black_white[2]) / chroma_denominator;
                 let cr_delta = (cr - reference_black_white[4]) / chroma_denominator;
                 let r = clamp01(y_norm + 1.402 * cr_delta);

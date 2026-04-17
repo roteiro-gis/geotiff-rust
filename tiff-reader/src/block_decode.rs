@@ -60,7 +60,9 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
             decoded.len()
         } else if request.layout.bits_per_sample < 8 {
             if request.layout.planar_configuration == 1 {
-                request.layout.packed_row_bytes_for_width(request.block_width)
+                request
+                    .layout
+                    .packed_row_bytes_for_width(request.block_width)
             } else {
                 request
                     .layout
@@ -130,7 +132,9 @@ fn expected_encoded_block_len(request: &BlockDecodeRequest<'_>, samples: usize) 
 
     let row_bytes = if request.layout.bits_per_sample < 8 {
         if request.layout.planar_configuration == 1 {
-            request.layout.packed_row_bytes_for_width(request.block_width)
+            request
+                .layout
+                .packed_row_bytes_for_width(request.block_width)
         } else {
             request
                 .layout
@@ -236,7 +240,9 @@ fn expand_subsampled_ycbcr(
             .checked_mul(block_height)
             .and_then(|pixels| pixels.checked_mul(3))
             .and_then(|samples| samples.checked_mul(bytes_per_sample))
-            .ok_or_else(|| Error::InvalidImageLayout("expanded YCbCr block overflows usize".into()))?
+            .ok_or_else(|| Error::InvalidImageLayout(
+                "expanded YCbCr block overflows usize".into()
+            ))?
     ];
 
     let mut offset = 0usize;
@@ -263,12 +269,16 @@ fn expand_subsampled_ycbcr(
                         .checked_mul(block_width)
                         .and_then(|value| value.checked_add(col))
                         .ok_or_else(|| {
-                            Error::InvalidImageLayout("expanded YCbCr pixel index overflows usize".into())
+                            Error::InvalidImageLayout(
+                                "expanded YCbCr pixel index overflows usize".into(),
+                            )
                         })?;
                     let dest = pixel_index
                         .checked_mul(3 * bytes_per_sample)
                         .ok_or_else(|| {
-                            Error::InvalidImageLayout("expanded YCbCr output index overflows usize".into())
+                            Error::InvalidImageLayout(
+                                "expanded YCbCr output index overflows usize".into(),
+                            )
                         })?;
                     let y_offset = (dy * h + dx) * bytes_per_sample;
                     expanded[dest..dest + bytes_per_sample]

@@ -249,7 +249,11 @@ impl<T: NumericSample> RawBlockCache<T> {
         store: &mut RawTileStore<T>,
         block_index: usize,
     ) -> Result<&'a [T]> {
-        if let Some(position) = self.entries.iter().position(|(index, _)| *index == block_index) {
+        if let Some(position) = self
+            .entries
+            .iter()
+            .position(|(index, _)| *index == block_index)
+        {
             let entry = self.entries.remove(position);
             self.entries.push(entry);
             return Ok(self.entries.last().unwrap().1.as_slice());
@@ -282,7 +286,12 @@ struct OverviewLevelSpec<T: NumericSample> {
 }
 
 impl<'a, T: NumericSample> RawTileSource<'a, T> {
-    fn new(store: &'a mut RawTileStore<T>, written: &'a [bool], fill_value: T, grid: RawTileGrid) -> Self {
+    fn new(
+        store: &'a mut RawTileStore<T>,
+        written: &'a [bool],
+        fill_value: T,
+        grid: RawTileGrid,
+    ) -> Self {
         Self {
             store,
             written,
@@ -309,9 +318,7 @@ impl<'a, T: NumericSample> RawTileSource<'a, T> {
         if !self.written[block_index] {
             return Ok(None);
         }
-        self.cache
-            .get_or_load(self.store, block_index)
-            .map(Some)
+        self.cache.get_or_load(self.store, block_index).map(Some)
     }
 
     fn sample_at(&mut self, row: usize, col: usize, band: usize) -> Result<T> {
@@ -1045,7 +1052,10 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         }
 
         let tile_index = tile_row * self.tiles_across as usize + tile_col;
-        if matches!(self.planar_configuration, tiff_core::PlanarConfiguration::Planar) {
+        if matches!(
+            self.planar_configuration,
+            tiff_core::PlanarConfiguration::Planar
+        ) {
             let tiles_per_plane = self.tiles_across as usize * self.tiles_down as usize;
             for band in 0..bands {
                 let mut padded = vec![self.fill_value; tw * th];
@@ -1105,12 +1115,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             planar_configuration: self.planar_configuration,
         };
         {
-            let mut source = RawTileSource::new(
-                &mut self.base_tiles,
-                &self.written,
-                self.fill_value,
-                grid,
-            );
+            let mut source =
+                RawTileSource::new(&mut self.base_tiles, &self.written, self.fill_value, grid);
 
             for idx in (0..self.overview_levels.len()).rev() {
                 let level = self.overview_levels[idx] as usize;
@@ -1121,12 +1127,8 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
                     resampling: self.resampling,
                     nodata: self.nodata_value,
                 };
-                images[1 + idx].blocks = spool_overview_from_source(
-                    &mut spool,
-                    &mut source,
-                    spec,
-                    plan,
-                )?;
+                images[1 + idx].blocks =
+                    spool_overview_from_source(&mut spool, &mut source, spec, plan)?;
             }
         }
 
@@ -1274,8 +1276,7 @@ fn build_resampled_chunky_block<T: NumericSample>(
     tile_col: usize,
     plan: TileWritePlan,
 ) -> Result<Vec<T>> {
-    let mut block =
-        vec![source.fill_value; plan.tile_width * plan.tile_height * source.grid.bands];
+    let mut block = vec![source.fill_value; plan.tile_width * plan.tile_height * source.grid.bands];
     for row in 0..plan.tile_height {
         let overview_row = tile_row * plan.tile_height + row;
         if overview_row >= spec.overview_height {
@@ -1289,14 +1290,14 @@ fn build_resampled_chunky_block<T: NumericSample>(
             for band in 0..source.grid.bands {
                 block[(row * plan.tile_width + col) * source.grid.bands + band] =
                     resample_overview_value(
-                    source,
-                    spec.level,
-                    overview_row,
-                    overview_col,
-                    band,
-                    spec.resampling,
-                    spec.nodata,
-                )?;
+                        source,
+                        spec.level,
+                        overview_row,
+                        overview_col,
+                        band,
+                        spec.resampling,
+                        spec.nodata,
+                    )?;
             }
         }
     }
@@ -1338,14 +1339,8 @@ fn spool_overview_from_source<T: NumericSample>(
                 for tile_col in 0..tiles_across {
                     let tile_index = tile_row * tiles_across + tile_col;
                     let block_index = band * tiles_per_plane + tile_index;
-                    let block = build_resampled_planar_block(
-                        source,
-                        spec,
-                        tile_row,
-                        tile_col,
-                        band,
-                        plan,
-                    )?;
+                    let block =
+                        build_resampled_planar_block(source, spec, tile_row, tile_col, band, plan)?;
                     blocks[block_index] = spool_cog_block(
                         spool,
                         &block,
@@ -1367,13 +1362,7 @@ fn spool_overview_from_source<T: NumericSample>(
         for tile_row in 0..tiles_down {
             for tile_col in 0..tiles_across {
                 let block_index = tile_row * tiles_across + tile_col;
-                let block = build_resampled_chunky_block(
-                    source,
-                    spec,
-                    tile_row,
-                    tile_col,
-                    plan,
-                )?;
+                let block = build_resampled_chunky_block(source, spec, tile_row, tile_col, plan)?;
                 blocks[block_index] = spool_cog_block(
                     spool,
                     &block,

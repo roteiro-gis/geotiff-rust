@@ -499,7 +499,10 @@ impl Ifd {
                 }
                 (1, decoded_uint_bits(storage.bits_per_sample))
             }
-            _ => (storage.sample_format, decoded_bits(storage.sample_format, storage.bits_per_sample)?),
+            _ => (
+                storage.sample_format,
+                decoded_bits(storage.sample_format, storage.bits_per_sample)?,
+            ),
         };
 
         Ok(RasterLayout {

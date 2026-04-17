@@ -795,18 +795,18 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lerc-band-materialize"
-version = "0.2.0"
-source = "git+https://github.com/roteiro-gis/lerc-rust#bb0df6c2abfcaff3b1f20ab73857e3687e9f8af1"
+version = "0.3.0"
+source = "git+https://github.com/roteiro-gis/lerc-rust#4d3f057f96a7bd176885340c2422f7271fe87ffd"
 
 [[package]]
 name = "lerc-core"
-version = "0.2.0"
-source = "git+https://github.com/roteiro-gis/lerc-rust#bb0df6c2abfcaff3b1f20ab73857e3687e9f8af1"
+version = "0.3.0"
+source = "git+https://github.com/roteiro-gis/lerc-rust#4d3f057f96a7bd176885340c2422f7271fe87ffd"
 
 [[package]]
 name = "lerc-reader"
-version = "0.2.0"
-source = "git+https://github.com/roteiro-gis/lerc-rust#bb0df6c2abfcaff3b1f20ab73857e3687e9f8af1"
+version = "0.3.0"
+source = "git+https://github.com/roteiro-gis/lerc-rust#4d3f057f96a7bd176885340c2422f7271fe87ffd"
 dependencies = [
  "lerc-band-materialize",
  "lerc-core",
@@ -815,8 +815,8 @@ dependencies = [
 
 [[package]]
 name = "lerc-writer"
-version = "0.2.0"
-source = "git+https://github.com/roteiro-gis/lerc-rust#bb0df6c2abfcaff3b1f20ab73857e3687e9f8af1"
+version = "0.3.0"
+source = "git+https://github.com/roteiro-gis/lerc-rust#4d3f057f96a7bd176885340c2422f7271fe87ffd"
 dependencies = [
  "lerc-core",
 ]

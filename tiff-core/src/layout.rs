@@ -16,11 +16,34 @@ impl RasterLayout {
         self.samples_per_pixel * self.bytes_per_sample
     }
 
+    pub fn packed_row_bytes_for_width(&self, width: usize) -> usize {
+        width
+            .checked_mul(self.samples_per_pixel)
+            .and_then(|samples| samples.checked_mul(self.bits_per_sample as usize))
+            .map(|bits| bits.div_ceil(8))
+            .unwrap_or(usize::MAX)
+    }
+
     pub fn row_bytes(&self) -> usize {
         self.width * self.pixel_stride_bytes()
     }
 
+    pub fn packed_row_bytes(&self) -> usize {
+        self.packed_row_bytes_for_width(self.width)
+    }
+
+    pub fn packed_sample_plane_row_bytes_for_width(&self, width: usize) -> usize {
+        width
+            .checked_mul(self.bits_per_sample as usize)
+            .map(|bits| bits.div_ceil(8))
+            .unwrap_or(usize::MAX)
+    }
+
     pub fn sample_plane_row_bytes(&self) -> usize {
         self.width * self.bytes_per_sample
+    }
+
+    pub fn packed_sample_plane_row_bytes(&self) -> usize {
+        self.packed_sample_plane_row_bytes_for_width(self.width)
     }
 }

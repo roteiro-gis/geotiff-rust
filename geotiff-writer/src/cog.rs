@@ -12,7 +12,7 @@
 //! all metadata in a single request from the start of the file.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use ndarray::{Array3, ArrayView2, ArrayView3, Axis};
@@ -39,6 +39,14 @@ fn checked_len_u64(len: usize, context: &str) -> Result<u64> {
 fn checked_add_u64(lhs: u64, rhs: u64, context: &str) -> Result<u64> {
     lhs.checked_add(rhs)
         .ok_or_else(|| Error::Other(format!("{context} overflow")))
+}
+
+fn native_byte_order() -> ByteOrder {
+    if cfg!(target_endian = "little") {
+        ByteOrder::LittleEndian
+    } else {
+        ByteOrder::BigEndian
+    }
 }
 
 fn gdal_structural_metadata_bytes(planar_configuration: tiff_core::PlanarConfiguration) -> Vec<u8> {
@@ -93,6 +101,18 @@ struct CogBlockRecord {
 struct CogImage {
     builder: ImageBuilder,
     blocks: Vec<CogBlockRecord>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RawTileGrid {
+    tile_width: usize,
+    tile_height: usize,
+    tiles_across: usize,
+    tiles_down: usize,
+    width: usize,
+    height: usize,
+    bands: usize,
+    planar_configuration: tiff_core::PlanarConfiguration,
 }
 
 struct PlannedCogImage {
@@ -154,6 +174,175 @@ impl BlockSpool {
         sink.seek(SeekFrom::End(0))?;
         io::copy(&mut self.file, sink)?;
         Ok(())
+    }
+}
+
+struct RawTileStore<T: NumericSample> {
+    file: File,
+    block_samples: usize,
+    block_bytes: usize,
+    byte_order: ByteOrder,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: NumericSample> RawTileStore<T> {
+    fn new(block_samples: usize) -> Result<Self> {
+        let block_bytes = block_samples
+            .checked_mul(T::BYTES_PER_SAMPLE)
+            .ok_or_else(|| Error::Other("raw tile block size overflows usize".into()))?;
+        Ok(Self {
+            file: tempfile()?,
+            block_samples,
+            block_bytes,
+            byte_order: native_byte_order(),
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    fn offset_for_block(&self, block_index: usize) -> Result<u64> {
+        let block_bytes = checked_len_u64(self.block_bytes, "raw tile block")?;
+        let index = checked_len_u64(block_index, "raw tile block index")?;
+        index
+            .checked_mul(block_bytes)
+            .ok_or_else(|| Error::Other("raw tile store offset overflow".into()))
+    }
+
+    fn write_block(&mut self, block_index: usize, samples: &[T]) -> Result<()> {
+        if samples.len() != self.block_samples {
+            return Err(Error::Other(format!(
+                "raw tile block sample count mismatch: expected {}, got {}",
+                self.block_samples,
+                samples.len()
+            )));
+        }
+        let offset = self.offset_for_block(block_index)?;
+        let encoded = T::encode_slice(samples, self.byte_order);
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(&encoded)?;
+        Ok(())
+    }
+
+    fn read_block(&mut self, block_index: usize) -> Result<Vec<T>> {
+        let offset = self.offset_for_block(block_index)?;
+        let mut encoded = vec![0u8; self.block_bytes];
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(&mut encoded)?;
+        Ok(T::decode_many(&encoded))
+    }
+}
+
+struct RawBlockCache<T: NumericSample> {
+    capacity: usize,
+    entries: Vec<(usize, Vec<T>)>,
+}
+
+impl<T: NumericSample> RawBlockCache<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: Vec::new(),
+        }
+    }
+
+    fn get_or_load<'a>(
+        &'a mut self,
+        store: &mut RawTileStore<T>,
+        block_index: usize,
+    ) -> Result<&'a [T]> {
+        if let Some(position) = self
+            .entries
+            .iter()
+            .position(|(index, _)| *index == block_index)
+        {
+            let entry = self.entries.remove(position);
+            self.entries.push(entry);
+            return Ok(self.entries.last().unwrap().1.as_slice());
+        }
+
+        let block = store.read_block(block_index)?;
+        if self.entries.len() == self.capacity {
+            self.entries.remove(0);
+        }
+        self.entries.push((block_index, block));
+        Ok(self.entries.last().unwrap().1.as_slice())
+    }
+}
+
+struct RawTileSource<'a, T: NumericSample> {
+    store: &'a mut RawTileStore<T>,
+    written: &'a [bool],
+    fill_value: T,
+    grid: RawTileGrid,
+    cache: RawBlockCache<T>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OverviewLevelSpec<T: NumericSample> {
+    overview_width: usize,
+    overview_height: usize,
+    level: usize,
+    resampling: Resampling,
+    nodata: Option<T>,
+}
+
+impl<'a, T: NumericSample> RawTileSource<'a, T> {
+    fn new(
+        store: &'a mut RawTileStore<T>,
+        written: &'a [bool],
+        fill_value: T,
+        grid: RawTileGrid,
+    ) -> Self {
+        Self {
+            store,
+            written,
+            fill_value,
+            grid,
+            cache: RawBlockCache::new(16),
+        }
+    }
+
+    fn block_index_for(&self, tile_row: usize, tile_col: usize, band: usize) -> usize {
+        let tile_index = tile_row * self.grid.tiles_across + tile_col;
+        if matches!(
+            self.grid.planar_configuration,
+            tiff_core::PlanarConfiguration::Planar
+        ) {
+            let tiles_per_plane = self.grid.tiles_across * self.grid.tiles_down;
+            band * tiles_per_plane + tile_index
+        } else {
+            tile_index
+        }
+    }
+
+    fn load_block(&mut self, block_index: usize) -> Result<Option<&[T]>> {
+        if !self.written[block_index] {
+            return Ok(None);
+        }
+        self.cache.get_or_load(self.store, block_index).map(Some)
+    }
+
+    fn sample_at(&mut self, row: usize, col: usize, band: usize) -> Result<T> {
+        if row >= self.grid.height || col >= self.grid.width {
+            return Ok(self.fill_value);
+        }
+        let tile_row = row / self.grid.tile_height;
+        let tile_col = col / self.grid.tile_width;
+        let local_row = row % self.grid.tile_height;
+        let local_col = col % self.grid.tile_width;
+        let planar_configuration = self.grid.planar_configuration;
+        let tile_width = self.grid.tile_width;
+        let bands = self.grid.bands;
+        let block_index = self.block_index_for(tile_row, tile_col, band);
+        let Some(block) = self.load_block(block_index)? else {
+            return Ok(self.fill_value);
+        };
+        let sample_index = if matches!(planar_configuration, tiff_core::PlanarConfiguration::Planar)
+        {
+            local_row * tile_width + local_col
+        } else {
+            (local_row * tile_width + local_col) * bands + band
+        };
+        Ok(block[sample_index])
     }
 }
 
@@ -659,7 +848,7 @@ impl CogBuilder {
         Ok(())
     }
 
-    /// Create a buffered COG tile writer.
+    /// Create a disk-backed COG tile writer.
     pub fn tile_writer<T: NumericSample, W: Write + Seek>(
         &self,
         sink: W,
@@ -667,7 +856,7 @@ impl CogBuilder {
         CogTileWriter::new(self.clone(), sink)
     }
 
-    /// Create a buffered COG tile writer to a file.
+    /// Create a disk-backed COG tile writer to a file.
     pub fn tile_writer_file<T: NumericSample, P: AsRef<Path>>(
         &self,
         path: P,
@@ -678,14 +867,15 @@ impl CogBuilder {
     }
 }
 
-/// Buffered COG tile writer.
+/// Disk-backed COG tile writer.
 ///
-/// Tiles are written incrementally into an in-memory full-resolution raster,
-/// and the final COG layout is emitted on `finish()`.
+/// Base tiles are written incrementally into a temporary raw tile store, and
+/// the final COG layout is emitted on `finish()` without buffering the full
+/// raster in memory.
 pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     sink: W,
     cog: CogBuilder,
-    base_pixels: Vec<T>,
+    base_tiles: RawTileStore<T>,
     tile_width: u32,
     tile_height: u32,
     tiles_across: u32,
@@ -700,6 +890,9 @@ pub struct CogTileWriter<T: NumericSample, W: Write + Seek> {
     jpeg_options: Option<JpegOptions>,
     overview_levels: Vec<u32>,
     resampling: Resampling,
+    fill_value: T,
+    fill_block: Vec<T>,
+    written: Vec<bool>,
     nodata_value: Option<T>,
     _phantom: std::marker::PhantomData<T>,
 }
@@ -714,16 +907,19 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
         cog.validate_images::<T>(&overview_levels, tw, th)?;
         let nodata_value = parse_nodata_value::<T>(&cog.inner.nodata);
         let fill_value = nodata_value.unwrap_or_else(T::zero);
+        let block_samples = if matches!(
+            cog.inner.planar_configuration,
+            tiff_core::PlanarConfiguration::Planar
+        ) {
+            tw as usize * th as usize
+        } else {
+            tw as usize * th as usize * cog.inner.bands as usize
+        };
 
         Ok(Self {
             sink,
             cog: cog.clone(),
-            base_pixels: vec![
-                fill_value;
-                cog.inner.width as usize
-                    * cog.inner.height as usize
-                    * cog.inner.bands as usize
-            ],
+            base_tiles: RawTileStore::new(block_samples)?,
             tile_width: tw,
             tile_height: th,
             tiles_across: tiles_across as u32,
@@ -738,6 +934,19 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             jpeg_options: cog.inner.jpeg_options,
             overview_levels,
             resampling: cog.resampling,
+            fill_value,
+            fill_block: vec![fill_value; block_samples],
+            written: vec![
+                false;
+                if matches!(
+                    cog.inner.planar_configuration,
+                    tiff_core::PlanarConfiguration::Planar
+                ) {
+                    tiles_across * tiles_down * cog.inner.bands as usize
+                } else {
+                    tiles_across * tiles_down
+                }
+            ],
             nodata_value,
             _phantom: std::marker::PhantomData,
         })
@@ -785,12 +994,15 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             )));
         }
 
+        let tile_index = tile_row * self.tiles_across as usize + tile_col;
+        let mut padded = self.fill_block.clone();
         for row in 0..data_h {
             for col in 0..data_w {
-                let pixel_index = (y_off + row) * self.width as usize + (x_off + col);
-                self.base_pixels[pixel_index] = data[[row, col]];
+                padded[row * tw + col] = data[[row, col]];
             }
         }
+        self.base_tiles.write_block(tile_index, &padded)?;
+        self.written[tile_index] = true;
 
         Ok(())
     }
@@ -839,13 +1051,34 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
             });
         }
 
-        for row in 0..data_h {
-            for col in 0..data_w {
-                let pixel_index = ((y_off + row) * self.width as usize + (x_off + col)) * bands;
-                for band in 0..bands {
-                    self.base_pixels[pixel_index + band] = data[[row, col, band]];
+        let tile_index = tile_row * self.tiles_across as usize + tile_col;
+        if matches!(
+            self.planar_configuration,
+            tiff_core::PlanarConfiguration::Planar
+        ) {
+            let tiles_per_plane = self.tiles_across as usize * self.tiles_down as usize;
+            for band in 0..bands {
+                let mut padded = vec![self.fill_value; tw * th];
+                for row in 0..data_h {
+                    for col in 0..data_w {
+                        padded[row * tw + col] = data[[row, col, band]];
+                    }
+                }
+                let block_index = band * tiles_per_plane + tile_index;
+                self.base_tiles.write_block(block_index, &padded)?;
+                self.written[block_index] = true;
+            }
+        } else {
+            let mut padded = self.fill_block.clone();
+            for row in 0..data_h {
+                for col in 0..data_w {
+                    for band in 0..bands {
+                        padded[(row * tw + col) * bands + band] = data[[row, col, band]];
+                    }
                 }
             }
+            self.base_tiles.write_block(tile_index, &padded)?;
+            self.written[tile_index] = true;
         }
 
         Ok(())
@@ -855,53 +1088,57 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
     pub fn finish(mut self) -> Result<W> {
         let tw = self.tile_width as usize;
         let th = self.tile_height as usize;
-        let full_w = self.width as usize;
-        let full_h = self.height as usize;
         let bands = self.bands as usize;
-
-        let full = Array3::from_shape_vec((full_h, full_w, bands), self.base_pixels)
-            .map_err(|err| Error::Other(format!("invalid streaming COG raster shape: {err}")))?;
 
         let prefix = gdal_structural_metadata_bytes(self.planar_configuration);
         let mut spool = BlockSpool::new()?;
         let mut images =
             self.cog
                 .build_images::<T>(&self.overview_levels, self.tile_width, self.tile_height);
+        let plan = TileWritePlan {
+            tile_width: tw,
+            tile_height: th,
+            planar_configuration: self.planar_configuration,
+            compression: self.compression,
+            predictor: self.predictor,
+            lerc_options: self.lerc_options,
+            jpeg_options: self.jpeg_options,
+        };
+        let grid = RawTileGrid {
+            tile_width: tw,
+            tile_height: th,
+            tiles_across: self.tiles_across as usize,
+            tiles_down: self.tiles_down as usize,
+            width: self.width as usize,
+            height: self.height as usize,
+            bands,
+            planar_configuration: self.planar_configuration,
+        };
+        {
+            let mut source =
+                RawTileSource::new(&mut self.base_tiles, &self.written, self.fill_value, grid);
 
-        for idx in (0..self.overview_levels.len()).rev() {
-            let overview = generate_overview_3d(
-                full.view(),
-                self.overview_levels[idx] as usize,
-                self.resampling,
-                self.nodata_value,
-            );
-            images[1 + idx].blocks = spool_tiled_data_3d(
-                &mut spool,
-                overview.view(),
-                TileWritePlan {
-                    tile_width: tw,
-                    tile_height: th,
-                    planar_configuration: self.planar_configuration,
-                    compression: self.compression,
-                    predictor: self.predictor,
-                    lerc_options: self.lerc_options,
-                    jpeg_options: self.jpeg_options,
-                },
-            )?;
+            for idx in (0..self.overview_levels.len()).rev() {
+                let level = self.overview_levels[idx] as usize;
+                let spec = OverviewLevelSpec {
+                    overview_width: (self.width as usize).div_ceil(level),
+                    overview_height: (self.height as usize).div_ceil(level),
+                    level,
+                    resampling: self.resampling,
+                    nodata: self.nodata_value,
+                };
+                images[1 + idx].blocks =
+                    spool_overview_from_source(&mut spool, &mut source, spec, plan)?;
+            }
         }
 
-        images[0].blocks = spool_tiled_data_3d(
+        images[0].blocks = spool_base_blocks_from_store(
             &mut spool,
-            full.view(),
-            TileWritePlan {
-                tile_width: tw,
-                tile_height: th,
-                planar_configuration: self.planar_configuration,
-                compression: self.compression,
-                predictor: self.predictor,
-                lerc_options: self.lerc_options,
-                jpeg_options: self.jpeg_options,
-            },
+            &mut self.base_tiles,
+            &self.written,
+            &self.fill_block,
+            grid,
+            plan,
         )?;
 
         let base_offset = self.sink.stream_position()?;
@@ -956,6 +1193,282 @@ fn generate_overview_3d<T: NumericSample>(
             }
         }
     })
+}
+
+fn resample_overview_value<T: NumericSample>(
+    source: &mut RawTileSource<'_, T>,
+    level: usize,
+    overview_row: usize,
+    overview_col: usize,
+    band: usize,
+    resampling: Resampling,
+    nodata: Option<T>,
+) -> Result<T> {
+    match resampling {
+        Resampling::NearestNeighbor => {
+            let src_row = overview_row * level;
+            let src_col = overview_col * level;
+            source.sample_at(src_row, src_col, band)
+        }
+        Resampling::Average => {
+            let start_row = overview_row * level;
+            let start_col = overview_col * level;
+            let end_row = (start_row + level).min(source.grid.height);
+            let end_col = (start_col + level).min(source.grid.width);
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for src_row in start_row..end_row {
+                for src_col in start_col..end_col {
+                    let value = source.sample_at(src_row, src_col, band)?;
+                    if nodata.is_some_and(|nodata_value| value == nodata_value) {
+                        continue;
+                    }
+                    sum += value.to_f64();
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                Ok(nodata.unwrap_or_else(T::zero))
+            } else {
+                Ok(T::from_f64(sum / count as f64))
+            }
+        }
+    }
+}
+
+fn build_resampled_planar_block<T: NumericSample>(
+    source: &mut RawTileSource<'_, T>,
+    spec: OverviewLevelSpec<T>,
+    tile_row: usize,
+    tile_col: usize,
+    band: usize,
+    plan: TileWritePlan,
+) -> Result<Vec<T>> {
+    let mut block = vec![source.fill_value; plan.tile_width * plan.tile_height];
+    for row in 0..plan.tile_height {
+        let overview_row = tile_row * plan.tile_height + row;
+        if overview_row >= spec.overview_height {
+            break;
+        }
+        for col in 0..plan.tile_width {
+            let overview_col = tile_col * plan.tile_width + col;
+            if overview_col >= spec.overview_width {
+                break;
+            }
+            block[row * plan.tile_width + col] = resample_overview_value(
+                source,
+                spec.level,
+                overview_row,
+                overview_col,
+                band,
+                spec.resampling,
+                spec.nodata,
+            )?;
+        }
+    }
+    Ok(block)
+}
+
+fn build_resampled_chunky_block<T: NumericSample>(
+    source: &mut RawTileSource<'_, T>,
+    spec: OverviewLevelSpec<T>,
+    tile_row: usize,
+    tile_col: usize,
+    plan: TileWritePlan,
+) -> Result<Vec<T>> {
+    let mut block = vec![source.fill_value; plan.tile_width * plan.tile_height * source.grid.bands];
+    for row in 0..plan.tile_height {
+        let overview_row = tile_row * plan.tile_height + row;
+        if overview_row >= spec.overview_height {
+            break;
+        }
+        for col in 0..plan.tile_width {
+            let overview_col = tile_col * plan.tile_width + col;
+            if overview_col >= spec.overview_width {
+                break;
+            }
+            for band in 0..source.grid.bands {
+                block[(row * plan.tile_width + col) * source.grid.bands + band] =
+                    resample_overview_value(
+                        source,
+                        spec.level,
+                        overview_row,
+                        overview_col,
+                        band,
+                        spec.resampling,
+                        spec.nodata,
+                    )?;
+            }
+        }
+    }
+    Ok(block)
+}
+
+fn spool_overview_from_source<T: NumericSample>(
+    spool: &mut BlockSpool,
+    source: &mut RawTileSource<'_, T>,
+    spec: OverviewLevelSpec<T>,
+    plan: TileWritePlan,
+) -> Result<Vec<CogBlockRecord>> {
+    let tiles_across = spec.overview_width.div_ceil(plan.tile_width);
+    let tiles_down = spec.overview_height.div_ceil(plan.tile_height);
+    let total_blocks = if matches!(
+        plan.planar_configuration,
+        tiff_core::PlanarConfiguration::Planar
+    ) {
+        tiles_across * tiles_down * source.grid.bands
+    } else {
+        tiles_across * tiles_down
+    };
+    let mut blocks = vec![
+        CogBlockRecord {
+            spool_offset: 0,
+            logical_offset_delta: 0,
+            logical_byte_count: 0,
+        };
+        total_blocks
+    ];
+
+    if matches!(
+        plan.planar_configuration,
+        tiff_core::PlanarConfiguration::Planar
+    ) {
+        let tiles_per_plane = tiles_across * tiles_down;
+        for band in 0..source.grid.bands {
+            for tile_row in 0..tiles_down {
+                for tile_col in 0..tiles_across {
+                    let tile_index = tile_row * tiles_across + tile_col;
+                    let block_index = band * tiles_per_plane + tile_index;
+                    let block =
+                        build_resampled_planar_block(source, spec, tile_row, tile_col, band, plan)?;
+                    blocks[block_index] = spool_cog_block(
+                        spool,
+                        &block,
+                        block_index,
+                        CogBlockEncoding {
+                            compression: plan.compression,
+                            predictor: plan.predictor,
+                            samples_per_pixel: 1,
+                            row_width_pixels: plan.tile_width,
+                            block_height: plan.tile_height as u32,
+                            lerc_options: plan.lerc_options,
+                            jpeg_options: plan.jpeg_options,
+                        },
+                    )?;
+                }
+            }
+        }
+    } else {
+        for tile_row in 0..tiles_down {
+            for tile_col in 0..tiles_across {
+                let block_index = tile_row * tiles_across + tile_col;
+                let block = build_resampled_chunky_block(source, spec, tile_row, tile_col, plan)?;
+                blocks[block_index] = spool_cog_block(
+                    spool,
+                    &block,
+                    block_index,
+                    CogBlockEncoding {
+                        compression: plan.compression,
+                        predictor: plan.predictor,
+                        samples_per_pixel: source.grid.bands as u16,
+                        row_width_pixels: plan.tile_width,
+                        block_height: plan.tile_height as u32,
+                        lerc_options: plan.lerc_options,
+                        jpeg_options: plan.jpeg_options,
+                    },
+                )?;
+            }
+        }
+    }
+
+    Ok(blocks)
+}
+
+fn spool_base_blocks_from_store<T: NumericSample>(
+    spool: &mut BlockSpool,
+    store: &mut RawTileStore<T>,
+    written: &[bool],
+    fill_block: &[T],
+    grid: RawTileGrid,
+    plan: TileWritePlan,
+) -> Result<Vec<CogBlockRecord>> {
+    let total_blocks = if matches!(
+        plan.planar_configuration,
+        tiff_core::PlanarConfiguration::Planar
+    ) {
+        grid.tiles_across * grid.tiles_down * grid.bands
+    } else {
+        grid.tiles_across * grid.tiles_down
+    };
+    let mut blocks = vec![
+        CogBlockRecord {
+            spool_offset: 0,
+            logical_offset_delta: 0,
+            logical_byte_count: 0,
+        };
+        total_blocks
+    ];
+
+    if matches!(
+        plan.planar_configuration,
+        tiff_core::PlanarConfiguration::Planar
+    ) {
+        let tiles_per_plane = grid.tiles_across * grid.tiles_down;
+        for band in 0..grid.bands {
+            for tile_row in 0..grid.tiles_down {
+                for tile_col in 0..grid.tiles_across {
+                    let tile_index = tile_row * grid.tiles_across + tile_col;
+                    let block_index = band * tiles_per_plane + tile_index;
+                    let block = if written[block_index] {
+                        store.read_block(block_index)?
+                    } else {
+                        fill_block.to_vec()
+                    };
+                    blocks[block_index] = spool_cog_block(
+                        spool,
+                        &block,
+                        block_index,
+                        CogBlockEncoding {
+                            compression: plan.compression,
+                            predictor: plan.predictor,
+                            samples_per_pixel: 1,
+                            row_width_pixels: plan.tile_width,
+                            block_height: plan.tile_height as u32,
+                            lerc_options: plan.lerc_options,
+                            jpeg_options: plan.jpeg_options,
+                        },
+                    )?;
+                }
+            }
+        }
+    } else {
+        for tile_row in 0..grid.tiles_down {
+            for tile_col in 0..grid.tiles_across {
+                let block_index = tile_row * grid.tiles_across + tile_col;
+                let block = if written[block_index] {
+                    store.read_block(block_index)?
+                } else {
+                    fill_block.to_vec()
+                };
+                blocks[block_index] = spool_cog_block(
+                    spool,
+                    &block,
+                    block_index,
+                    CogBlockEncoding {
+                        compression: plan.compression,
+                        predictor: plan.predictor,
+                        samples_per_pixel: grid.bands as u16,
+                        row_width_pixels: plan.tile_width,
+                        block_height: plan.tile_height as u32,
+                        lerc_options: plan.lerc_options,
+                        jpeg_options: plan.jpeg_options,
+                    },
+                )?;
+            }
+        }
+    }
+
+    Ok(blocks)
 }
 
 fn spool_tiled_data_3d<T: NumericSample>(

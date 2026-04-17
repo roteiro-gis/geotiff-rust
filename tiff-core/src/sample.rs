@@ -25,7 +25,20 @@ macro_rules! impl_tiff_sample {
     };
 }
 
-impl_tiff_sample!(u8, 1, 8, 1, |chunk: &[u8]| chunk[0]);
+impl TiffSample for u8 {
+    fn matches_layout(layout: &RasterLayout) -> bool {
+        layout.sample_format == 1 && layout.bits_per_sample <= 8
+    }
+
+    fn decode_many(bytes: &[u8]) -> Vec<Self> {
+        bytes.to_vec()
+    }
+
+    fn type_name() -> &'static str {
+        "u8"
+    }
+}
+
 impl_tiff_sample!(i8, 2, 8, 1, |chunk: &[u8]| chunk[0] as i8);
 impl_tiff_sample!(u16, 1, 16, 2, |chunk: &[u8]| u16::from_ne_bytes(
     chunk.try_into().unwrap()

@@ -67,7 +67,7 @@ fn assert_gdal_hash_matches(
 
     match (overview_index, sample_kind) {
         (None, SampleKind::U8) => {
-            let raster: ArrayD<u8> = file.read_raster().unwrap();
+            let raster: ArrayD<u8> = file.read_decoded_raster().unwrap();
             assert_shape(&raster, width as u32, height as u32, band_count);
             let (actual_len, actual_hash) = reference::array_hash(&raster);
             assert_eq!(actual_len, byte_len, "byte length mismatch for {path_str}");
@@ -77,7 +77,7 @@ fn assert_gdal_hash_matches(
             );
         }
         (Some(index), SampleKind::U8) => {
-            let raster: ArrayD<u8> = file.read_overview(index).unwrap();
+            let raster: ArrayD<u8> = file.read_decoded_overview(index).unwrap();
             assert_shape(&raster, width as u32, height as u32, band_count);
             let (actual_len, actual_hash) = reference::array_hash(&raster);
             assert_eq!(actual_len, byte_len, "byte length mismatch for {path_str}");
@@ -87,7 +87,7 @@ fn assert_gdal_hash_matches(
             );
         }
         (None, SampleKind::I8) => {
-            let raster: ArrayD<i8> = file.read_raster().unwrap();
+            let raster: ArrayD<i8> = file.read_decoded_raster().unwrap();
             assert_shape(&raster, width as u32, height as u32, band_count);
             let (actual_len, actual_hash) = reference::array_hash(&raster);
             assert_eq!(actual_len, byte_len, "byte length mismatch for {path_str}");
@@ -97,7 +97,7 @@ fn assert_gdal_hash_matches(
             );
         }
         (Some(index), SampleKind::I8) => {
-            let raster: ArrayD<i8> = file.read_overview(index).unwrap();
+            let raster: ArrayD<i8> = file.read_decoded_overview(index).unwrap();
             assert_shape(&raster, width as u32, height as u32, band_count);
             let (actual_len, actual_hash) = reference::array_hash(&raster);
             assert_eq!(actual_len, byte_len, "byte length mismatch for {path_str}");
@@ -122,8 +122,8 @@ fn assert_gdal_u8_pixels_close(path: &std::path::Path, overview_index: Option<us
     };
     let file = GeoTiffFile::open(path).unwrap();
     let raster: ArrayD<u8> = match overview_index {
-        Some(index) => file.read_overview(index).unwrap(),
-        None => file.read_raster().unwrap(),
+        Some(index) => file.read_decoded_overview(index).unwrap(),
+        None => file.read_decoded_raster().unwrap(),
     };
     let (actual, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0), "unexpected array offset for {path_str}");

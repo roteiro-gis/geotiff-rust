@@ -153,7 +153,7 @@ fn assert_gdal_hash_matches(path: &std::path::Path, ifd_index: usize, sample_kin
 
     match sample_kind {
         SampleKind::U8 => {
-            let raster: ArrayD<u8> = file.read_image(ifd_index).unwrap();
+            let raster: ArrayD<u8> = file.read_decoded_image(ifd_index).unwrap();
             assert_shape(&raster, width as u32, height as u32, band_count);
             let (actual_len, actual_hash) = reference::array_hash(&raster);
             assert_eq!(actual_len, byte_len, "byte length mismatch for {path_str}");
@@ -163,7 +163,7 @@ fn assert_gdal_hash_matches(path: &std::path::Path, ifd_index: usize, sample_kin
             );
         }
         SampleKind::I8 => {
-            let raster: ArrayD<i8> = file.read_image(ifd_index).unwrap();
+            let raster: ArrayD<i8> = file.read_decoded_image(ifd_index).unwrap();
             assert_shape(&raster, width as u32, height as u32, band_count);
             let (actual_len, actual_hash) = reference::array_hash(&raster);
             assert_eq!(actual_len, byte_len, "byte length mismatch for {path_str}");
@@ -203,7 +203,7 @@ fn assert_gdal_u8_pixels_close_with_tolerance(
         reference::run_reference_bytes(env!("CARGO_MANIFEST_DIR"), &["bytes", path_str])
     };
     let file = TiffFile::open(path).unwrap();
-    let raster: ArrayD<u8> = file.read_image(ifd_index).unwrap();
+    let raster: ArrayD<u8> = file.read_decoded_image(ifd_index).unwrap();
     let (actual, offset) = raster.into_raw_vec_and_offset();
     assert_eq!(offset, Some(0), "unexpected array offset for {path_str}");
 

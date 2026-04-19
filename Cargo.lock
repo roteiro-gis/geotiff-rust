@@ -362,11 +362,11 @@ dependencies = [
 
 [[package]]
 name = "geotiff-core"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "geotiff-integration"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "geotiff-core",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "geotiff-reader"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "geotiff-core",
  "lru",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "geotiff-writer"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "geotiff-core",
  "ndarray",
@@ -796,17 +796,20 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lerc-band-materialize"
 version = "0.3.0"
-source = "git+https://github.com/roteiro-gis/lerc-rust#4d3f057f96a7bd176885340c2422f7271fe87ffd"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07ad02b62a38008d9615a52159fd3b7e56aca97ee013fdec55cfe80040cc5aa5"
 
 [[package]]
 name = "lerc-core"
 version = "0.3.0"
-source = "git+https://github.com/roteiro-gis/lerc-rust#4d3f057f96a7bd176885340c2422f7271fe87ffd"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f428c60749fada87c7a95d08bc3942d05e4a9e3e0543a460a3331bb751dd2ddc"
 
 [[package]]
 name = "lerc-reader"
 version = "0.3.0"
-source = "git+https://github.com/roteiro-gis/lerc-rust#4d3f057f96a7bd176885340c2422f7271fe87ffd"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68327488da0851ab38d662f6aa0baf29ee16192a5e286429aa02b3ffd71a5565"
 dependencies = [
  "lerc-band-materialize",
  "lerc-core",
@@ -816,7 +819,8 @@ dependencies = [
 [[package]]
 name = "lerc-writer"
 version = "0.3.0"
-source = "git+https://github.com/roteiro-gis/lerc-rust#4d3f057f96a7bd176885340c2422f7271fe87ffd"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d281f7aaa603b0562ceb1901c9b85bec7f19b1f2b9fc651cbc122906f4422411"
 dependencies = [
  "lerc-core",
 ]
@@ -1573,14 +1577,14 @@ dependencies = [
 
 [[package]]
 name = "tiff-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "tiff-integration"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "ndarray",
@@ -1593,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-reader"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "jpeg-decoder",
@@ -1613,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-writer"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "jpeg-encoder",

@@ -13,7 +13,7 @@ exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.77"
 license = "MIT OR Apache-2.0"
@@ -24,6 +24,6 @@ homepage = "https://github.com/roteiro-gis/geotiff-rust"
 ndarray = "0.17"
 thiserror = "2"
 memmap2 = "0.9"
-lerc-core = { version = "0.3", git = "https://github.com/roteiro-gis/lerc-rust" }
-lerc-reader = { version = "0.3", git = "https://github.com/roteiro-gis/lerc-rust" }
-lerc-writer = { version = "0.3", git = "https://github.com/roteiro-gis/lerc-rust" }
+lerc-core = "0.3"
+lerc-reader = "0.3"
+lerc-writer = "0.3"

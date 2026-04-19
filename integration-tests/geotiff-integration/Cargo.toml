@@ -6,12 +6,12 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-geotiff-core = { version = "0.3.1", path = "../../geotiff-core" }
-geotiff-reader = { version = "0.3.1", path = "../../geotiff-reader" }
-geotiff-writer = { version = "0.3.1", path = "../../geotiff-writer" }
-tiff-core = { version = "0.3.1", path = "../../tiff-core" }
-tiff-reader = { version = "0.3.1", path = "../../tiff-reader" }
-tiff-writer = { version = "0.3.1", path = "../../tiff-writer" }
+geotiff-core = { version = "0.4.0", path = "../../geotiff-core" }
+geotiff-reader = { version = "0.4.0", path = "../../geotiff-reader" }
+geotiff-writer = { version = "0.4.0", path = "../../geotiff-writer" }
+tiff-core = { version = "0.4.0", path = "../../tiff-core" }
+tiff-reader = { version = "0.4.0", path = "../../tiff-reader" }
+tiff-writer = { version = "0.4.0", path = "../../tiff-writer" }
 ndarray = { workspace = true }
 
 [dev-dependencies]

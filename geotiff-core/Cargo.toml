@@ -7,5 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/geotiff-core"
+keywords = ["geotiff", "gis", "crs", "raster", "metadata"]
+categories = ["science", "data-structures"]
 
 [dependencies]

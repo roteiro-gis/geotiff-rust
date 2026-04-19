@@ -154,6 +154,9 @@ For a reproducible reference environment, run the Docker harness:
 For reference comparisons and current benchmark results against GDAL/libtiff,
 see [docs/benchmark-report.md](docs/benchmark-report.md).
 
+For the workspace release order and package verification notes, see
+[docs/publishing.md](docs/publishing.md).
+
 ## License
 
 MIT OR Apache-2.0

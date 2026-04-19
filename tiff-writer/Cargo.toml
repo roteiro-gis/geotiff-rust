@@ -7,9 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/tiff-writer"
+keywords = ["tiff", "bigtiff", "encoder", "raster", "gis"]
+categories = ["science", "encoding"]
 
 [dependencies]
-tiff-core = { version = "0.3.1", path = "../tiff-core" }
+tiff-core = { version = "0.4.0", path = "../tiff-core" }
 lerc-core = { workspace = true }
 lerc-writer = { workspace = true }
 thiserror = { workspace = true }

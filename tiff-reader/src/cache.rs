@@ -56,20 +56,24 @@ impl BlockCache {
         let data_len = data.len();
         let value = Arc::new(data);
 
+        let mut state = self.inner.lock();
+        if let Some(previous) = state.cache.pop(&key) {
+            state.current_bytes = state.current_bytes.saturating_sub(previous.len());
+        }
+
         if self.max_bytes == 0 || data_len > self.max_bytes {
             return value;
         }
 
-        let mut state = self.inner.lock();
-        while state.current_bytes + data_len > self.max_bytes && !state.cache.is_empty() {
+        while state.current_bytes > self.max_bytes - data_len && !state.cache.is_empty() {
             if let Some((_, evicted)) = state.cache.pop_lru() {
                 state.current_bytes = state.current_bytes.saturating_sub(evicted.len());
             }
         }
 
         state.current_bytes += data_len;
-        if let Some(previous) = state.cache.put(key, value.clone()) {
-            state.current_bytes = state.current_bytes.saturating_sub(previous.len());
+        if let Some((_, evicted)) = state.cache.push(key, value.clone()) {
+            state.current_bytes = state.current_bytes.saturating_sub(evicted.len());
         }
 
         value
@@ -142,5 +146,63 @@ mod tests {
         };
         cache.insert(key, vec![1, 2, 3]);
         assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn slot_eviction_updates_byte_accounting() {
+        let cache = BlockCache::new(100, 2);
+        for block_index in 0..3 {
+            cache.insert(
+                BlockKey {
+                    ifd_index: 0,
+                    kind: BlockKind::Strip,
+                    block_index,
+                },
+                vec![0; 4],
+            );
+        }
+
+        assert_eq!(cache.inner.lock().current_bytes, 8);
+    }
+
+    #[test]
+    fn replacing_mru_entry_preserves_other_cached_blocks() {
+        let cache = BlockCache::new(10, 8);
+        let a = BlockKey {
+            ifd_index: 0,
+            kind: BlockKind::Tile,
+            block_index: 0,
+        };
+        let b = BlockKey {
+            ifd_index: 0,
+            kind: BlockKind::Tile,
+            block_index: 1,
+        };
+
+        cache.insert(a, vec![0; 8]);
+        cache.insert(b, vec![0; 2]);
+        assert!(cache.get(&a).is_some());
+
+        cache.insert(a, vec![0; 7]);
+
+        assert!(cache.get(&a).is_some());
+        assert!(cache.get(&b).is_some());
+        assert_eq!(cache.inner.lock().current_bytes, 9);
+    }
+
+    #[test]
+    fn oversized_replacement_removes_stale_entry() {
+        let cache = BlockCache::new(8, 8);
+        let key = BlockKey {
+            ifd_index: 0,
+            kind: BlockKind::Tile,
+            block_index: 0,
+        };
+
+        cache.insert(key, vec![0; 4]);
+        cache.insert(key, vec![0; 9]);
+
+        assert!(cache.get(&key).is_none());
+        assert_eq!(cache.inner.lock().current_bytes, 0);
     }
 }

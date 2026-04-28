@@ -101,7 +101,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn ensure(&self, n: usize) -> Result<()> {
-        if self.pos + n > self.data.len() {
+        if !matches!(self.pos.checked_add(n), Some(end) if end <= self.data.len()) {
             return Err(Error::Truncated {
                 offset: self.pos as u64,
                 needed: n as u64,
@@ -109,5 +109,25 @@ impl<'a> Cursor<'a> {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cursor;
+    use crate::header::ByteOrder;
+
+    #[test]
+    fn oversized_skip_returns_truncated_error_without_overflowing() {
+        let mut cursor = Cursor::with_offset(&[0], 1, ByteOrder::LittleEndian).unwrap();
+
+        assert!(cursor.skip(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn oversized_read_returns_truncated_error_without_overflowing() {
+        let mut cursor = Cursor::with_offset(&[0], 1, ByteOrder::LittleEndian).unwrap();
+
+        assert!(cursor.read_bytes(usize::MAX).is_err());
     }
 }

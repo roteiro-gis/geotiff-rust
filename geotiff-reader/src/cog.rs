@@ -123,7 +123,7 @@ impl HttpRangeSource {
                 "range chunk {index} starts beyond end of object"
             )));
         }
-        let end = (start + chunk_size).min(self.len) - 1;
+        let end = start.saturating_add(chunk_size).min(self.len) - 1;
         let response = self
             .client
             .get(&self.url)
@@ -149,20 +149,24 @@ impl HttpRangeSource {
         let body_len = body.len();
         let value = Arc::new(body);
 
+        let mut state = self.cache.lock();
+        if let Some(previous) = state.cache.pop(&index) {
+            state.current_bytes = state.current_bytes.saturating_sub(previous.len());
+        }
+
         if self.max_bytes == 0 || body_len > self.max_bytes {
             return Ok(value);
         }
 
-        let mut state = self.cache.lock();
-        while state.current_bytes + body_len > self.max_bytes && !state.cache.is_empty() {
+        while state.current_bytes > self.max_bytes - body_len && !state.cache.is_empty() {
             if let Some((_, evicted)) = state.cache.pop_lru() {
                 state.current_bytes = state.current_bytes.saturating_sub(evicted.len());
             }
         }
-        if let Some(previous) = state.cache.put(index, value.clone()) {
-            state.current_bytes = state.current_bytes.saturating_sub(previous.len());
-        }
         state.current_bytes += body_len;
+        if let Some((_, evicted)) = state.cache.push(index, value.clone()) {
+            state.current_bytes = state.current_bytes.saturating_sub(evicted.len());
+        }
         Ok(value)
     }
 }
@@ -173,6 +177,10 @@ impl TiffSource for HttpRangeSource {
     }
 
     fn read_exact_at(&self, offset: u64, len: usize) -> tiff_reader::error::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
         let end = offset.checked_add(len as u64).ok_or({
             tiff_reader::TiffError::OffsetOutOfBounds {
                 offset,
@@ -318,6 +326,49 @@ mod tests {
         let expected = &bytes[570..570 + 1223];
         let actual = source.read_exact_at(570, 1223).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn range_cache_slot_eviction_updates_byte_accounting() {
+        let Some(server) = TestServer::start(vec![0; 12]) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 4,
+                cache_bytes: 100,
+                cache_slots: 2,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        source.chunk(0).unwrap();
+        source.chunk(1).unwrap();
+        source.chunk(2).unwrap();
+
+        assert_eq!(source.cache.lock().current_bytes, 8);
+    }
+
+    #[test]
+    fn zero_length_range_read_does_not_fetch_chunk() {
+        let Some(server) = TestServer::start(vec![0; 12]) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 4,
+                cache_bytes: 100,
+                cache_slots: 2,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.read_exact_at(12, 0).unwrap(), Vec::<u8>::new());
+        assert_eq!(source.cache.lock().current_bytes, 0);
     }
 
     fn build_simple_geotiff() -> Vec<u8> {

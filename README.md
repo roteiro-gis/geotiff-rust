@@ -1,5 +1,18 @@
 # geotiff-rust
 
+[![tiff-core crates.io](https://img.shields.io/crates/v/tiff-core.svg)](https://crates.io/crates/tiff-core)
+[![tiff-core docs.rs](https://docs.rs/tiff-core/badge.svg)](https://docs.rs/tiff-core)
+[![tiff-reader crates.io](https://img.shields.io/crates/v/tiff-reader.svg)](https://crates.io/crates/tiff-reader)
+[![tiff-reader docs.rs](https://docs.rs/tiff-reader/badge.svg)](https://docs.rs/tiff-reader)
+[![tiff-writer crates.io](https://img.shields.io/crates/v/tiff-writer.svg)](https://crates.io/crates/tiff-writer)
+[![tiff-writer docs.rs](https://docs.rs/tiff-writer/badge.svg)](https://docs.rs/tiff-writer)
+[![geotiff-core crates.io](https://img.shields.io/crates/v/geotiff-core.svg)](https://crates.io/crates/geotiff-core)
+[![geotiff-core docs.rs](https://docs.rs/geotiff-core/badge.svg)](https://docs.rs/geotiff-core)
+[![geotiff-reader crates.io](https://img.shields.io/crates/v/geotiff-reader.svg)](https://crates.io/crates/geotiff-reader)
+[![geotiff-reader docs.rs](https://docs.rs/geotiff-reader/badge.svg)](https://docs.rs/geotiff-reader)
+[![geotiff-writer crates.io](https://img.shields.io/crates/v/geotiff-writer.svg)](https://crates.io/crates/geotiff-writer)
+[![geotiff-writer docs.rs](https://docs.rs/geotiff-writer/badge.svg)](https://docs.rs/geotiff-writer)
+
 Pure-Rust TIFF/BigTIFF and GeoTIFF/COG readers and writers. No C libraries, no build scripts, no unsafe beyond `memmap2`.
 
 ## Crates

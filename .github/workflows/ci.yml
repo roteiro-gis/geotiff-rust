@@ -104,6 +104,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Rust stable for cargo-fuzz
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -113,12 +116,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-fuzz
-          key: cargo-fuzz-bin-v1-0.13.1
+          key: cargo-fuzz-bin-v2-0.13.1-stable
 
       - name: Install cargo-fuzz
         run: |
           if ! command -v cargo-fuzz >/dev/null 2>&1; then
-            cargo install cargo-fuzz --version 0.13.1 --locked
+            rustup run stable cargo install cargo-fuzz --version 0.13.1 --locked
           fi
 
       - name: Cache Rust artifacts

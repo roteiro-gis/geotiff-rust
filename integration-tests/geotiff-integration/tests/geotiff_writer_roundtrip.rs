@@ -149,6 +149,7 @@ fn planar_and_lerc_geotiffs_roundtrip() {
 
     let mut planar_buf = Cursor::new(Vec::new());
     GeoTiffBuilder::new(16, 16)
+        .epsg(4326)
         .bands(3)
         .tile_size(16, 16)
         .planar_configuration(PlanarConfiguration::Planar)
@@ -156,12 +157,21 @@ fn planar_and_lerc_geotiffs_roundtrip() {
         .write_3d_to(&mut planar_buf, planar.view())
         .unwrap();
 
-    let planar_file = TiffFile::from_bytes(planar_buf.into_inner()).unwrap();
+    let planar_bytes = planar_buf.into_inner();
+    let planar_file = TiffFile::from_bytes(planar_bytes.clone()).unwrap();
     let planar_raster = planar_file.read_image::<u8>(0).unwrap();
     assert_eq!(planar_raster.shape(), &[16, 16, 3]);
     assert_eq!(planar_raster[[5, 7, 0]], planar[[5, 7, 0]]);
     assert_eq!(planar_raster[[5, 7, 1]], planar[[5, 7, 1]]);
     assert_eq!(planar_raster[[5, 7, 2]], planar[[5, 7, 2]]);
+
+    let planar_geo = GeoTiffFile::from_bytes(planar_bytes).unwrap();
+    let band = planar_geo.read_band::<u8>(1).unwrap();
+    assert_eq!(band.shape(), &[16, 16]);
+    assert_eq!(band[[5, 7]], planar[[5, 7, 1]]);
+    let band_window = planar_geo.read_band_window::<u8>(2, 4, 5, 3, 2).unwrap();
+    assert_eq!(band_window.shape(), &[3, 2]);
+    assert_eq!(band_window[[1, 1]], planar[[5, 6, 2]]);
 
     let lerc_data = Array2::<f32>::from_shape_fn((8, 8), |(row, col)| (row * 8 + col) as f32 * 1.1);
     let mut lerc_buf = Cursor::new(Vec::new());

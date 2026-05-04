@@ -119,6 +119,119 @@ pub(crate) fn read_window(
     Ok(output)
 }
 
+pub(crate) fn read_window_band(
+    source: &dyn TiffSource,
+    ifd: &Ifd,
+    byte_order: ByteOrder,
+    cache: &BlockCache,
+    window: Window,
+    band_index: usize,
+    gdal_structural_metadata: Option<&GdalStructuralMetadata>,
+) -> Result<Vec<u8>> {
+    let layout = ifd.raster_layout()?;
+    if band_index >= layout.samples_per_pixel {
+        return Err(Error::BandIndexOutOfBounds {
+            index: band_index,
+            band_count: layout.samples_per_pixel,
+        });
+    }
+    if window.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let output_len = window.band_output_len(&layout)?;
+    let mut output = vec![0u8; output_len];
+    let window_row_end = window.row_end();
+    let output_row_bytes = window.cols * layout.bytes_per_sample;
+
+    let specs = collect_strip_specs(ifd, &layout)?;
+    let relevant_specs: Vec<_> = specs
+        .iter()
+        .copied()
+        .filter(|spec| {
+            let spec_row_end = spec.row_start + spec.rows_in_strip;
+            let overlaps_rows = spec.row_start < window_row_end && spec_row_end > window.row_off;
+            let overlaps_band = layout.planar_configuration == 1 || spec.plane == band_index;
+            overlaps_rows && overlaps_band
+        })
+        .collect();
+
+    #[cfg(not(feature = "rayon"))]
+    let decoded_blocks: Result<Vec<_>> = relevant_specs
+        .iter()
+        .map(|&spec| {
+            read_strip_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
+        })
+        .collect();
+
+    #[cfg(feature = "rayon")]
+    let decoded_blocks: Result<Vec<_>> = relevant_specs
+        .par_iter()
+        .map(|&spec| {
+            read_strip_block(
+                source,
+                ifd,
+                byte_order,
+                cache,
+                spec,
+                &layout,
+                gdal_structural_metadata,
+            )
+            .map(|block| (spec, block))
+        })
+        .collect();
+
+    for (spec, block) in decoded_blocks? {
+        let block = &*block;
+        let block_row_end = spec.row_start + spec.rows_in_strip;
+        let copy_row_start = spec.row_start.max(window.row_off);
+        let copy_row_end = block_row_end.min(window_row_end);
+
+        if layout.planar_configuration == 1 {
+            let src_row_bytes = layout.row_bytes();
+            let band_offset = band_index * layout.bytes_per_sample;
+            for row in copy_row_start..copy_row_end {
+                let src_row_index = row - spec.row_start;
+                let dest_row_index = row - window.row_off;
+                let src_row =
+                    &block[src_row_index * src_row_bytes..(src_row_index + 1) * src_row_bytes];
+                let dest_row = &mut output
+                    [dest_row_index * output_row_bytes..(dest_row_index + 1) * output_row_bytes];
+                for col in window.col_off..window.col_end() {
+                    let src_base = col * layout.pixel_stride_bytes() + band_offset;
+                    let dest_col_index = col - window.col_off;
+                    let dest_base = dest_col_index * layout.bytes_per_sample;
+                    dest_row[dest_base..dest_base + layout.bytes_per_sample]
+                        .copy_from_slice(&src_row[src_base..src_base + layout.bytes_per_sample]);
+                }
+            }
+        } else {
+            let src_row_bytes = layout.sample_plane_row_bytes();
+            let copy_bytes_per_row = window.cols * layout.bytes_per_sample;
+            for row in copy_row_start..copy_row_end {
+                let src_row_index = row - spec.row_start;
+                let dest_row_index = row - window.row_off;
+                let src_offset =
+                    src_row_index * src_row_bytes + window.col_off * layout.bytes_per_sample;
+                let dest_offset = dest_row_index * output_row_bytes;
+                output[dest_offset..dest_offset + copy_bytes_per_row]
+                    .copy_from_slice(&block[src_offset..src_offset + copy_bytes_per_row]);
+            }
+        }
+    }
+
+    Ok(output)
+}
+
 fn collect_strip_specs(ifd: &Ifd, layout: &RasterLayout) -> Result<Vec<StripBlockSpec>> {
     let offsets = ifd
         .strip_offsets()

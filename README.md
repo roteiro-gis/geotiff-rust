@@ -41,6 +41,9 @@ Use `read_decoded_raster` / `read_decoded_window` on `GeoTiffFile` and
 palette expansion or color-space conversion (for example palette TIFF,
 YCbCr, or CMYK) instead of storage-domain samples.
 
+Use `read_band` / `read_band_window` on `GeoTiffFile` and `TiffFile` when
+you only need one storage-domain band as a `[rows, cols]` array.
+
 ## Writing
 
 ```rust
@@ -106,6 +109,7 @@ with `bands(...)` and optional
 - Little-endian and big-endian byte orders
 - Strip and tile data access with windowed reads
 - Chunky and separate planar sample layouts
+- Full-raster and windowed single-band reads, optimized for separate-planar rasters
 - Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional)
 - Parallel decompression via Rayon
 - Storage-domain typed sample reads via `read_*` / `read_*_samples`

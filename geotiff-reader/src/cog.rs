@@ -80,6 +80,7 @@ struct HttpRangeSource {
     chunk_size: usize,
     cache: Mutex<RangeCacheState>,
     max_bytes: usize,
+    cache_enabled: bool,
 }
 
 struct RangeCacheState {
@@ -91,8 +92,7 @@ impl HttpRangeSource {
     fn open(url: String, options: HttpOpenOptions) -> Result<Self> {
         let client = Client::builder().build()?;
         let len = probe_content_length(&client, &url)?;
-        let slots = NonZeroUsize::new(options.cache_slots)
-            .unwrap_or_else(|| NonZeroUsize::new(257).unwrap());
+        let slots = NonZeroUsize::new(options.cache_slots.max(1)).unwrap();
         Ok(Self {
             client,
             url,
@@ -103,11 +103,12 @@ impl HttpRangeSource {
                 current_bytes: 0,
             }),
             max_bytes: options.cache_bytes,
+            cache_enabled: options.cache_bytes > 0 && options.cache_slots > 0,
         })
     }
 
     fn chunk(&self, index: u64) -> Result<Arc<Vec<u8>>> {
-        {
+        if self.cache_enabled {
             let mut state = self.cache.lock();
             if let Some(chunk) = state.cache.get(&index) {
                 return Ok(chunk.clone());
@@ -154,7 +155,7 @@ impl HttpRangeSource {
             state.current_bytes = state.current_bytes.saturating_sub(previous.len());
         }
 
-        if self.max_bytes == 0 || body_len > self.max_bytes {
+        if !self.cache_enabled || body_len > self.max_bytes {
             return Ok(value);
         }
 
@@ -349,6 +350,27 @@ mod tests {
         source.chunk(2).unwrap();
 
         assert_eq!(source.cache.lock().current_bytes, 8);
+    }
+
+    #[test]
+    fn zero_range_cache_slots_disable_storage() {
+        let Some(server) = TestServer::start(vec![0; 12]) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 4,
+                cache_bytes: 100,
+                cache_slots: 0,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        source.chunk(0).unwrap();
+
+        assert_eq!(source.cache.lock().current_bytes, 0);
     }
 
     #[test]

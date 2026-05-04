@@ -3,6 +3,7 @@
 //! Supports:
 //! - **GeoTIFF**: TIFF files with GeoKey metadata (EPSG codes, CRS, tiepoints, pixel scale)
 //! - **COG**: overview discovery plus optional remote open via HTTP range requests
+//! - **Reads**: full rasters, windows, overviews, and single storage-domain bands
 //! - **Compression passthrough**: any compression supported by `tiff-reader`, including TIFF
 //!   `LERC`, `LERC+DEFLATE`, and, with the `zstd` feature enabled on `tiff-reader`, `LERC+ZSTD`
 //!
@@ -280,6 +281,36 @@ impl GeoTiffFile {
             .map_err(Into::into)
     }
 
+    /// Decode one base-resolution storage-domain band into a typed
+    /// `[height, width]` ndarray.
+    pub fn read_band<T: TiffSample>(&self, band_index: usize) -> Result<ArrayD<T>> {
+        self.tiff
+            .read_band::<T>(self.base_ifd_index, band_index)
+            .map_err(Into::into)
+    }
+
+    /// Decode a base-resolution window from one storage-domain band into a
+    /// typed `[rows, cols]` ndarray.
+    pub fn read_band_window<T: TiffSample>(
+        &self,
+        band_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        self.tiff
+            .read_band_window::<T>(
+                self.base_ifd_index,
+                band_index,
+                row_off,
+                col_off,
+                rows,
+                cols,
+            )
+            .map_err(Into::into)
+    }
+
     /// Decode the base-resolution raster into color-decoded typed pixels.
     pub fn read_decoded_raster<T: TiffSample>(&self) -> Result<ArrayD<T>> {
         self.tiff
@@ -359,6 +390,22 @@ impl GeoTiffFile {
             .map_err(Into::into)
     }
 
+    /// Decode one overview storage-domain band into a typed `[height, width]`
+    /// ndarray.
+    pub fn read_overview_band<T: TiffSample>(
+        &self,
+        overview_index: usize,
+        band_index: usize,
+    ) -> Result<ArrayD<T>> {
+        let overview = self
+            .overview_ifds
+            .get(overview_index)
+            .ok_or(Error::OverviewNotFound(overview_index))?;
+        self.tiff
+            .read_band_from_ifd::<T>(&overview.ifd, band_index)
+            .map_err(Into::into)
+    }
+
     /// Decode an overview pixel window into storage-domain typed samples.
     pub fn read_overview_window<T: TiffSample>(
         &self,
@@ -392,6 +439,26 @@ impl GeoTiffFile {
             .ok_or(Error::OverviewNotFound(overview_index))?;
         self.tiff
             .read_decoded_window_from_ifd::<T>(&overview.ifd, row_off, col_off, rows, cols)
+            .map_err(Into::into)
+    }
+
+    /// Decode an overview pixel window from one storage-domain band into a
+    /// typed `[rows, cols]` ndarray.
+    pub fn read_overview_band_window<T: TiffSample>(
+        &self,
+        overview_index: usize,
+        band_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        let overview = self
+            .overview_ifds
+            .get(overview_index)
+            .ok_or(Error::OverviewNotFound(overview_index))?;
+        self.tiff
+            .read_band_window_from_ifd::<T>(&overview.ifd, band_index, row_off, col_off, rows, cols)
             .map_err(Into::into)
     }
 

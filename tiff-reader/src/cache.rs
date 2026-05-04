@@ -25,6 +25,7 @@ pub enum BlockKind {
 pub struct BlockCache {
     inner: Mutex<BlockCacheState>,
     max_bytes: usize,
+    enabled: bool,
 }
 
 struct BlockCacheState {
@@ -35,18 +36,22 @@ struct BlockCacheState {
 impl BlockCache {
     /// Create a new cache with byte and slot limits.
     pub fn new(max_bytes: usize, max_slots: usize) -> Self {
-        let slots = NonZeroUsize::new(max_slots).unwrap_or_else(|| NonZeroUsize::new(257).unwrap());
+        let slots = NonZeroUsize::new(max_slots.max(1)).unwrap();
         Self {
             inner: Mutex::new(BlockCacheState {
                 cache: LruCache::new(slots),
                 current_bytes: 0,
             }),
             max_bytes,
+            enabled: max_bytes > 0 && max_slots > 0,
         }
     }
 
     /// Return a cached block and promote it in LRU order.
     pub fn get(&self, key: &BlockKey) -> Option<Arc<Vec<u8>>> {
+        if !self.enabled {
+            return None;
+        }
         let mut state = self.inner.lock();
         state.cache.get(key).cloned()
     }
@@ -61,7 +66,7 @@ impl BlockCache {
             state.current_bytes = state.current_bytes.saturating_sub(previous.len());
         }
 
-        if self.max_bytes == 0 || data_len > self.max_bytes {
+        if !self.enabled || data_len > self.max_bytes {
             return value;
         }
 
@@ -146,6 +151,19 @@ mod tests {
         };
         cache.insert(key, vec![1, 2, 3]);
         assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn zero_slots_disable_cache_storage() {
+        let cache = BlockCache::new(1024, 0);
+        let key = BlockKey {
+            ifd_index: 0,
+            kind: BlockKind::Tile,
+            block_index: 0,
+        };
+        cache.insert(key, vec![1, 2, 3]);
+        assert!(cache.get(&key).is_none());
+        assert_eq!(cache.inner.lock().current_bytes, 0);
     }
 
     #[test]

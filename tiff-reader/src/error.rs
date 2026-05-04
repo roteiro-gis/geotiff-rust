@@ -74,6 +74,9 @@ pub enum Error {
         actual: String,
     },
 
+    #[error("band index {index} is out of bounds for {band_count} bands")]
+    BandIndexOutOfBounds { index: usize, band_count: usize },
+
     #[error("{0}")]
     Other(String),
 }

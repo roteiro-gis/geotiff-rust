@@ -4,6 +4,7 @@
 //! - **TIFF** (classic): `II`/`MM` byte order mark + version 42
 //! - **BigTIFF**: `II`/`MM` byte order mark + version 43
 //! - **Sources**: mmap, in-memory bytes, or any custom random-access source
+//! - **Reads**: full rasters, windows, and single storage-domain bands
 //! - **Compression**: None, Deflate, LZW, PackBits, LERC, JPEG (feature), ZSTD (feature)
 //!
 //! TIFF-side `LERC+DEFLATE` is supported unconditionally. TIFF-side
@@ -117,6 +118,13 @@ impl Window {
             .checked_mul(self.rows)
             .and_then(|pixels| pixels.checked_mul(layout.pixel_stride_bytes()))
             .ok_or_else(|| Error::InvalidImageLayout("window size overflows usize".into()))
+    }
+
+    pub(crate) fn band_output_len(self, layout: &RasterLayout) -> Result<usize> {
+        self.cols
+            .checked_mul(self.rows)
+            .and_then(|pixels| pixels.checked_mul(layout.bytes_per_sample))
+            .ok_or_else(|| Error::InvalidImageLayout("window band size overflows usize".into()))
     }
 }
 
@@ -482,6 +490,51 @@ impl TiffFile {
         self.decode_window_sample_bytes(ifd, window)
     }
 
+    /// Decode a single storage-domain band into native-endian sample bytes.
+    pub fn read_band_bytes(&self, ifd_index: usize, band_index: usize) -> Result<Vec<u8>> {
+        let ifd = self.ifd(ifd_index)?;
+        self.read_band_bytes_from_ifd(ifd, band_index)
+    }
+
+    /// Decode a single storage-domain band from an arbitrary IFD into
+    /// native-endian sample bytes.
+    pub fn read_band_bytes_from_ifd(&self, ifd: &Ifd, band_index: usize) -> Result<Vec<u8>> {
+        let layout = ifd.raster_layout()?;
+        self.read_band_window_bytes_from_ifd(ifd, band_index, 0, 0, layout.height, layout.width)
+    }
+
+    /// Decode a pixel window from one storage-domain band into native-endian
+    /// sample bytes.
+    pub fn read_band_window_bytes(
+        &self,
+        ifd_index: usize,
+        band_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<u8>> {
+        let ifd = self.ifd(ifd_index)?;
+        self.read_band_window_bytes_from_ifd(ifd, band_index, row_off, col_off, rows, cols)
+    }
+
+    /// Decode a pixel window from one storage-domain band in an arbitrary IFD
+    /// into native-endian sample bytes.
+    pub fn read_band_window_bytes_from_ifd(
+        &self,
+        ifd: &Ifd,
+        band_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Vec<u8>> {
+        let layout = ifd.raster_layout()?;
+        validate_band_index(&layout, band_index)?;
+        let window = validate_window(&layout, row_off, col_off, rows, cols)?;
+        self.decode_window_sample_band_bytes(ifd, window, band_index)
+    }
+
     fn decode_window_sample_bytes(&self, ifd: &Ifd, window: Window) -> Result<Vec<u8>> {
         if window.is_empty() {
             return Ok(Vec::new());
@@ -503,6 +556,41 @@ impl TiffFile {
                 self.byte_order(),
                 &self.block_cache,
                 window,
+                self.gdal_structural_metadata.as_ref(),
+            )
+        }
+    }
+
+    fn decode_window_sample_band_bytes(
+        &self,
+        ifd: &Ifd,
+        window: Window,
+        band_index: usize,
+    ) -> Result<Vec<u8>> {
+        if window.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let layout = ifd.raster_layout()?;
+        validate_band_index(&layout, band_index)?;
+        if ifd.is_tiled() {
+            tile::read_window_band(
+                self.source.as_ref(),
+                ifd,
+                self.byte_order(),
+                &self.block_cache,
+                window,
+                band_index,
+                self.gdal_structural_metadata.as_ref(),
+            )
+        } else {
+            strip::read_window_band(
+                self.source.as_ref(),
+                ifd,
+                self.byte_order(),
+                &self.block_cache,
+                window,
+                band_index,
                 self.gdal_structural_metadata.as_ref(),
             )
         }
@@ -650,6 +738,73 @@ impl TiffFile {
         })
     }
 
+    /// Decode one storage-domain band into a typed `[height, width]` ndarray.
+    pub fn read_band<T: TiffSample>(
+        &self,
+        ifd_index: usize,
+        band_index: usize,
+    ) -> Result<ArrayD<T>> {
+        let ifd = self.ifd(ifd_index)?;
+        self.read_band_from_ifd(ifd, band_index)
+    }
+
+    /// Decode one storage-domain band from an arbitrary IFD into a typed
+    /// `[height, width]` ndarray.
+    pub fn read_band_from_ifd<T: TiffSample>(
+        &self,
+        ifd: &Ifd,
+        band_index: usize,
+    ) -> Result<ArrayD<T>> {
+        let layout = ifd.raster_layout()?;
+        self.read_band_window_from_ifd(ifd, band_index, 0, 0, layout.height, layout.width)
+    }
+
+    /// Decode a window from one storage-domain band into a typed
+    /// `[rows, cols]` ndarray.
+    pub fn read_band_window<T: TiffSample>(
+        &self,
+        ifd_index: usize,
+        band_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        let ifd = self.ifd(ifd_index)?;
+        self.read_band_window_from_ifd(ifd, band_index, row_off, col_off, rows, cols)
+    }
+
+    /// Decode a window from one storage-domain band in an arbitrary IFD into a
+    /// typed `[rows, cols]` ndarray.
+    pub fn read_band_window_from_ifd<T: TiffSample>(
+        &self,
+        ifd: &Ifd,
+        band_index: usize,
+        row_off: usize,
+        col_off: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Result<ArrayD<T>> {
+        let layout = ifd.raster_layout()?;
+        validate_band_index(&layout, band_index)?;
+        let window = validate_window(&layout, row_off, col_off, rows, cols)?;
+        if !T::matches_layout(&layout) {
+            return Err(Error::TypeMismatch {
+                expected: T::type_name(),
+                actual: format!(
+                    "sample_format={} bits_per_sample={}",
+                    layout.sample_format, layout.bits_per_sample
+                ),
+            });
+        }
+
+        let decoded = self.decode_window_sample_band_bytes(ifd, window, band_index)?;
+        let values = T::decode_many(&decoded);
+        ArrayD::from_shape_vec(IxDyn(&[window.rows, window.cols]), values).map_err(|e| {
+            Error::InvalidImageLayout(format!("failed to build ndarray from band raster: {e}"))
+        })
+    }
+
     /// Decode an image into a typed ndarray of storage-domain samples.
     ///
     /// Single-band rasters are returned as shape `[height, width]`.
@@ -744,6 +899,16 @@ fn validate_window(
     })
 }
 
+fn validate_band_index(layout: &RasterLayout, band_index: usize) -> Result<()> {
+    if band_index >= layout.samples_per_pixel {
+        return Err(Error::BandIndexOutOfBounds {
+            index: band_index,
+            band_count: layout.samples_per_pixel,
+        });
+    }
+    Ok(())
+}
+
 fn parse_gdal_structural_metadata(source: &dyn TiffSource) -> Option<GdalStructuralMetadata> {
     let available_len = usize::try_from(source.len().checked_sub(8)?).ok()?;
     if available_len == 0 {
@@ -781,8 +946,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        parse_gdal_structural_metadata, parse_gdal_structural_metadata_len, GdalStructuralMetadata,
-        TiffFile, GDAL_STRUCTURAL_METADATA_PREFIX,
+        parse_gdal_structural_metadata, parse_gdal_structural_metadata_len, Error,
+        GdalStructuralMetadata, TiffFile, GDAL_STRUCTURAL_METADATA_PREFIX,
     };
     use crate::source::{BytesSource, TiffSource};
     use flate2::{write::ZlibEncoder, Compression as FlateCompression};
@@ -1159,6 +1324,84 @@ mod tests {
         data
     }
 
+    fn build_planar_stripped_tiff(width: u32, height: u32, planes: &[&[u8]]) -> Vec<u8> {
+        let mut entries = BTreeMap::new();
+        entries.insert(256, (4, 1, le_u32(width).to_vec()));
+        entries.insert(257, (4, 1, le_u32(height).to_vec()));
+        entries.insert(258, (3, 1, [8, 0, 0, 0].to_vec()));
+        entries.insert(259, (3, 1, [1, 0, 0, 0].to_vec()));
+        entries.insert(262, (3, 1, [2, 0, 0, 0].to_vec()));
+        entries.insert(277, (3, 1, inline_short(planes.len() as u16)));
+        entries.insert(278, (4, 1, le_u32(height).to_vec()));
+        entries.insert(284, (3, 1, [2, 0, 0, 0].to_vec()));
+        entries.insert(
+            279,
+            (
+                4,
+                planes.len() as u32,
+                planes
+                    .iter()
+                    .flat_map(|plane| le_u32(plane.len() as u32))
+                    .collect(),
+            ),
+        );
+
+        let ifd_offset = 8u32;
+        let ifd_size = 2 + (entries.len() + 1) * 12 + 4;
+        let mut strip_data_offset = ifd_offset as usize + ifd_size;
+        let strip_offsets: Vec<u32> = planes
+            .iter()
+            .map(|plane| {
+                let offset = strip_data_offset as u32;
+                strip_data_offset += plane.len();
+                offset
+            })
+            .collect();
+        entries.insert(
+            273,
+            (
+                4,
+                strip_offsets.len() as u32,
+                strip_offsets
+                    .iter()
+                    .flat_map(|offset| le_u32(*offset))
+                    .collect(),
+            ),
+        );
+
+        let mut next_data_offset = strip_data_offset;
+        let mut data = Vec::with_capacity(next_data_offset);
+        data.extend_from_slice(b"II");
+        data.extend_from_slice(&le_u16(42));
+        data.extend_from_slice(&le_u32(ifd_offset));
+        data.extend_from_slice(&le_u16(entries.len() as u16));
+
+        let mut deferred = Vec::new();
+        for (tag, (ty, count, value)) in entries {
+            data.extend_from_slice(&le_u16(tag));
+            data.extend_from_slice(&le_u16(ty));
+            data.extend_from_slice(&le_u32(count));
+            if value.len() <= 4 {
+                let mut inline = [0u8; 4];
+                inline[..value.len()].copy_from_slice(&value);
+                data.extend_from_slice(&inline);
+            } else {
+                let offset = next_data_offset as u32;
+                data.extend_from_slice(&le_u32(offset));
+                next_data_offset += value.len();
+                deferred.push(value);
+            }
+        }
+        data.extend_from_slice(&le_u32(0));
+        for plane in planes {
+            data.extend_from_slice(plane);
+        }
+        for value in deferred {
+            data.extend_from_slice(&value);
+        }
+        data
+    }
+
     struct CountingSource {
         bytes: Vec<u8>,
         reads: AtomicUsize,
@@ -1221,6 +1464,66 @@ mod tests {
         let (values, offset) = image.into_raw_vec_and_offset();
         assert_eq!(offset, Some(0));
         assert_eq!(values, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn reads_single_chunky_band_and_window() {
+        let data = build_stripped_tiff(
+            2,
+            2,
+            &[
+                1, 10, 100, //
+                2, 20, 110, //
+                3, 30, 120, //
+                4, 40, 130,
+            ],
+            &[
+                (262, 3, 1, inline_short(2)),
+                (277, 3, 1, inline_short(3)),
+                (279, 4, 1, le_u32(12).to_vec()),
+            ],
+        );
+        let file = TiffFile::from_bytes(data).unwrap();
+
+        let green = file.read_band::<u8>(0, 1).unwrap();
+        assert_eq!(green.shape(), &[2, 2]);
+        let (green_values, offset) = green.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(green_values, vec![10, 20, 30, 40]);
+
+        let blue_window = file.read_band_window::<u8>(0, 2, 0, 1, 2, 1).unwrap();
+        assert_eq!(blue_window.shape(), &[2, 1]);
+        let (blue_values, offset) = blue_window.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(blue_values, vec![110, 130]);
+
+        let err = file.read_band::<u8>(0, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::BandIndexOutOfBounds {
+                index: 3,
+                band_count: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn planar_band_reads_only_requested_plane() {
+        let data = build_planar_stripped_tiff(
+            2,
+            2,
+            &[&[1, 2, 3, 4], &[10, 20, 30, 40], &[100, 110, 120, 130]],
+        );
+        let source = Arc::new(CountingSource::new(data));
+        let file = TiffFile::from_source(source.clone()).unwrap();
+        source.reset_reads();
+
+        let blue = file.read_band::<u8>(0, 2).unwrap();
+        assert_eq!(blue.shape(), &[2, 2]);
+        let (values, offset) = blue.into_raw_vec_and_offset();
+        assert_eq!(offset, Some(0));
+        assert_eq!(values, vec![100, 110, 120, 130]);
+        assert_eq!(source.reads(), 1);
     }
 
     #[test]

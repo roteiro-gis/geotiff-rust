@@ -6,6 +6,7 @@
 //! entry points on [`AsyncHttpGeoTiffFile`] are `async`; metadata accessors
 //! are synchronous because everything they need is resolved at open time.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use reqwest::{Client, RequestBuilder, StatusCode};
 use tiff_reader::source::{SharedSource, TiffSource};
 use tiff_reader::{OpenOptions as TiffOpenOptions, TiffFile, TiffSample};
 use tokio::runtime::Handle;
+use tokio::sync::Notify;
 
 use crate::http_range::{probe_total_from_content_range, validate_content_range_header};
 use crate::{Error, GeoTiffFile, Result};
@@ -30,6 +32,12 @@ pub struct AsyncHttpOpenOptions {
     pub cache_bytes: usize,
     /// Maximum cached chunks.
     pub cache_slots: usize,
+    /// Maximum number of adjacent missing chunks merged into one range request.
+    ///
+    /// A read spanning several uncached chunks is served by one coalesced GET
+    /// per contiguous run rather than one request per chunk, so this bounds
+    /// how much a single request may fetch. Set to 1 to disable coalescing.
+    pub max_coalesced_chunks: usize,
     /// TCP connect timeout for clients built from these options.
     ///
     /// Ignored when `client` is provided; configure custom clients directly.
@@ -52,6 +60,7 @@ impl Default for AsyncHttpOpenOptions {
             chunk_size: 256 * 1024,
             cache_bytes: 64 * 1024 * 1024,
             cache_slots: 257,
+            max_coalesced_chunks: 16,
             connect_timeout: Some(Duration::from_secs(10)),
             request_timeout: Some(Duration::from_secs(120)),
             headers: HeaderMap::new(),
@@ -234,9 +243,11 @@ struct AsyncHttpRangeSource {
     url: String,
     len: u64,
     chunk_size: usize,
+    max_coalesced_chunks: usize,
     headers: HeaderMap,
     request_timeout: Option<Duration>,
     cache: Mutex<RangeCacheState>,
+    in_flight: Mutex<HashMap<u64, Arc<InFlightChunk>>>,
     max_bytes: usize,
     cache_enabled: bool,
 }
@@ -244,6 +255,81 @@ struct AsyncHttpRangeSource {
 struct RangeCacheState {
     cache: LruCache<u64, Arc<Vec<u8>>>,
     current_bytes: usize,
+}
+
+/// Rendezvous point for tasks that all want the same uncached chunk.
+///
+/// Exactly one task fetches; the rest await here until the result is
+/// published. Errors are carried as text because the transport error types
+/// are not `Clone`.
+struct InFlightChunk {
+    state: Mutex<Option<std::result::Result<Arc<Vec<u8>>, String>>>,
+    ready: Notify,
+}
+
+impl InFlightChunk {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(None),
+            ready: Notify::new(),
+        }
+    }
+
+    fn publish(&self, value: std::result::Result<Arc<Vec<u8>>, String>) {
+        {
+            let mut state = self.state.lock();
+            if state.is_none() {
+                *state = Some(value);
+            }
+        }
+        self.ready.notify_waiters();
+    }
+
+    async fn wait(&self) -> std::result::Result<Arc<Vec<u8>>, String> {
+        loop {
+            // Register before checking so a publish that lands in between is
+            // not missed.
+            let notified = self.ready.notified();
+            if let Some(value) = self.state.lock().as_ref() {
+                return value.clone();
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Whether this caller owns fetching a chunk or is waiting on another caller.
+enum ChunkClaim {
+    Cached(Arc<Vec<u8>>),
+    Lead(Arc<InFlightChunk>),
+    Follow(Arc<InFlightChunk>),
+}
+
+/// Releases every led chunk on drop so waiters can never be stranded, including
+/// when the owning future is cancelled mid-fetch.
+struct LeadGuard<'a> {
+    source: &'a AsyncHttpRangeSource,
+    pending: Vec<(u64, Arc<InFlightChunk>)>,
+}
+
+impl LeadGuard<'_> {
+    /// Hand a finished chunk to any waiters and stop guarding it.
+    fn settle(&mut self, index: u64, value: std::result::Result<Arc<Vec<u8>>, String>) {
+        if let Some(position) = self.pending.iter().position(|(key, _)| *key == index) {
+            let (_, entry) = self.pending.remove(position);
+            self.source.in_flight.lock().remove(&index);
+            entry.publish(value);
+        }
+    }
+}
+
+impl Drop for LeadGuard<'_> {
+    fn drop(&mut self) {
+        for (index, entry) in self.pending.drain(..) {
+            self.source.in_flight.lock().remove(&index);
+            entry.publish(Err("chunk fetch abandoned before completion".to_string()));
+        }
+    }
 }
 
 impl AsyncHttpRangeSource {
@@ -269,25 +355,71 @@ impl AsyncHttpRangeSource {
             url,
             len,
             chunk_size: options.chunk_size.max(1),
+            max_coalesced_chunks: options.max_coalesced_chunks.max(1),
             headers: options.headers,
             request_timeout: options.request_timeout,
             cache: Mutex::new(RangeCacheState {
                 cache: LruCache::new(slots),
                 current_bytes: 0,
             }),
+            in_flight: Mutex::new(HashMap::new()),
             max_bytes: options.cache_bytes,
             cache_enabled: options.cache_bytes > 0 && options.cache_slots > 0,
         })
     }
 
-    async fn chunk(&self, index: u64) -> Result<Arc<Vec<u8>>> {
-        if self.cache_enabled {
-            let mut state = self.cache.lock();
-            if let Some(chunk) = state.cache.get(&index) {
-                return Ok(chunk.clone());
-            }
+    fn cached(&self, index: u64) -> Option<Arc<Vec<u8>>> {
+        if !self.cache_enabled {
+            return None;
+        }
+        self.cache.lock().cache.get(&index).cloned()
+    }
+
+    /// Claim a chunk, re-checking the cache under the in-flight lock so a
+    /// fetch that finished since the caller last looked is not repeated.
+    ///
+    /// Lock order is `in_flight` then `cache`; publishers take them in the
+    /// opposite order but never hold both, so the two cannot deadlock. Neither
+    /// lock is ever held across an await.
+    fn claim(&self, index: u64) -> ChunkClaim {
+        let mut in_flight = self.in_flight.lock();
+        if let Some(chunk) = self.cached(index) {
+            return ChunkClaim::Cached(chunk);
+        }
+        if let Some(entry) = in_flight.get(&index) {
+            return ChunkClaim::Follow(Arc::clone(entry));
+        }
+        let entry = Arc::new(InFlightChunk::new());
+        in_flight.insert(index, Arc::clone(&entry));
+        ChunkClaim::Lead(entry)
+    }
+
+    fn store(&self, index: u64, body: Vec<u8>) -> Arc<Vec<u8>> {
+        let body_len = body.len();
+        let value = Arc::new(body);
+
+        let mut state = self.cache.lock();
+        if let Some(previous) = state.cache.pop(&index) {
+            state.current_bytes = state.current_bytes.saturating_sub(previous.len());
         }
 
+        if !self.cache_enabled || body_len > self.max_bytes {
+            return value;
+        }
+
+        while state.current_bytes > self.max_bytes - body_len && !state.cache.is_empty() {
+            if let Some((_, evicted)) = state.cache.pop_lru() {
+                state.current_bytes = state.current_bytes.saturating_sub(evicted.len());
+            }
+        }
+        state.current_bytes += body_len;
+        if let Some((_, evicted)) = state.cache.push(index, value.clone()) {
+            state.current_bytes = state.current_bytes.saturating_sub(evicted.len());
+        }
+        value
+    }
+
+    fn chunk_bounds(&self, index: u64) -> Result<(u64, u64)> {
         let chunk_size = self.chunk_size as u64;
         let start = index
             .checked_mul(chunk_size)
@@ -298,6 +430,91 @@ impl AsyncHttpRangeSource {
             )));
         }
         let end = start.saturating_add(chunk_size).min(self.len) - 1;
+        Ok((start, end))
+    }
+
+    /// Resolve a single chunk. Reads go through `chunk_span`; this is the
+    /// one-chunk shorthand used by the cache-accounting tests.
+    #[cfg(test)]
+    async fn chunk(&self, index: u64) -> Result<Arc<Vec<u8>>> {
+        let mut chunks = self.chunk_span(index, index).await?;
+        Ok(chunks.remove(0))
+    }
+
+    /// Resolve every chunk in `first..=last`, fetching contiguous runs of
+    /// missing chunks in one request each and sharing in-flight fetches with
+    /// other tasks.
+    async fn chunk_span(&self, first: u64, last: u64) -> Result<Vec<Arc<Vec<u8>>>> {
+        let count = usize::try_from(last - first + 1)
+            .map_err(|_| Error::Other("range chunk span overflowed usize".into()))?;
+        let mut resolved: Vec<Option<Arc<Vec<u8>>>> = vec![None; count];
+        let mut followers: Vec<(usize, Arc<InFlightChunk>)> = Vec::new();
+        let mut guard = LeadGuard {
+            source: self,
+            pending: Vec::new(),
+        };
+
+        for (slot, resolved_slot) in resolved.iter_mut().enumerate() {
+            let index = first + slot as u64;
+            match self.claim(index) {
+                ChunkClaim::Cached(chunk) => *resolved_slot = Some(chunk),
+                ChunkClaim::Follow(entry) => followers.push((slot, entry)),
+                ChunkClaim::Lead(entry) => guard.pending.push((index, entry)),
+            }
+        }
+
+        // Fetch the chunks this caller leads as contiguous runs, capped so one
+        // request cannot balloon past the configured limit.
+        let led: Vec<u64> = guard.pending.iter().map(|(index, _)| *index).collect();
+        let mut position = 0;
+        while position < led.len() {
+            let mut run_end = position;
+            loop {
+                let next = run_end + 1;
+                let contiguous = next < led.len() && led[next] == led[run_end] + 1;
+                if !contiguous || next - position + 1 > self.max_coalesced_chunks {
+                    break;
+                }
+                run_end = next;
+            }
+            let run = &led[position..=run_end];
+            match self.fetch_run(run[0], run.len()).await {
+                Ok(bodies) => {
+                    for (offset, body) in bodies.into_iter().enumerate() {
+                        let index = run[0] + offset as u64;
+                        let stored = self.store(index, body);
+                        resolved[(index - first) as usize] = Some(Arc::clone(&stored));
+                        guard.settle(index, Ok(stored));
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    for index in run {
+                        guard.settle(*index, Err(message.clone()));
+                    }
+                    return Err(error);
+                }
+            }
+            position = run_end + 1;
+        }
+
+        for (slot, entry) in followers {
+            let chunk = entry.wait().await.map_err(Error::Other)?;
+            resolved[slot] = Some(chunk);
+        }
+
+        resolved
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| Error::Other("range chunk span left an unresolved chunk".into()))
+    }
+
+    /// Issue one range request covering `count` consecutive chunks and split
+    /// the response back into per-chunk bodies.
+    async fn fetch_run(&self, first: u64, count: usize) -> Result<Vec<Vec<u8>>> {
+        let (start, _) = self.chunk_bounds(first)?;
+        let (_, end) = self.chunk_bounds(first + count as u64 - 1)?;
+
         let response = request_with_options(
             self.client.get(&self.url),
             &self.headers,
@@ -331,28 +548,18 @@ impl AsyncHttpRangeSource {
             &format!("{} bytes={start}-{end}", self.url),
         )
         .await?;
-        let body_len = body.len();
-        let value = Arc::new(body);
 
-        let mut state = self.cache.lock();
-        if let Some(previous) = state.cache.pop(&index) {
-            state.current_bytes = state.current_bytes.saturating_sub(previous.len());
+        let mut bodies = Vec::with_capacity(count);
+        let mut rest = body.as_slice();
+        for offset in 0..count {
+            let (chunk_start, chunk_end) = self.chunk_bounds(first + offset as u64)?;
+            let take = usize::try_from(chunk_end - chunk_start + 1)
+                .map_err(|_| Error::Other("range chunk length overflowed usize".into()))?;
+            let (head, tail) = rest.split_at(take.min(rest.len()));
+            bodies.push(head.to_vec());
+            rest = tail;
         }
-
-        if !self.cache_enabled || body_len > self.max_bytes {
-            return Ok(value);
-        }
-
-        while state.current_bytes > self.max_bytes - body_len && !state.cache.is_empty() {
-            if let Some((_, evicted)) = state.cache.pop_lru() {
-                state.current_bytes = state.current_bytes.saturating_sub(evicted.len());
-            }
-        }
-        state.current_bytes += body_len;
-        if let Some((_, evicted)) = state.cache.push(index, value.clone()) {
-            state.current_bytes = state.current_bytes.saturating_sub(evicted.len());
-        }
-        Ok(value)
+        Ok(bodies)
     }
 
     async fn read_exact_at(&self, offset: u64, len: usize) -> tiff_reader::error::Result<Vec<u8>> {
@@ -379,10 +586,13 @@ impl AsyncHttpRangeSource {
         let last_chunk = (end.saturating_sub(1)) / self.chunk_size as u64;
         let mut out = Vec::with_capacity(len);
 
-        for chunk_index in first_chunk..=last_chunk {
-            let chunk = self.chunk(chunk_index).await.map_err(|e| {
-                tiff_reader::TiffError::Other(format!("HTTP range read failed: {e}"))
-            })?;
+        let chunks = self
+            .chunk_span(first_chunk, last_chunk)
+            .await
+            .map_err(|e| tiff_reader::TiffError::Other(format!("HTTP range read failed: {e}")))?;
+
+        for (position, chunk) in chunks.into_iter().enumerate() {
+            let chunk_index = first_chunk + position as u64;
             let chunk_start = chunk_index * self.chunk_size as u64;
             let start_in_chunk = if chunk_index == first_chunk {
                 usize::try_from(offset - chunk_start).unwrap_or(0)
@@ -491,6 +701,7 @@ async fn probe_content_length(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use reqwest::Client;
@@ -605,5 +816,132 @@ mod tests {
         assert!(error
             .to_string()
             .contains("exceeds the expected 4-byte range"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_async_reads_of_one_chunk_issue_a_single_range_request() {
+        let Some(server) = TestServer::start_with_response_delay(
+            (0..2048u32).map(|value| value as u8).collect(),
+            Duration::from_millis(50),
+        ) else {
+            return;
+        };
+        let source = Arc::new(
+            AsyncHttpRangeSource::open(
+                server.url(),
+                AsyncHttpOpenOptions {
+                    chunk_size: 256,
+                    cache_bytes: 1024 * 1024,
+                    cache_slots: 16,
+                    ..AsyncHttpOpenOptions::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+
+        // Eight tasks race for the same chunk. Without single-flight each one
+        // misses the cache and issues its own duplicate GET.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let source = Arc::clone(&source);
+            handles.push(tokio::spawn(async move { source.chunk(3).await.unwrap() }));
+        }
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await.unwrap());
+        }
+
+        let expected = source.chunk(3).await.unwrap();
+        for result in &results {
+            assert_eq!(result.as_slice(), expected.as_slice());
+        }
+
+        let (total, distinct) = server.range_fetch_counts();
+        assert_eq!(distinct, 1, "expected one distinct chunk range");
+        assert_eq!(
+            total, 1,
+            "chunk 3 was fetched {total} times instead of once; \
+             concurrent cache misses are not being coalesced"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn async_multi_chunk_read_is_coalesced_into_one_request() {
+        let Some(server) = TestServer::start((0..4096u32).map(|value| value as u8).collect())
+        else {
+            return;
+        };
+        let source = AsyncHttpRangeSource::open(
+            server.url(),
+            AsyncHttpOpenOptions {
+                chunk_size: 256,
+                cache_bytes: 1024 * 1024,
+                cache_slots: 64,
+                ..AsyncHttpOpenOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Spans chunks 1..=4, all uncached and contiguous.
+        let actual = source.read_exact_at(300, 900).await.unwrap();
+        let expected =
+            (0..4096u32).map(|value| value as u8).collect::<Vec<_>>()[300..1200].to_vec();
+        assert_eq!(actual, expected);
+
+        let (total, _) = server.range_fetch_counts();
+        assert_eq!(
+            total, 1,
+            "a contiguous 4-chunk read issued {total} sequential requests \
+             instead of one coalesced request"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_async_overlapping_reads_never_refetch_a_chunk() {
+        // Overlapping spans produce distinct ranges once coalescing is in play,
+        // so this compares bytes served against bytes covered rather than
+        // counting repeated ranges.
+        let object: Vec<u8> = (0..8192u32).map(|value| value as u8).collect();
+        let Some(server) =
+            TestServer::start_with_response_delay(object.clone(), Duration::from_millis(30))
+        else {
+            return;
+        };
+        let source = Arc::new(
+            AsyncHttpRangeSource::open(
+                server.url(),
+                AsyncHttpOpenOptions {
+                    chunk_size: 512,
+                    cache_bytes: 1024 * 1024,
+                    cache_slots: 256,
+                    ..AsyncHttpOpenOptions::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+
+        let mut handles = Vec::new();
+        for worker in 0..12u64 {
+            let source = Arc::clone(&source);
+            let offset = worker * 256;
+            handles.push(tokio::spawn(async move {
+                (offset, source.read_exact_at(offset, 1024).await.unwrap())
+            }));
+        }
+        for handle in handles {
+            let (offset, actual) = handle.await.unwrap();
+            let start = offset as usize;
+            assert_eq!(actual, object[start..start + 1024], "bad read at {offset}");
+        }
+
+        let (served, covered) = server.byte_fetch_totals();
+        assert_eq!(
+            served, covered,
+            "overlapping concurrent reads transferred {served} bytes to cover \
+             only {covered} distinct bytes, so data was downloaded more than once"
+        );
     }
 }

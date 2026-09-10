@@ -169,6 +169,13 @@ Remote COG opens use bounded connect, read, and per-request timeouts by default.
 `reqwest::blocking::Client` for authenticated object stores, proxies, or custom
 TLS policy.
 
+Range requests are deduplicated and coalesced. Concurrent readers that miss the
+same cached chunk share a single in-flight fetch rather than each issuing their
+own request, and a read spanning several uncached chunks is served by one
+coalesced request per contiguous run instead of one request per chunk.
+`max_coalesced_chunks` bounds how much a single request may cover; set it to 1
+to disable coalescing.
+
 Local `open` constructors use safe file-backed random access by default.
 Memory-mapped local opens are available through `unsafe` `open_mmap`
 constructors when the caller can guarantee that the mapped file will not be

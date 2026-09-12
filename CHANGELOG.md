@@ -3,6 +3,22 @@
 ## Unreleased
 
 - upgrade `weezl` to 0.2.1 and raise the minimum supported Rust version to 1.88
+- deduplicate concurrent remote COG range fetches: the blocking and async range
+  caches now track in-flight chunks, so parallel tile decode shares one request
+  per chunk instead of racing. Reading a 5.6 MB tiled COG previously transferred
+  7.7 MB across 31 requests for 18 distinct ranges; it now transfers 4.5 MB
+  across 18 requests with no range fetched twice
+- coalesce contiguous uncached chunks into a single range request instead of
+  fetching them one at a time, so a read spanning several chunks costs one round
+  trip rather than one per chunk; bounded by the new `max_coalesced_chunks`
+  field on `HttpOpenOptions` and `AsyncHttpOpenOptions` (default 16, set to 1 to
+  disable). Adding the field is a breaking change for exhaustive struct literals
+  that do not use `..Default::default()`
+- make the HTTP test server handle each connection on its own thread and record
+  served byte ranges, so duplicated and sequential range fetches are visible to
+  the test suite; the previous serial accept loop serialized clients and hid
+  both. Accepted sockets are now explicitly set to blocking mode, which also
+  addresses intermittent request-read failures under parallel test load
 
 ## 0.8.1 - 2026-08-11
 

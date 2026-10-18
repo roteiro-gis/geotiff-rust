@@ -366,11 +366,11 @@ dependencies = [
 
 [[package]]
 name = "geotiff-core"
-version = "0.8.1"
+version = "0.9.0"
 
 [[package]]
 name = "geotiff-integration"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "geotiff-core",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "geotiff-reader"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "geotiff-core",
  "lru",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "geotiff-writer"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "geotiff-core",
  "half",
@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "half",
  "thiserror",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-integration"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "criterion",
  "half",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-reader"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "flate2",
  "image-webp",
@@ -1606,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "tiff-writer"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "flate2",
  "half",

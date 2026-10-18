@@ -2,12 +2,20 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-10-18
+
+Breaking changes:
+
+- raise the minimum supported Rust version from 1.85 to 1.88 while upgrading `weezl` to 0.2.1
+- add `max_coalesced_chunks` to the public `HttpOpenOptions` and `AsyncHttpOpenOptions` structs; exhaustive struct literals must set it or use `..Default::default()`
+
+Other changes:
+
 - accept any `ruzstd` 0.8 from 0.8.1 in `tiff-reader` and `tiff-writer`
   (`0.8.1` rather than `=0.8.1`). The exact pin held the 1.85 MSRV, which
   is now 1.88, and it made these crates unbuildable beside the 0.6/0.7
   releases, which require `^0.8.3`: `proj-core` 0.11 still reads its grids
   through `geotiff-reader` 0.6
-- upgrade `weezl` to 0.2.1 and raise the minimum supported Rust version to 1.88
 - deduplicate concurrent remote COG range fetches: the blocking and async range
   caches now track in-flight chunks, so parallel tile decode shares one request
   per chunk instead of racing. Reading a 5.6 MB tiled COG previously transferred
@@ -15,10 +23,8 @@
   across 18 requests with no range fetched twice
 - coalesce contiguous uncached chunks into a single range request instead of
   fetching them one at a time, so a read spanning several chunks costs one round
-  trip rather than one per chunk; bounded by the new `max_coalesced_chunks`
-  field on `HttpOpenOptions` and `AsyncHttpOpenOptions` (default 16, set to 1 to
-  disable). Adding the field is a breaking change for exhaustive struct literals
-  that do not use `..Default::default()`
+  trip rather than one per chunk; bounded by `max_coalesced_chunks` (default 16,
+  set to 1 to disable)
 - make the HTTP test server handle each connection on its own thread and record
   served byte ranges, so duplicated and sequential range fetches are visible to
   the test suite; the previous serial accept loop serialized clients and hid

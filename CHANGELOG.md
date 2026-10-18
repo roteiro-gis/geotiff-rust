@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- accept any `ruzstd` 0.8 from 0.8.1 in `tiff-reader` and `tiff-writer`
+  (`0.8.1` rather than `=0.8.1`). The exact pin held the 1.85 MSRV, which
+  is now 1.88, and it made these crates unbuildable beside the 0.6/0.7
+  releases, which require `^0.8.3`: `proj-core` 0.11 still reads its grids
+  through `geotiff-reader` 0.6
 - upgrade `weezl` to 0.2.1 and raise the minimum supported Rust version to 1.88
 - deduplicate concurrent remote COG range fetches: the blocking and async range
   caches now track in-flight chunks, so parallel tile decode shares one request

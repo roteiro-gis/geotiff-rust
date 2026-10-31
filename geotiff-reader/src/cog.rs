@@ -18,7 +18,9 @@ use reqwest::StatusCode;
 use tiff_reader::source::{SharedSource, TiffSource};
 use tiff_reader::{OpenOptions as TiffOpenOptions, TiffFile};
 
-use crate::http_range::{probe_total_from_content_range, validate_content_range_header};
+use crate::http_range::{
+    is_transient, probe_total_from_content_range, retry_delay, validate_content_range_header,
+};
 use crate::{Error, GeoTiffFile, Result};
 
 /// Options for HTTP range-backed GeoTIFF access.
@@ -36,6 +38,12 @@ pub struct HttpOpenOptions {
     /// per contiguous run rather than one request per chunk, so this bounds
     /// how much a single request may fetch. Set to 1 to disable coalescing.
     pub max_coalesced_chunks: usize,
+    /// Maximum retries of a range or object-size request after a transient
+    /// failure, with exponential backoff. Connection failures, interrupted
+    /// responses, and HTTP 408, 429, 500, 502, 503, and 504 are retried.
+    /// Timeouts aren't, so `request_timeout` still bounds a stalled request.
+    /// Set to 0 to disable.
+    pub max_retries: u32,
     /// TCP connect timeout for clients built from these options.
     ///
     /// Ignored when `client` is provided; configure custom clients directly.
@@ -59,6 +67,7 @@ impl Default for HttpOpenOptions {
             cache_bytes: 64 * 1024 * 1024,
             cache_slots: 257,
             max_coalesced_chunks: 16,
+            max_retries: 3,
             connect_timeout: Some(Duration::from_secs(10)),
             read_timeout: Some(Duration::from_secs(30)),
             request_timeout: Some(Duration::from_secs(120)),
@@ -108,6 +117,7 @@ struct HttpRangeSource {
     len: u64,
     chunk_size: usize,
     max_coalesced_chunks: usize,
+    max_retries: u32,
     headers: HeaderMap,
     read_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
@@ -195,7 +205,9 @@ impl Drop for LeadGuard<'_> {
 impl HttpRangeSource {
     fn open(url: String, options: HttpOpenOptions) -> Result<Self> {
         let client = build_client(&options)?;
-        let len = probe_content_length(&client, &url, &options.headers, options.request_timeout)?;
+        let len = with_retries(options.max_retries, || {
+            probe_content_length(&client, &url, &options.headers, options.request_timeout)
+        })?;
         let slots = NonZeroUsize::new(options.cache_slots.max(1)).unwrap();
         Ok(Self {
             client,
@@ -203,6 +215,7 @@ impl HttpRangeSource {
             len,
             chunk_size: options.chunk_size.max(1),
             max_coalesced_chunks: options.max_coalesced_chunks.max(1),
+            max_retries: options.max_retries,
             headers: options.headers,
             read_timeout: options.read_timeout,
             request_timeout: options.request_timeout,
@@ -325,7 +338,7 @@ impl HttpRangeSource {
                 run_end = next;
             }
             let run = &led[position..=run_end];
-            match self.fetch_run(run[0], run.len()) {
+            match with_retries(self.max_retries, || self.fetch_run(run[0], run.len())) {
                 Ok(bodies) => {
                     for (offset, body) in bodies.into_iter().enumerate() {
                         let index = run[0] + offset as u64;
@@ -413,6 +426,19 @@ impl HttpRangeSource {
             rest = tail;
         }
         Ok(bodies)
+    }
+}
+
+fn with_retries<T>(max_retries: u32, mut request: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut attempt = 0;
+    loop {
+        match request() {
+            Err(error) if attempt < max_retries && is_transient(&error) => {
+                std::thread::sleep(retry_delay(attempt));
+                attempt += 1;
+            }
+            result => return result,
+        }
     }
 }
 
@@ -580,7 +606,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use reqwest::blocking::Client;
     use reqwest::header::{HeaderMap, HeaderValue};
@@ -967,6 +993,118 @@ mod tests {
         for (start, end) in ranges {
             assert!(end - start < 512, "run exceeded the cap: {start}-{end}");
         }
+    }
+
+    #[test]
+    fn transient_range_failures_are_retried() {
+        let bytes = build_simple_geotiff();
+        let Some(server) = TestServer::start_with_transient_failures(bytes.clone(), 503, 2) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 64,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.read_exact_at(0, 16).unwrap(), bytes[..16]);
+        assert_eq!(server.data_ranges().len(), 3);
+    }
+
+    #[test]
+    fn a_failure_outlasting_the_retry_budget_is_reported() {
+        let Some(server) = TestServer::start_with_transient_failures(vec![0; 64], 503, 9) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 64,
+                max_retries: 1,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        let message = source.read_exact_at(0, 16).unwrap_err().to_string();
+        assert!(message.contains("503"), "{message}");
+        assert_eq!(server.data_ranges().len(), 2);
+    }
+
+    #[test]
+    fn retries_can_be_disabled() {
+        let Some(server) = TestServer::start_with_transient_failures(vec![0; 64], 503, 1) else {
+            return;
+        };
+        let source = HttpRangeSource::open(
+            server.url(),
+            HttpOpenOptions {
+                chunk_size: 64,
+                max_retries: 0,
+                ..HttpOpenOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(source.read_exact_at(0, 16).is_err());
+        assert_eq!(server.data_ranges().len(), 1);
+    }
+
+    #[test]
+    fn permanent_failures_are_not_retried() {
+        for status in [403, 404] {
+            let Some(server) = TestServer::start_with_transient_failures(vec![0; 64], status, 9)
+            else {
+                return;
+            };
+            let source = HttpRangeSource::open(
+                server.url(),
+                HttpOpenOptions {
+                    chunk_size: 64,
+                    ..HttpOpenOptions::default()
+                },
+            )
+            .unwrap();
+
+            assert!(source.read_exact_at(0, 16).is_err());
+            assert_eq!(server.data_ranges().len(), 1, "status {status}");
+        }
+    }
+
+    #[test]
+    fn timed_out_requests_are_not_retried() {
+        let delay = Duration::from_millis(500);
+        let Some(server) = TestServer::start_with_response_delay(vec![0; 12], delay) else {
+            return;
+        };
+        let started = Instant::now();
+
+        let result = HttpGeoTiffFile::open_with_options(
+            server.url(),
+            HttpOpenOptions {
+                request_timeout: Some(Duration::from_millis(30)),
+                ..HttpOpenOptions::default()
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < delay, "timed out requests were retried");
+    }
+
+    #[test]
+    fn opening_retries_a_transient_size_probe_failure() {
+        let Some(server) =
+            TestServer::start_with_transient_probe_failures(build_simple_geotiff(), 503, 2)
+        else {
+            return;
+        };
+
+        let file = HttpGeoTiffFile::open(server.url()).unwrap();
+
+        assert_eq!(file.inner().epsg(), Some(4326));
     }
 
     fn real_cog_fixture() -> Option<Vec<u8>> {

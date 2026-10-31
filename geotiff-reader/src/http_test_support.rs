@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -109,19 +109,40 @@ impl TestServer {
     }
 
     pub(crate) fn start_with_response_delay(bytes: Vec<u8>, delay: Duration) -> Option<Self> {
-        Self::start_configured(bytes, 0, Some(delay), Vec::new())
+        Self::start_configured(bytes, 0, Some(delay), Vec::new(), None)
+    }
+
+    /// Answer the first `count` range requests with `status`.
+    pub(crate) fn start_with_transient_failures(
+        bytes: Vec<u8>,
+        status: u16,
+        count: usize,
+    ) -> Option<Self> {
+        let failures = FailureConfig::new(status, count, false);
+        Self::start_configured(bytes, 0, None, Vec::new(), Some(failures))
+    }
+
+    /// Answer the first `count` requests of any kind, including the object
+    /// size probe, with `status`.
+    pub(crate) fn start_with_transient_probe_failures(
+        bytes: Vec<u8>,
+        status: u16,
+        count: usize,
+    ) -> Option<Self> {
+        let failures = FailureConfig::new(status, count, true);
+        Self::start_configured(bytes, 0, None, Vec::new(), Some(failures))
     }
 
     #[cfg(feature = "cog-async")]
     pub(crate) fn start_with_range_body_suffix(bytes: Vec<u8>, suffix: Vec<u8>) -> Option<Self> {
-        Self::start_configured(bytes, 0, None, suffix)
+        Self::start_configured(bytes, 0, None, suffix, None)
     }
 
     pub(crate) fn start_with_content_range_offset(
         bytes: Vec<u8>,
         content_range_offset: usize,
     ) -> Option<Self> {
-        Self::start_configured(bytes, content_range_offset, None, Vec::new())
+        Self::start_configured(bytes, content_range_offset, None, Vec::new(), None)
     }
 
     fn start_configured(
@@ -129,6 +150,7 @@ impl TestServer {
         content_range_offset: usize,
         response_delay: Option<Duration>,
         range_body_suffix: Vec<u8>,
+        failures: Option<FailureConfig>,
     ) -> Option<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").ok()?;
         listener.set_nonblocking(true).ok()?;
@@ -143,6 +165,7 @@ impl TestServer {
             content_range_offset,
             response_delay,
             range_body_suffix,
+            failures,
         });
         let requests_worker = requests.clone();
         let ranges_worker = ranges.clone();
@@ -249,6 +272,36 @@ struct ResponseConfig {
     content_range_offset: usize,
     response_delay: Option<Duration>,
     range_body_suffix: Vec<u8>,
+    failures: Option<FailureConfig>,
+}
+
+struct FailureConfig {
+    status: u16,
+    remaining: AtomicUsize,
+    include_non_range_requests: bool,
+}
+
+impl FailureConfig {
+    fn new(status: u16, count: usize, include_non_range_requests: bool) -> Self {
+        Self {
+            status,
+            remaining: AtomicUsize::new(count),
+            include_non_range_requests,
+        }
+    }
+
+    /// Consume one failure if this request should get one.
+    fn take(&self, is_range_request: bool) -> Option<u16> {
+        if !is_range_request && !self.include_non_range_requests {
+            return None;
+        }
+        self.remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .ok()
+            .map(|_| self.status)
+    }
 }
 
 fn serve_connection(
@@ -270,6 +323,17 @@ fn serve_connection(
     }
     if let Some(delay) = config.response_delay {
         thread::sleep(delay);
+    }
+
+    if let Some(status) = config
+        .failures
+        .as_ref()
+        .and_then(|failures| failures.take(range.is_some()))
+    {
+        let response =
+            format!("HTTP/1.1 {status} Failure\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(response.as_bytes());
+        return;
     }
 
     let total = config.bytes.len();

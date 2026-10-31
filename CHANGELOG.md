@@ -9,7 +9,7 @@ Breaking changes:
 
 Fixes:
 
-- upgrade the `lerc` crates to 0.5.1 so GDAL-written unsigned 8-bit LERC blocks using Huffman coding decode, and write Lerc2 v2.4 through `EncoderProfile::Gdal`, which also allows correlated chunky bands that used to fail at write time
+- upgrade the `lerc` crates to 0.5.2 so GDAL-written 8-bit LERC blocks using Huffman coding decode, including negative `int8` samples that used to saturate to 127 with no error, and write Lerc2 v2.4 through `EncoderProfile::Gdal`, which also allows correlated chunky bands that used to fail at write time
 - take JPEG color handling from the TIFF photometric tag instead of stream markers: RGB tiles with component IDs 1, 2, 3 no longer get a spurious YCbCr conversion, and CMYK samples are no longer inverted
 - honor `FillOrder=2` for every codec except JPEG, matching libtiff, instead of silently returning wrong pixels
 - apply the half-pixel `PixelIsPoint` shift to `ModelTransformation` when reading, and to `GeoTiffBuilder::transform` when writing; `transformation_matrix` is still written as given

@@ -1,7 +1,15 @@
+use std::sync::Arc;
+
+use crate::cache::{BlockCache, BlockKey};
 use crate::error::{Error, Result};
 use crate::filters;
 use crate::header::ByteOrder;
 use crate::ifd::{Ifd, LercAdditionalCompression};
+use crate::source::TiffSource;
+use crate::{
+    allocate_decode_output, read_block_payload, read_gdal_block_payload,
+    validate_decode_output_len, DecodeReadOptions,
+};
 use lerc_core::{DataType, PixelData};
 use lerc_reader::DecodedBandSet;
 use tiff_core::{ColorModel, Compression, RasterLayout, SampleFormat};
@@ -92,6 +100,76 @@ struct Lerc2Header {
     depth: u32,
     data_type: DataType,
     blob_size: usize,
+}
+
+/// Location and shape of one strip or tile.
+#[derive(Clone, Copy)]
+pub(crate) struct BlockSpec {
+    pub key: BlockKey,
+    pub index: usize,
+    pub offset: u64,
+    pub byte_count: u64,
+    pub block_width: usize,
+    pub block_height: usize,
+}
+
+/// Read a strip or tile through the decoded-block cache.
+pub(crate) fn read_block(
+    source: &dyn TiffSource,
+    cache: &BlockCache,
+    spec: BlockSpec,
+    context: &BlockDecodeContext<'_>,
+    options: DecodeReadOptions<'_>,
+) -> Result<Arc<Vec<u8>>> {
+    let decode_request = BlockDecodeRequest {
+        context,
+        compressed: &[],
+        index: spec.index,
+        block_width: spec.block_width,
+        block_height: spec.block_height,
+    };
+    let decoded_len = decoded_block_len(&decode_request)?;
+    validate_decode_output_len(decoded_len, options.decode_output_bytes)?;
+
+    if let Some(cached) = cache.get(&spec.key) {
+        return Ok(cached);
+    }
+
+    // GDAL SPARSE_OK semantics: a block with no on-disk payload (zero offset
+    // or zero byte count) decodes as implicit zero fill.
+    if spec.offset == 0 || spec.byte_count == 0 {
+        let decoded = allocate_decode_output(decoded_len, options.decode_output_bytes)?;
+        return Ok(cache.insert(spec.key, decoded));
+    }
+
+    let byte_count_limit = compressed_block_byte_count_limit(&decode_request)?;
+    let compressed = match options.gdal_structural_metadata {
+        Some(metadata) => read_gdal_block_payload(
+            source,
+            metadata,
+            context.byte_order,
+            spec.offset,
+            spec.byte_count,
+            byte_count_limit,
+            spec.index,
+        )?,
+        None => read_block_payload(
+            source,
+            spec.offset,
+            spec.byte_count,
+            byte_count_limit,
+            spec.index,
+        )?,
+    };
+
+    let decoded = decode_compressed_block(BlockDecodeRequest {
+        context,
+        compressed: &compressed,
+        index: spec.index,
+        block_width: spec.block_width,
+        block_height: spec.block_height,
+    })?;
+    Ok(cache.insert(spec.key, decoded))
 }
 
 pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result<Vec<u8>> {

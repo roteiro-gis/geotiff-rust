@@ -15,8 +15,7 @@ use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
 use crate::{
     allocate_decode_output, checked_layout_add, checked_layout_mul, copy_strided_samples,
-    read_block_payload, read_gdal_block_payload, validate_decode_output_len, DecodeReadOptions,
-    Window,
+    DecodeReadOptions, Window,
 };
 
 pub(crate) fn read_window(
@@ -374,58 +373,22 @@ fn read_strip_block(
     context: &block_decode::BlockDecodeContext<'_>,
     options: DecodeReadOptions<'_>,
 ) -> Result<Arc<Vec<u8>>> {
-    let decode_request = block_decode::BlockDecodeRequest {
+    block_decode::read_block(
+        source,
+        cache,
+        block_decode::BlockSpec {
+            key: BlockKey {
+                ifd_offset,
+                kind: BlockKind::Strip,
+                block_index: spec.index,
+            },
+            index: spec.index,
+            offset: spec.offset,
+            byte_count: spec.byte_count,
+            block_width: context.layout.width,
+            block_height: spec.rows_in_strip,
+        },
         context,
-        compressed: &[],
-        index: spec.index,
-        block_width: context.layout.width,
-        block_height: spec.rows_in_strip,
-    };
-    let decoded_len = block_decode::decoded_block_len(&decode_request)?;
-    validate_decode_output_len(decoded_len, options.decode_output_bytes)?;
-
-    let cache_key = BlockKey {
-        ifd_offset,
-        kind: BlockKind::Strip,
-        block_index: spec.index,
-    };
-    if let Some(cached) = cache.get(&cache_key) {
-        return Ok(cached);
-    }
-
-    // GDAL SPARSE_OK semantics: a block with no on-disk payload (zero offset
-    // or zero byte count) decodes as implicit zero fill.
-    if spec.offset == 0 || spec.byte_count == 0 {
-        let decoded = allocate_decode_output(decoded_len, options.decode_output_bytes)?;
-        return Ok(cache.insert(cache_key, decoded));
-    }
-
-    let byte_count_limit = block_decode::compressed_block_byte_count_limit(&decode_request)?;
-    let compressed = match options.gdal_structural_metadata {
-        Some(metadata) => read_gdal_block_payload(
-            source,
-            metadata,
-            context.byte_order,
-            spec.offset,
-            spec.byte_count,
-            byte_count_limit,
-            spec.index,
-        )?,
-        None => read_block_payload(
-            source,
-            spec.offset,
-            spec.byte_count,
-            byte_count_limit,
-            spec.index,
-        )?,
-    };
-
-    let decoded = block_decode::decode_compressed_block(block_decode::BlockDecodeRequest {
-        context,
-        compressed: &compressed,
-        index: spec.index,
-        block_width: context.layout.width,
-        block_height: spec.rows_in_strip,
-    })?;
-    Ok(cache.insert(cache_key, decoded))
+        options,
+    )
 }

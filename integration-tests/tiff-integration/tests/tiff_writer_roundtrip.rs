@@ -554,7 +554,7 @@ fn lerc_roundtrip_and_builder_state_behave_consistently() {
 }
 
 #[test]
-fn lerc_write_rejects_gdal_incompatible_lerc2_versions() {
+fn lerc_writes_correlated_chunky_bands_as_lerc2_v4() {
     let width = 64u32;
     let height = 64u32;
     let mut data = Vec::with_capacity((width * height * 3) as usize);
@@ -577,11 +577,19 @@ fn lerc_write_rejects_gdal_incompatible_lerc2_versions() {
         })
         .tiles(width, height);
     let handle = writer.add_image(image).unwrap();
+    writer.write_block(&handle, 0, &data).unwrap();
+    writer.finish().unwrap();
 
-    let err = writer.write_block(&handle, 0, &data).unwrap_err();
-    assert!(
-        matches!(err, tiff_writer::Error::CompressionFailed { reason, .. } if reason.contains("LERC2 version 5"))
-    );
+    let bytes = buf.into_inner();
+    let file = TiffFile::from_bytes(bytes.clone()).unwrap();
+    let ifd = file.ifd(0).unwrap();
+    let offset = ifd.tile_offsets().unwrap()[0] as usize;
+    let version = i32::from_le_bytes(bytes[offset + 6..offset + 10].try_into().unwrap());
+    assert_eq!(version, LERC_VERSION_2_4 as i32);
+
+    let (values, offset) = file.read_image::<u8>(0).unwrap().into_raw_vec_and_offset();
+    assert_eq!(offset, Some(0));
+    assert_eq!(values, data);
 }
 
 #[test]

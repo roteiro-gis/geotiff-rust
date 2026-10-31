@@ -696,23 +696,23 @@ fn validate_lerc_layout(
     index: usize,
 ) -> Result<()> {
     let expected_type = expected_lerc_data_type(layout)?;
-    let band_count = decoded.info.band_count();
+    let band_count = decoded.info().band_count();
     if band_count == 0 {
         return Err(Error::DecompressionFailed {
             index,
             reason: "LERC band set must contain at least one band".into(),
         });
     }
-    if decoded.bands.len() != band_count {
+    if decoded.bands().len() != band_count {
         return Err(Error::DecompressionFailed {
             index,
             reason: format!(
                 "LERC decoded band payload count {} does not match metadata band count {band_count}",
-                decoded.bands.len()
+                decoded.bands().len()
             ),
         });
     }
-    for band in &decoded.info.bands {
+    for band in decoded.info().bands() {
         if band.width as usize != block_width || band.height as usize != block_height {
             return Err(Error::DecompressionFailed {
                 index,
@@ -740,7 +740,7 @@ fn validate_lerc_layout(
     } else {
         1
     };
-    let depth = decoded.info.depth().max(1) as usize;
+    let depth = decoded.info().depth().max(1) as usize;
     if !((band_count == 1 && depth == expected_samples)
         || (depth == 1 && band_count == expected_samples))
     {
@@ -781,19 +781,19 @@ fn serialize_lerc_band_set(
     expected_len: usize,
     index: usize,
 ) -> Result<Vec<u8>> {
-    let pixel_count = decoded.info.bands[0].pixel_count().map_err(|error| {
+    let pixel_count = decoded.info().bands()[0].pixel_count().map_err(|error| {
         Error::InvalidImageLayout(format!("LERC pixel count overflow: {error}"))
     })?;
     let mut out = Vec::with_capacity(expected_len);
     let plan = SerializationPlan {
         pixel_count,
-        band_count: decoded.info.band_count(),
-        depth: decoded.info.depth().max(1) as usize,
+        band_count: decoded.info().band_count(),
+        depth: decoded.info().depth().max(1) as usize,
         layout,
         index,
     };
 
-    match &decoded.bands[0] {
+    match &decoded.bands()[0] {
         PixelData::I8(_) => {
             serialize_typed::<i8, _>(decoded, plan, 0, &mut out, |band| match band {
                 PixelData::I8(values) => Some(values.as_slice()),
@@ -874,7 +874,7 @@ where
         1
     };
     let band_slices = decoded
-        .bands
+        .bands()
         .iter()
         .map(|band| {
             slice_for(band).ok_or_else(|| {
@@ -964,7 +964,7 @@ fn decoded_band_mask(
     index: usize,
 ) -> Result<Option<&[u8]>> {
     let Some(mask) = decoded
-        .band_masks
+        .band_masks()
         .get(band_index)
         .and_then(|mask| mask.as_deref())
     else {

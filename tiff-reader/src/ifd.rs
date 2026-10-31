@@ -550,9 +550,9 @@ impl Ifd {
         if !matches!(predictor, 1..=3) {
             return Err(Error::UnsupportedPredictor(predictor));
         }
-        if first_bits < 8 && predictor != 1 {
+        if !matches!(first_bits, 8 | 16 | 32 | 64) && predictor != 1 {
             return Err(Error::InvalidImageLayout(
-                "predictors are not supported for sub-byte sample encodings".into(),
+                "predictors are not supported for bit-packed sample encodings".into(),
             ));
         }
 
@@ -574,7 +574,7 @@ impl Ifd {
     ///
     /// This layout reflects color-decoded output rather than the on-disk sample
     /// organization. For example, palette and YCbCr rasters decode to RGB
-    /// pixels, and sub-byte integer rasters expand to 8-bit samples.
+    /// pixels, and bit-packed integer rasters expand to 8- or 16-bit samples.
     pub fn decoded_raster_layout(&self) -> Result<RasterLayout> {
         let storage = self.raster_layout()?;
         let color_model = self.color_model()?;
@@ -876,7 +876,7 @@ fn photometric_name(photometric: PhotometricInterpretation) -> &'static str {
 
 fn validate_sample_encoding(sample_format: u16, bits_per_sample: u16) -> Result<()> {
     let supported = match sample_format {
-        1 => matches!(bits_per_sample, 1 | 2 | 4 | 8 | 16 | 32 | 64),
+        1 => matches!(bits_per_sample, 1..=16 | 32 | 64),
         2 => matches!(bits_per_sample, 8 | 16 | 32 | 64),
         3 => matches!(bits_per_sample, 32 | 64) || (cfg!(feature = "f16") && bits_per_sample == 16),
         _ => false,
@@ -888,7 +888,7 @@ fn validate_sample_encoding(sample_format: u16, bits_per_sample: u16) -> Result<
 }
 
 fn decoded_uint_bits(bits_per_sample: u16) -> u16 {
-    bits_per_sample.max(8)
+    bits_per_sample.next_power_of_two().max(8)
 }
 
 fn decoded_bits(sample_format: u16, bits_per_sample: u16) -> Result<u16> {

@@ -118,8 +118,8 @@ with `bands(...)` and optional
 - Compression: Deflate, LZW, PackBits, LERC, LERC+DEFLATE, JPEG (optional), ZSTD (optional), LERC+ZSTD (optional), WebP decode (optional)
 - Bounded IFD parsing and block decompression budgets for untrusted input
 - Parallel decompression via Rayon
-- Storage-domain typed sample reads via `read_image` / `read_window` / `read_band*`
-- Explicit decoded pixel reads via `read_decoded_*` for standard TIFF color models, including palette expansion, YCbCr/CMYK conversion, and sub-byte grayscale/palette decode
+- Storage-domain typed sample reads via `read_image` / `read_window` / `read_band*`, including bit-packed unsigned samples of 1 to 15 bits, which read as `u8` or `u16`
+- Explicit decoded pixel reads via `read_decoded_*` for standard TIFF color models, including palette expansion, YCbCr/CMYK conversion, and bit-packed grayscale/palette decode
 - Structured photometric/color-model metadata: palette `ColorMap`, `ExtraSamples`, CMYK, and YCbCr
 - GeoKey directory, structured CRS metadata (projected, geographic, geocentric, vertical, compound), transforms, NoData
 - Overview discovery from both reduced-resolution top-level IFDs and recursive base-image SubIFD-backed overview trees

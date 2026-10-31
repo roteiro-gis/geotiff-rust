@@ -332,11 +332,11 @@ pub(crate) fn lerc_encode<T: lerc_core::Sample>(
             reason: format!("LERC raster view: {e}"),
         }
     })?;
-    let options = lerc_writer::EncodeOptions {
-        max_z_error,
-        micro_block_size: 8,
-        no_data_value: None,
-    };
+    // TIFF LercParameters declares Lerc2 v4. The default compact profile may
+    // emit v5 blobs for multi-band integer rasters, which that tag can't describe.
+    let options = lerc_writer::EncodeOptions::new()
+        .with_max_z_error(max_z_error)
+        .with_profile(lerc_writer::EncoderProfile::Gdal);
     lerc_writer::encode(raster, None, options).map_err(|e| Error::CompressionFailed {
         index,
         reason: format!("LERC encode: {e}"),

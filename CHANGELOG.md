@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+Breaking changes:
+
+- add `max_retries` to the public `HttpOpenOptions` and `AsyncHttpOpenOptions` structs; exhaustive struct literals must set it or use `..Default::default()`
+- `CrsInfo::epsg()` and `GeoMetadata::epsg` return `None` for the reserved GeoKey values 0 (undefined) and 32767 (user-defined) instead of reporting them as EPSG codes; `projected_epsg()` and `geodetic_epsg()` still return the raw values
+
+Fixes:
+
+- upgrade the `lerc` crates to 0.5.2 so GDAL-written 8-bit LERC blocks using Huffman coding decode, including negative `int8` samples that used to saturate to 127 with no error, and write Lerc2 v2.4 through `EncoderProfile::Gdal`, which also allows correlated chunky bands that used to fail at write time
+- take JPEG color handling from the TIFF photometric tag instead of stream markers: RGB tiles with component IDs 1, 2, 3 no longer get a spurious YCbCr conversion, and CMYK samples are no longer inverted
+- honor `FillOrder=2` for every codec except JPEG, matching libtiff, instead of silently returning wrong pixels
+- apply the half-pixel `PixelIsPoint` shift to `ModelTransformation` when reading, and to `GeoTiffBuilder::transform` when writing; `transformation_matrix` is still written as given
+- open GeoTIFFs GDAL can read but that were rejected for georeferencing: signed `ModelPixelScale` values, 2-value scales, and tag combinations that leave no usable transform, which now give `transform() == None`; a usable scale and tiepoint win over a matrix, and non-finite values are still rejected
+- skip malformed GeoKeys instead of failing the whole file, following libgeotiff; only a directory shorter than its header or with an unknown `KeyDirectoryVersion` is rejected
+- ignore excess uncompressed byte counts when the bytes exist in the file, and read `SampleFormat=4` (undefined) as unsigned
+
+Other changes:
+
+- read unsigned samples of any depth from 1 to 15 bits, returned as `u8` or `u16`; raw values match GDAL, and `read_decoded_*` scales them to the container's full range
+- retry transient HTTP failures for range requests and the object-size probe with exponential backoff, in both remote readers; timeouts aren't retried, so `request_timeout` still bounds a stalled request
+- stop copying strip and tile tables on every read: a cached 16×16 read on a 1M-tile file went from 597 µs to 2.9 µs
+- copy bands and planes without per-sample checked arithmetic: a band read of a 4096×4096 3-band `u16` raster went from 221 to 798 MB/s
+- share one cached block read between strips and tiles
+
 ## 0.9.1 - 2026-10-31
 
 - upgrade `ruzstd` to 0.9.1 to fix a decompression bomb (RUSTSEC-2026-0344): a

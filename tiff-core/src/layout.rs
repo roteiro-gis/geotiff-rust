@@ -21,6 +21,12 @@ pub struct RasterLayout {
 }
 
 impl RasterLayout {
+    /// Whether samples are stored as a bitstream rather than filling whole
+    /// bytes. Such samples decode into the next larger byte-sized container.
+    pub fn is_bit_packed(&self) -> bool {
+        !matches!(self.bits_per_sample, 8 | 16 | 32 | 64)
+    }
+
     pub fn checked_pixel_stride_bytes(&self) -> Result<usize, LayoutError> {
         self.samples_per_pixel
             .checked_mul(self.bytes_per_sample)

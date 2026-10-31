@@ -8,10 +8,10 @@ pub trait TiffSample: Clone + 'static {
 }
 
 macro_rules! impl_tiff_sample {
-    ($ty:ty, $format:expr, $bits:expr, $chunk:expr, $from_ne:expr) => {
+    ($ty:ty, $format:expr, $bits:pat, $chunk:expr, $from_ne:expr) => {
         impl TiffSample for $ty {
             fn matches_layout(layout: &RasterLayout) -> bool {
-                layout.sample_format == $format && layout.bits_per_sample == $bits
+                layout.sample_format == $format && matches!(layout.bits_per_sample, $bits)
             }
 
             fn decode_many(bytes: &[u8]) -> Vec<Self> {
@@ -40,7 +40,7 @@ impl TiffSample for u8 {
 }
 
 impl_tiff_sample!(i8, 2, 8, 1, |chunk: &[u8]| chunk[0] as i8);
-impl_tiff_sample!(u16, 1, 16, 2, |chunk: &[u8]| u16::from_ne_bytes(
+impl_tiff_sample!(u16, 1, 9..=16, 2, |chunk: &[u8]| u16::from_ne_bytes(
     chunk.try_into().unwrap()
 ));
 impl_tiff_sample!(i16, 2, 16, 2, |chunk: &[u8]| i16::from_ne_bytes(

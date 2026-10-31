@@ -128,36 +128,37 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
         if decoded.len() > expected_len {
             decoded.truncate(expected_len);
         }
+        let layout = request.context.layout;
         let is_subsampled_ycbcr = request.context.is_subsampled_ycbcr_non_jpeg();
+        // Bit-packed rows are a big-endian bitstream in either file byte order
+        // and can't carry a predictor, so they skip the steps below.
+        if layout.is_bit_packed() && !is_subsampled_ycbcr {
+            return unpack_bit_packed_block(
+                &decoded,
+                layout.bits_per_sample,
+                samples,
+                request.block_width,
+                request.block_height,
+                request.index,
+            );
+        }
         let row_bytes = if is_subsampled_ycbcr {
             decoded.len()
-        } else if request.context.layout.bits_per_sample < 8 {
-            if request.context.layout.planar_configuration == 1 {
-                request
-                    .context
-                    .layout
-                    .checked_packed_row_bytes_for_width(request.block_width)?
-            } else {
-                request
-                    .context
-                    .layout
-                    .checked_packed_sample_plane_row_bytes_for_width(request.block_width)?
-            }
         } else {
             request
                 .block_width
                 .checked_mul(samples)
-                .and_then(|value| value.checked_mul(request.context.layout.bytes_per_sample))
+                .and_then(|value| value.checked_mul(layout.bytes_per_sample))
                 .ok_or_else(|| Error::InvalidImageLayout("block row size overflows usize".into()))?
         };
         let mut predictor_scratch = Vec::new();
         for row in decoded.chunks_exact_mut(row_bytes) {
             filters::fix_endianness_and_predict_with_scratch(
                 row,
-                request.context.layout.bits_per_sample,
+                layout.bits_per_sample,
                 samples as u16,
                 request.context.byte_order,
-                request.context.layout.predictor,
+                layout.predictor,
                 &mut predictor_scratch,
             )?;
         }
@@ -167,19 +168,10 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
             };
             decoded = expand_subsampled_ycbcr(
                 &decoded,
-                request.context.layout.bytes_per_sample,
+                layout.bytes_per_sample,
                 request.block_width,
                 request.block_height,
                 *subsampling,
-            )?;
-        } else if request.context.layout.bits_per_sample < 8 {
-            decoded = unpack_subbyte_block(
-                &decoded,
-                request.context.layout.bits_per_sample,
-                samples,
-                request.block_width,
-                request.block_height,
-                request.index,
             )?;
         }
         return Ok(decoded);
@@ -191,8 +183,8 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
 /// Final decoded byte length produced by `decode_compressed_block`.
 ///
 /// This differs from `expected_encoded_block_len` for layouts whose decode
-/// step changes the sample representation: sub-byte samples unpack to one
-/// byte per sample and subsampled YCbCr expands to full-resolution chroma.
+/// step changes the sample representation: bit-packed samples unpack to whole
+/// bytes and subsampled YCbCr expands to full-resolution chroma.
 pub(crate) fn decoded_block_len(request: &BlockDecodeRequest<'_>) -> Result<usize> {
     let samples = request.context.block_samples();
     if request.context.is_subsampled_ycbcr_non_jpeg() {
@@ -205,13 +197,16 @@ pub(crate) fn decoded_block_len(request: &BlockDecodeRequest<'_>) -> Result<usiz
                 Error::InvalidImageLayout("expanded YCbCr block overflows usize".into())
             });
     }
-    if request.context.layout.bits_per_sample < 8 {
+    if request.context.layout.is_bit_packed() {
         return request
             .block_width
             .checked_mul(samples)
             .and_then(|row_samples| row_samples.checked_mul(request.block_height))
+            .and_then(|block_samples| {
+                block_samples.checked_mul(request.context.layout.bytes_per_sample)
+            })
             .ok_or_else(|| {
-                Error::InvalidImageLayout("sub-byte block size overflows usize".into())
+                Error::InvalidImageLayout("bit-packed block size overflows usize".into())
             });
     }
     expected_encoded_block_len(request, samples)
@@ -255,7 +250,7 @@ fn expected_encoded_block_len(request: &BlockDecodeRequest<'_>, samples: usize) 
             .ok_or_else(|| Error::InvalidImageLayout("YCbCr block size overflows usize".into()));
     }
 
-    let row_bytes = if request.context.layout.bits_per_sample < 8 {
+    let row_bytes = if request.context.layout.is_bit_packed() {
         if request.context.layout.planar_configuration == 1 {
             request
                 .context
@@ -280,7 +275,9 @@ fn expected_encoded_block_len(request: &BlockDecodeRequest<'_>, samples: usize) 
         .ok_or_else(|| Error::InvalidImageLayout("block size overflows usize".into()))
 }
 
-fn unpack_subbyte_block(
+/// Expand a block of MSB-first packed samples into native-endian containers:
+/// one byte for up to 8 bits per sample, otherwise two.
+fn unpack_bit_packed_block(
     packed: &[u8],
     bits_per_sample: u16,
     samples_per_pixel: usize,
@@ -288,32 +285,55 @@ fn unpack_subbyte_block(
     block_height: usize,
     index: usize,
 ) -> Result<Vec<u8>> {
-    debug_assert!(matches!(bits_per_sample, 1 | 2 | 4));
+    debug_assert!(matches!(bits_per_sample, 1..=15));
+    let bits = u32::from(bits_per_sample);
     let row_samples = block_width
         .checked_mul(samples_per_pixel)
-        .ok_or_else(|| Error::InvalidImageLayout("sub-byte row samples overflow usize".into()))?;
-    let row_bytes = (row_samples * bits_per_sample as usize).div_ceil(8);
+        .ok_or_else(|| Error::InvalidImageLayout("packed row samples overflow usize".into()))?;
+    let row_bytes = row_samples
+        .checked_mul(usize::from(bits_per_sample))
+        .map(|row_bits| row_bits.div_ceil(8))
+        .ok_or_else(|| Error::InvalidImageLayout("packed row size overflows usize".into()))?;
     let expected_len = row_bytes
         .checked_mul(block_height)
-        .ok_or_else(|| Error::InvalidImageLayout("sub-byte block size overflows usize".into()))?;
+        .ok_or_else(|| Error::InvalidImageLayout("packed block size overflows usize".into()))?;
     if packed.len() != expected_len {
         return Err(Error::DecompressionFailed {
             index,
             reason: format!(
-                "sub-byte decoded block length {} does not match expected {expected_len}",
+                "bit-packed decoded block length {} does not match expected {expected_len}",
                 packed.len()
             ),
         });
     }
 
-    let mut unpacked = Vec::with_capacity(row_samples * block_height);
-    let mask = ((1u16 << bits_per_sample) - 1) as u8;
-    let samples_per_byte = 8 / bits_per_sample as usize;
+    let container_bytes = usize::from(bits_per_sample.div_ceil(8));
+    let unpacked_len = row_samples
+        .checked_mul(block_height)
+        .and_then(|samples| samples.checked_mul(container_bytes))
+        .ok_or_else(|| Error::InvalidImageLayout("unpacked block size overflows usize".into()))?;
+    let mut unpacked = Vec::with_capacity(unpacked_len);
+    let mask = (1u32 << bits) - 1;
     for row in packed.chunks_exact(row_bytes) {
-        for sample_index in 0..row_samples {
-            let byte = row[sample_index / samples_per_byte];
-            let shift = 8 - bits_per_sample as usize * ((sample_index % samples_per_byte) + 1);
-            unpacked.push((byte >> shift) & mask);
+        // Rows start on a byte boundary. At most 7 unread bits stay buffered,
+        // so 15-bit samples never overflow the accumulator.
+        let mut buffered = 0u32;
+        let mut buffered_bits = 0u32;
+        let mut bytes = row.iter();
+        for _ in 0..row_samples {
+            while buffered_bits < bits {
+                let byte = bytes.next().copied().unwrap_or(0);
+                buffered = (buffered << 8) | u32::from(byte);
+                buffered_bits += 8;
+            }
+            buffered_bits -= bits;
+            let value = (buffered >> buffered_bits) & mask;
+            buffered &= (1 << buffered_bits) - 1;
+            if container_bytes == 1 {
+                unpacked.push(value as u8);
+            } else {
+                unpacked.extend_from_slice(&(value as u16).to_ne_bytes());
+            }
         }
     }
     Ok(unpacked)

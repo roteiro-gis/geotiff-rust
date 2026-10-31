@@ -1198,6 +1198,178 @@ mod tests {
         data
     }
 
+    /// Pack samples into an MSB-first bitstream, padding each row to a byte.
+    fn pack_rows(rows: &[&[u16]], bits: u32) -> Vec<u8> {
+        let mut packed = Vec::new();
+        for row in rows {
+            let mut buffered = 0u64;
+            let mut buffered_bits = 0u32;
+            for &value in *row {
+                buffered = (buffered << bits) | u64::from(value);
+                buffered_bits += bits;
+                while buffered_bits >= 8 {
+                    buffered_bits -= 8;
+                    packed.push((buffered >> buffered_bits) as u8);
+                }
+            }
+            if buffered_bits > 0 {
+                packed.push((buffered << (8 - buffered_bits)) as u8);
+            }
+        }
+        packed
+    }
+
+    #[test]
+    fn reads_bit_packed_samples_of_every_depth() {
+        for bits in (1u32..=15).filter(|bits| !matches!(bits, 8)) {
+            let max = (1u32 << bits) - 1;
+            let rows: [Vec<u16>; 2] = [
+                [0, 1, max, max / 2, 3 & max]
+                    .map(|value| value as u16)
+                    .to_vec(),
+                [max, 0, 2 & max, max / 3, max]
+                    .map(|value| value as u16)
+                    .to_vec(),
+            ];
+            let stored = pack_rows(&[&rows[0], &rows[1]], bits);
+            let overrides = [(258, 3, 1, inline_short(bits as u16))];
+
+            let bytes = build_stripped_tiff(5, 2, &stored, &overrides);
+            let file = TiffFile::from_bytes(bytes).unwrap();
+            let expected = rows.concat();
+
+            if bits <= 8 {
+                let image = file.read_image::<u8>(0).unwrap();
+                let values: Vec<u16> = image.iter().map(|&value| u16::from(value)).collect();
+                assert_eq!(values, expected, "{bits} bits");
+            } else {
+                let image = file.read_image::<u16>(0).unwrap();
+                let values: Vec<u16> = image.iter().copied().collect();
+                assert_eq!(values, expected, "{bits} bits");
+            }
+        }
+    }
+
+    #[test]
+    fn bit_packed_rows_ignore_the_file_byte_order() {
+        // The stream 0x123 0xABC is stored identically in both byte orders.
+        const HEADER_LEN: u32 = 8;
+        const ENTRY_COUNT: u16 = 7;
+        let data_offset = HEADER_LEN + 2 + u32::from(ENTRY_COUNT) * 12 + 4;
+        let mut bytes = b"MM\0*".to_vec();
+        bytes.extend_from_slice(&HEADER_LEN.to_be_bytes());
+        bytes.extend_from_slice(&ENTRY_COUNT.to_be_bytes());
+        for (tag, value) in [
+            (256u16, 2u32),
+            (257, 1),
+            (258, 12),
+            (273, data_offset),
+            (277, 1),
+            (278, 1),
+            (279, 3),
+        ] {
+            bytes.extend_from_slice(&tag.to_be_bytes());
+            bytes.extend_from_slice(&4u16.to_be_bytes());
+            bytes.extend_from_slice(&1u32.to_be_bytes());
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&[0x12, 0x3A, 0xBC]);
+
+        let file = TiffFile::from_bytes(bytes).unwrap();
+        let values: Vec<u16> = file.read_image::<u16>(0).unwrap().iter().copied().collect();
+
+        assert_eq!(values, [0x123, 0xABC]);
+    }
+
+    #[test]
+    fn bit_packed_planar_bands_and_windows_read_into_containers() {
+        let planes = [
+            pack_rows(&[&[1, 2], &[3, 4]], 12),
+            pack_rows(&[&[5, 6], &[7, 8]], 12),
+            pack_rows(&[&[9, 10], &[11, 12]], 12),
+        ];
+        let plane_refs: Vec<&[u8]> = planes.iter().map(Vec::as_slice).collect();
+        let mut bytes = build_planar_stripped_tiff(2, 2, &plane_refs);
+        overwrite_classic_inline_long_tag(&mut bytes, 258, 12);
+
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        let band: Vec<u16> = file
+            .read_band::<u16>(0, 1)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(band, [5, 6, 7, 8]);
+        let window: Vec<u16> = file
+            .read_window::<u16>(0, 1, 1, 1, 1)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(window, [4, 8, 12]);
+    }
+
+    #[test]
+    fn bit_packed_samples_scale_to_full_range_when_color_decoded() {
+        let stored = pack_rows(&[&[0, 0xFFF]], 12);
+        let overrides = [(258, 3, 1, inline_short(12))];
+
+        let bytes = build_stripped_tiff(2, 1, &stored, &overrides);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        let ifd = file.ifd(0).unwrap();
+        assert_eq!(ifd.decoded_raster_layout().unwrap().bits_per_sample, 16);
+        let pixels: Vec<u16> = file
+            .read_decoded_image::<u16>(0)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(pixels, [0, 0xFFFF]);
+    }
+
+    #[test]
+    fn bit_packed_depths_reject_predictors_and_oversized_types() {
+        let stored = pack_rows(&[&[1, 2]], 12);
+        let predictor = [
+            (258, 3, 1, inline_short(12)),
+            (259, 3, 1, inline_short(8)),
+            (317, 3, 1, inline_short(2)),
+        ];
+        let bytes = build_stripped_tiff(2, 1, &stored, &predictor);
+        let error = TiffFile::from_bytes(bytes)
+            .unwrap()
+            .read_image_bytes(0)
+            .unwrap_err();
+        assert!(error.to_string().contains("bit-packed"), "{error}");
+
+        let plain = [(258, 3, 1, inline_short(12))];
+        let bytes = build_stripped_tiff(2, 1, &stored, &plain);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+        assert!(matches!(
+            file.read_image::<u8>(0),
+            Err(Error::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn signed_and_17_to_31_bit_samples_stay_unsupported() {
+        let stored = [0u8; 8];
+        for overrides in [
+            vec![(258, 3, 1, inline_short(12)), (339, 3, 1, inline_short(2))],
+            vec![(258, 3, 1, inline_short(24))],
+        ] {
+            let bytes = build_stripped_tiff(2, 1, &stored, &overrides);
+            let error = TiffFile::from_bytes(bytes)
+                .unwrap()
+                .read_image_bytes(0)
+                .unwrap_err();
+            assert!(matches!(error, Error::UnsupportedBitsPerSample(_)));
+        }
+    }
+
     #[test]
     fn block_cache_does_not_collide_between_chain_index_and_ifd_offset() {
         // Ten chained IFDs: chain IFD #8 shares its numeric index with the

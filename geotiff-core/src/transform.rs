@@ -43,17 +43,18 @@ impl GeoTransform {
     ) -> Self {
         // tiepoint: [I, J, K, X, Y, Z]
         // pixel_scale: [ScaleX, ScaleY, ScaleZ]
-        let pixel_offset = match raster_type {
-            RasterType::PixelIsPoint => 0.5,
-            RasterType::PixelIsArea | RasterType::Unknown(_) => 0.0,
-        };
+        //
+        // ScaleX keeps its sign because GDAL writes east-to-west rasters that
+        // way. A negative ScaleY is read as north-up, also following GDAL.
+        let pixel_offset = pixel_center_offset(raster_type);
+        let scale_y = pixel_scale[1].abs();
         Self {
             origin_x: tiepoint[3] - (tiepoint[0] + pixel_offset) * pixel_scale[0],
             pixel_width: pixel_scale[0],
             skew_x: 0.0,
-            origin_y: tiepoint[4] + (tiepoint[1] + pixel_offset) * pixel_scale[1],
+            origin_y: tiepoint[4] + (tiepoint[1] + pixel_offset) * scale_y,
             skew_y: 0.0,
-            pixel_height: -pixel_scale[1],
+            pixel_height: -scale_y,
         }
     }
 
@@ -66,6 +67,25 @@ impl GeoTransform {
             origin_y: matrix[7],
             skew_y: matrix[4],
             pixel_height: matrix[5],
+        }
+    }
+
+    /// Build from a ModelTransformation matrix using the GeoTIFF raster type.
+    ///
+    /// PixelIsPoint matrices map pixel centers, so the result is shifted by
+    /// half a pixel along both raster axes to give the same corner-based
+    /// transform as [`Self::from_tiepoint_and_scale_with_raster_type`].
+    pub fn from_transformation_matrix_with_raster_type(
+        matrix: &[f64; 16],
+        raster_type: RasterType,
+    ) -> Self {
+        let transform = Self::from_transformation_matrix(matrix);
+        let pixel_offset = pixel_center_offset(raster_type);
+        let (origin_x, origin_y) = transform.pixel_to_geo(-pixel_offset, -pixel_offset);
+        Self {
+            origin_x,
+            origin_y,
+            ..transform
         }
     }
 
@@ -166,10 +186,7 @@ impl GeoTransform {
             return None;
         }
         let scale = [self.pixel_width, -self.pixel_height, 0.0];
-        let pixel_offset = match raster_type {
-            RasterType::PixelIsPoint => 0.5,
-            RasterType::PixelIsArea | RasterType::Unknown(_) => 0.0,
-        };
+        let pixel_offset = pixel_center_offset(raster_type);
         let tiepoint = [
             0.0,
             0.0,
@@ -179,6 +196,20 @@ impl GeoTransform {
             0.0,
         ];
         Some((tiepoint, scale))
+    }
+
+    /// Serialize to a 4x4 transformation matrix using the GeoTIFF raster type.
+    ///
+    /// The inverse of [`Self::from_transformation_matrix_with_raster_type`].
+    pub fn to_transformation_matrix_with_raster_type(&self, raster_type: RasterType) -> [f64; 16] {
+        let pixel_offset = pixel_center_offset(raster_type);
+        let (origin_x, origin_y) = self.pixel_to_geo(pixel_offset, pixel_offset);
+        Self {
+            origin_x,
+            origin_y,
+            ..*self
+        }
+        .to_transformation_matrix()
     }
 
     /// Serialize to a 4x4 transformation matrix (row-major).
@@ -201,6 +232,14 @@ impl GeoTransform {
             0.0,
             1.0,
         ]
+    }
+}
+
+/// Raster-space offset between a pixel's corner and the point it georeferences.
+fn pixel_center_offset(raster_type: RasterType) -> f64 {
+    match raster_type {
+        RasterType::PixelIsPoint => 0.5,
+        RasterType::PixelIsArea | RasterType::Unknown(_) => 0.0,
     }
 }
 
@@ -326,6 +365,50 @@ mod tests {
             pixel_height: -1.0,
         };
         assert!(skewed.to_tiepoint_and_scale().is_none());
+    }
+
+    #[test]
+    fn signed_pixel_scales_match_gdal() {
+        // Expected values come from GDAL 3.12 reading the same tags.
+        let tiepoint = [3.0, 4.0, 0.0, 100.0, 200.0, 0.0];
+
+        let east_to_west = GeoTransform::from_tiepoint_and_scale_with_raster_type(
+            &tiepoint,
+            &[-2.0, 2.0, 0.0],
+            RasterType::PixelIsPoint,
+        );
+        assert_eq!(east_to_west.origin_x, 107.0);
+        assert_eq!(east_to_west.origin_y, 209.0);
+        assert_eq!(east_to_west.pixel_width, -2.0);
+        assert_eq!(east_to_west.pixel_height, -2.0);
+
+        let negative_y = GeoTransform::from_tiepoint_and_scale(&tiepoint, &[2.0, -2.0, 0.0]);
+        assert_eq!(negative_y.origin_x, 94.0);
+        assert_eq!(negative_y.origin_y, 208.0);
+        assert_eq!(negative_y.pixel_height, -2.0);
+    }
+
+    #[test]
+    fn pixel_is_point_matrix_is_shifted_to_the_corner_like_gdal() {
+        let matrix = [
+            2.0, 1.0, 0.0, 100.0, 0.5, -2.0, 0.0, 200.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let area = GeoTransform::from_transformation_matrix_with_raster_type(
+            &matrix,
+            RasterType::PixelIsArea,
+        );
+        assert_eq!((area.origin_x, area.origin_y), (100.0, 200.0));
+
+        let point = GeoTransform::from_transformation_matrix_with_raster_type(
+            &matrix,
+            RasterType::PixelIsPoint,
+        );
+        assert_eq!((point.origin_x, point.origin_y), (98.5, 200.75));
+        assert_eq!(
+            point.to_transformation_matrix_with_raster_type(RasterType::PixelIsPoint),
+            matrix
+        );
     }
 
     #[test]

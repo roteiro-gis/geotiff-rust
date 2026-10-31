@@ -44,7 +44,7 @@ mod http_test_support;
 pub use error::{Error, Result};
 
 #[cfg(feature = "local")]
-use crs::CrsInfo;
+use crs::{CrsInfo, RasterType};
 #[cfg(feature = "local")]
 use geokeys::GeoKeyDirectory;
 #[cfg(feature = "local")]
@@ -151,22 +151,16 @@ impl GeoTiffFile {
         let crs = CrsInfo::from_geokeys(&geokeys);
         let epsg = crs.epsg();
         let tiepoints = parse_tiepoints(metadata_ifd)?;
-        let pixel_scale = parse_fixed_len_double_tag::<3>(metadata_ifd, TAG_MODEL_PIXEL_SCALE)?;
+        let pixel_scale = parse_pixel_scale(metadata_ifd)?;
         let transformation =
             parse_fixed_len_double_tag::<16>(metadata_ifd, TAG_MODEL_TRANSFORMATION)?;
         validate_model_georeferencing(&tiepoints, pixel_scale.as_ref(), transformation.as_ref())?;
-        let transform = transformation
-            .as_ref()
-            .map(GeoTransform::from_transformation_matrix)
-            .or_else(|| {
-                let tiepoint = tiepoints.first()?;
-                let scale = pixel_scale.as_ref()?;
-                Some(GeoTransform::from_tiepoint_and_scale_with_raster_type(
-                    tiepoint,
-                    scale,
-                    crs.raster_type_enum(),
-                ))
-            });
+        let transform = resolve_transform(
+            &tiepoints,
+            pixel_scale.as_ref(),
+            transformation.as_ref(),
+            crs.raster_type_enum(),
+        );
         let base_ifd_index = find_base_ifd_index(tiff.ifds(), metadata_ifd_index);
         let base_ifd = tiff.ifd(base_ifd_index)?;
         let overview_ifds =
@@ -686,6 +680,28 @@ fn parse_fixed_len_double_tag<const N: usize>(
     Ok(Some(out))
 }
 
+/// Read ModelPixelScale, which some writers store without its unused Z value.
+#[cfg(feature = "local")]
+fn parse_pixel_scale(ifd: &tiff_reader::Ifd) -> Result<Option<[f64; 3]>> {
+    let Some(tag) = ifd.tag(TAG_MODEL_PIXEL_SCALE) else {
+        return Ok(None);
+    };
+    let TagValue::Double(values) = &tag.value else {
+        return Err(invalid_geotiff_tag(
+            TAG_MODEL_PIXEL_SCALE,
+            "tag must use DOUBLE values",
+        ));
+    };
+    match values.as_slice() {
+        [x, y] => Ok(Some([*x, *y, 0.0])),
+        [x, y, z] => Ok(Some([*x, *y, *z])),
+        _ => Err(invalid_geotiff_tag(
+            TAG_MODEL_PIXEL_SCALE,
+            format!("expected 2 or 3 values, got {}", values.len()),
+        )),
+    }
+}
+
 #[cfg(feature = "local")]
 fn parse_tiepoints(ifd: &tiff_reader::Ifd) -> Result<Vec<[f64; 6]>> {
     let Some(tag) = ifd.tag(TAG_MODEL_TIEPOINT) else {
@@ -734,6 +750,11 @@ fn invalid_geotiff_tag(tag: u16, reason: impl Into<String>) -> Error {
     }
 }
 
+/// Reject georeferencing values that can only come from a corrupt file.
+///
+/// Combinations that are merely unusable, such as a zero pixel scale or a pixel
+/// scale with no tiepoint, are left to [`resolve_transform`]: they mean the
+/// raster has no transform, which doesn't stop its pixels from being read.
 #[cfg(feature = "local")]
 fn validate_model_georeferencing(
     tiepoints: &[[f64; 6]],
@@ -746,49 +767,46 @@ fn validate_model_georeferencing(
             "tiepoint values must be finite",
         ));
     }
-    if let Some(scale) = pixel_scale {
-        if !scale.iter().all(|value| value.is_finite())
-            || scale[0] <= 0.0
-            || scale[1] <= 0.0
-            || scale[2] < 0.0
-        {
-            return Err(invalid_geotiff_tag(
-                TAG_MODEL_PIXEL_SCALE,
-                "pixel scale must contain finite positive X/Y and non-negative Z values",
-            ));
-        }
-        if tiepoints.is_empty() {
-            return Err(invalid_geotiff_tag(
-                TAG_MODEL_PIXEL_SCALE,
-                "pixel scale requires at least one model tiepoint",
-            ));
-        }
+    if pixel_scale.is_some_and(|scale| !scale.iter().all(|value| value.is_finite())) {
+        return Err(invalid_geotiff_tag(
+            TAG_MODEL_PIXEL_SCALE,
+            "pixel scale values must be finite",
+        ));
     }
-    if let Some(matrix) = transformation {
-        if !matrix.iter().all(|value| value.is_finite()) {
-            return Err(invalid_geotiff_tag(
-                TAG_MODEL_TRANSFORMATION,
-                "transformation matrix values must be finite",
-            ));
-        }
-        let transform = GeoTransform::from_transformation_matrix(matrix);
-        if transform
-            .geo_to_pixel(transform.origin_x, transform.origin_y)
-            .is_none()
-        {
-            return Err(invalid_geotiff_tag(
-                TAG_MODEL_TRANSFORMATION,
-                "transformation matrix must contain an invertible 2D affine transform",
-            ));
-        }
-        if pixel_scale.is_some() || !tiepoints.is_empty() {
-            return Err(invalid_geotiff_tag(
-                TAG_MODEL_TRANSFORMATION,
-                "ModelTransformationTag is mutually exclusive with ModelPixelScaleTag and ModelTiepointTag",
-            ));
-        }
+    if transformation.is_some_and(|matrix| !matrix.iter().all(|value| value.is_finite())) {
+        return Err(invalid_geotiff_tag(
+            TAG_MODEL_TRANSFORMATION,
+            "transformation matrix values must be finite",
+        ));
     }
     Ok(())
+}
+
+/// Choose the raster's affine transform, using the same precedence as GDAL: a
+/// usable pixel scale and tiepoint win over a transformation matrix.
+#[cfg(feature = "local")]
+fn resolve_transform(
+    tiepoints: &[[f64; 6]],
+    pixel_scale: Option<&[f64; 3]>,
+    transformation: Option<&[f64; 16]>,
+    raster_type: RasterType,
+) -> Option<GeoTransform> {
+    let from_scale = || {
+        let scale = pixel_scale.filter(|scale| scale[0] != 0.0 && scale[1] != 0.0)?;
+        Some(GeoTransform::from_tiepoint_and_scale_with_raster_type(
+            tiepoints.first()?,
+            scale,
+            raster_type,
+        ))
+    };
+    let from_matrix = || {
+        let transform =
+            GeoTransform::from_transformation_matrix_with_raster_type(transformation?, raster_type);
+        transform
+            .geo_to_pixel(transform.origin_x, transform.origin_y)
+            .map(|_| transform)
+    };
+    from_scale().or_else(from_matrix)
 }
 
 #[cfg(test)]
@@ -799,8 +817,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        GeoTiffFile, MAX_SUBIFD_OVERVIEW_DEPTH, MAX_SUBIFD_OVERVIEW_NODES, TAG_GDAL_NODATA,
-        TAG_MODEL_PIXEL_SCALE,
+        GeoTiffFile, GeoTransform, RasterType, MAX_SUBIFD_OVERVIEW_DEPTH,
+        MAX_SUBIFD_OVERVIEW_NODES, TAG_GDAL_NODATA, TAG_MODEL_PIXEL_SCALE,
     };
 
     #[derive(Clone)]
@@ -1753,6 +1771,78 @@ mod tests {
         overwrite_classic_tag_type_or_count(&mut wrong_count, TAG_MODEL_PIXEL_SCALE, None, Some(4));
         assert!(matches!(
             GeoTiffFile::from_bytes(wrong_count),
+            Err(crate::error::Error::InvalidGeoTiffTag {
+                tag: TAG_MODEL_PIXEL_SCALE,
+                ..
+            })
+        ));
+    }
+
+    fn resolved_transform(
+        tiepoints: &[[f64; 6]],
+        pixel_scale: Option<[f64; 3]>,
+        matrix: Option<[f64; 16]>,
+    ) -> Option<GeoTransform> {
+        super::resolve_transform(
+            tiepoints,
+            pixel_scale.as_ref(),
+            matrix.as_ref(),
+            RasterType::PixelIsArea,
+        )
+    }
+
+    #[test]
+    fn opens_east_to_west_rasters_written_by_gdal() {
+        let mut bytes = build_simple_geotiff(false);
+        let scale_offset = bytes
+            .windows(16)
+            .position(|window| window == [le_f64(2.0), le_f64(2.0)].concat())
+            .unwrap();
+        bytes[scale_offset..scale_offset + 8].copy_from_slice(&le_f64(-2.0));
+
+        let file = GeoTiffFile::from_bytes(bytes).unwrap();
+
+        let transform = file.transform().unwrap();
+        assert_eq!(transform.pixel_width, -2.0);
+        assert_eq!(transform.origin_x, 100.0);
+        assert_eq!(file.geo_bounds(), Some([96.0, 196.0, 100.0, 200.0]));
+    }
+
+    #[test]
+    fn unusable_georeferencing_leaves_the_transform_empty() {
+        let tiepoint = [0.0, 0.0, 0.0, 100.0, 200.0, 0.0];
+
+        assert!(resolved_transform(&[], Some([2.0, 2.0, 0.0]), None).is_none());
+        assert!(resolved_transform(&[tiepoint], Some([0.0, 2.0, 0.0]), None).is_none());
+        assert!(resolved_transform(&[tiepoint], Some([2.0, 0.0, 0.0]), None).is_none());
+        assert!(resolved_transform(&[], None, Some([0.0; 16])).is_none());
+    }
+
+    #[test]
+    fn pixel_scale_wins_over_a_transformation_matrix_like_gdal() {
+        let tiepoint = [0.0, 0.0, 0.0, 100.0, 200.0, 0.0];
+        let matrix = GeoTransform::from_origin_and_pixel_size(1.0, 2.0, 3.0, -3.0)
+            .to_transformation_matrix();
+
+        let transform =
+            resolved_transform(&[tiepoint], Some([2.0, 2.0, 0.0]), Some(matrix)).unwrap();
+        assert_eq!(transform.pixel_width, 2.0);
+
+        let fallback = resolved_transform(&[], Some([2.0, 2.0, 0.0]), Some(matrix)).unwrap();
+        assert_eq!(fallback.pixel_width, 3.0);
+    }
+
+    #[test]
+    fn non_finite_georeferencing_is_still_rejected() {
+        let mut bytes = build_simple_geotiff(false);
+        let scale_offset = bytes
+            .windows(16)
+            .position(|window| window == [le_f64(2.0), le_f64(2.0)].concat())
+            .unwrap();
+        bytes[scale_offset..scale_offset + 8].copy_from_slice(&le_f64(f64::NAN));
+
+        assert!(matches!(
+            GeoTiffFile::from_bytes(bytes),
             Err(crate::error::Error::InvalidGeoTiffTag {
                 tag: TAG_MODEL_PIXEL_SCALE,
                 ..

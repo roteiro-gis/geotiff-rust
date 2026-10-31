@@ -2,6 +2,11 @@
 
 use crate::geokeys::{self, GeoKeyDirectory, GeoKeyValue};
 
+/// GeoKey value meaning the key is intentionally undefined.
+const UNDEFINED_GEO_KEY: u16 = 0;
+/// GeoKey value meaning the CRS is defined by parameters, not a registry code.
+const USER_DEFINED_GEO_KEY: u16 = 32767;
+
 /// GeoTIFF model type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelType {
@@ -146,10 +151,17 @@ impl CrsInfo {
     }
 
     /// Returns the most specific EPSG code available.
+    ///
+    /// Returns `None` when the CRS is described by parameters rather than a
+    /// registry code, which GeoTIFF marks with the reserved values 0
+    /// (undefined) and 32767 (user-defined). The horizontal CRS decides this
+    /// on its own: a custom horizontal CRS paired with a known vertical CRS
+    /// has no single EPSG code, so the vertical code isn't returned for it.
     pub fn epsg(&self) -> Option<u32> {
         self.primary_horizontal_epsg()
             .or(self.vertical_epsg())
-            .map(|epsg| epsg as u32)
+            .filter(|code| !matches!(*code, UNDEFINED_GEO_KEY | USER_DEFINED_GEO_KEY))
+            .map(u32::from)
     }
 
     /// Returns the GeoTIFF raster-space interpretation.
@@ -369,6 +381,60 @@ fn clear_vertical_geokeys(geokeys: &mut GeoKeyDirectory) {
 mod tests {
     use super::{CrsInfo, CrsKind, GeoKeyDirectory, GeoKeyValue, ModelType, RasterType};
     use crate::geokeys;
+
+    fn crs_from_shorts(keys: &[(u16, u16)]) -> CrsInfo {
+        let mut directory = GeoKeyDirectory::new();
+        for &(id, value) in keys {
+            directory.set(id, GeoKeyValue::Short(value));
+        }
+        CrsInfo::from_geokeys(&directory)
+    }
+
+    #[test]
+    fn user_defined_crs_has_no_epsg_code() {
+        let projected = crs_from_shorts(&[
+            (geokeys::GT_MODEL_TYPE, 1),
+            (geokeys::PROJECTED_CRS_TYPE, 32767),
+            (geokeys::GEODETIC_CRS_TYPE, 4269),
+        ]);
+        assert_eq!(projected.epsg(), None);
+        assert_eq!(projected.projected_epsg(), Some(32767));
+
+        let geographic = crs_from_shorts(&[
+            (geokeys::GT_MODEL_TYPE, 2),
+            (geokeys::GEODETIC_CRS_TYPE, 32767),
+        ]);
+        assert_eq!(geographic.epsg(), None);
+
+        let undefined = crs_from_shorts(&[
+            (geokeys::GT_MODEL_TYPE, 1),
+            (geokeys::PROJECTED_CRS_TYPE, 0),
+        ]);
+        assert_eq!(undefined.epsg(), None);
+    }
+
+    #[test]
+    fn custom_horizontal_crs_does_not_report_its_vertical_code() {
+        let compound = crs_from_shorts(&[
+            (geokeys::GT_MODEL_TYPE, 1),
+            (geokeys::PROJECTED_CRS_TYPE, 32767),
+            (geokeys::VERTICAL_CS_TYPE, 5773),
+        ]);
+        assert_eq!(compound.epsg(), None);
+        assert_eq!(compound.vertical_epsg(), Some(5773));
+    }
+
+    #[test]
+    fn registry_codes_are_unaffected() {
+        let vertical_only = crs_from_shorts(&[(geokeys::VERTICAL_CS_TYPE, 5773)]);
+        assert_eq!(vertical_only.epsg(), Some(5773));
+
+        let projected = crs_from_shorts(&[
+            (geokeys::GT_MODEL_TYPE, 1),
+            (geokeys::PROJECTED_CRS_TYPE, 32633),
+        ]);
+        assert_eq!(projected.epsg(), Some(32633));
+    }
 
     #[test]
     fn parses_geocentric_horizontal_crs() {

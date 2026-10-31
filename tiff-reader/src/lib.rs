@@ -1055,6 +1055,7 @@ mod tests {
     };
     use crate::source::{BytesSource, TiffSource};
     use flate2::{write::ZlibEncoder, Compression as FlateCompression};
+    use std::io::Write;
 
     fn le_u16(value: u16) -> [u8; 2] {
         value.to_le_bytes()
@@ -2390,6 +2391,55 @@ mod tests {
         let file = TiffFile::from_bytes(data).unwrap();
         let error = file.read_image::<u8>(0).unwrap_err();
         assert!(error.to_string().contains("dimensions 8x32"), "{error}");
+    }
+
+    #[test]
+    fn fill_order_2_reverses_uncompressed_bytes() {
+        let pixels = [0x01u8, 0x02, 0x80, 0xf0];
+        let stored = pixels.map(u8::reverse_bits);
+        let fill_order = (266, 3, 1, inline_short(2));
+
+        let file = TiffFile::from_bytes(build_stripped_tiff(2, 2, &stored, &[fill_order])).unwrap();
+
+        assert_eq!(file.ifd(0).unwrap().fill_order(), 2);
+        assert_eq!(file.read_image_bytes(0).unwrap(), pixels);
+    }
+
+    #[test]
+    fn fill_order_2_reverses_bytes_before_decompressing() {
+        let pixels: Vec<u8> = (0..64).collect();
+        let mut encoder = ZlibEncoder::new(Vec::new(), FlateCompression::default());
+        encoder.write_all(&pixels).unwrap();
+        let stored: Vec<u8> = encoder
+            .finish()
+            .unwrap()
+            .into_iter()
+            .map(u8::reverse_bits)
+            .collect();
+        let overrides = [(259, 3, 1, inline_short(8)), (266, 3, 1, inline_short(2))];
+
+        let file = TiffFile::from_bytes(build_stripped_tiff(8, 8, &stored, &overrides)).unwrap();
+
+        assert_eq!(file.read_image_bytes(0).unwrap(), pixels);
+    }
+
+    #[cfg(feature = "jpeg")]
+    #[test]
+    fn fill_order_2_does_not_apply_to_jpeg() {
+        let pixels = vec![128u8; 64];
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 100)
+            .encode(&pixels, 8, 8, jpeg_encoder::ColorType::Luma)
+            .unwrap();
+        let overrides = [
+            (259, 3, 1, inline_short(7)),
+            (262, 3, 1, inline_short(1)),
+            (266, 3, 1, inline_short(2)),
+        ];
+
+        let file = TiffFile::from_bytes(build_stripped_tiff(8, 8, &jpeg, &overrides)).unwrap();
+
+        assert_eq!(file.read_image_bytes(0).unwrap(), pixels);
     }
 
     #[cfg(feature = "jpeg")]

@@ -7,12 +7,12 @@ use crate::source::TiffSource;
 use crate::tag::{checked_tag_value_byte_len, parse_tag_bigtiff, parse_tag_classic, Tag, TagValue};
 
 pub use tiff_core::constants::{
-    TAG_BITS_PER_SAMPLE, TAG_COLOR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH,
-    TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_LERC_PARAMETERS, TAG_PHOTOMETRIC_INTERPRETATION,
-    TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_REFERENCE_BLACK_WHITE, TAG_ROWS_PER_STRIP,
-    TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
-    TAG_SUB_IFDS, TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH,
-    TAG_YCBCR_POSITIONING, TAG_YCBCR_SUBSAMPLING,
+    TAG_BITS_PER_SAMPLE, TAG_COLOR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_FILL_ORDER,
+    TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_LERC_PARAMETERS,
+    TAG_PHOTOMETRIC_INTERPRETATION, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR,
+    TAG_REFERENCE_BLACK_WHITE, TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
+    TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS, TAG_SUB_IFDS, TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH,
+    TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_YCBCR_POSITIONING, TAG_YCBCR_SUBSAMPLING,
 };
 pub use tiff_core::RasterLayout;
 
@@ -143,6 +143,12 @@ impl Ifd {
     /// Compression scheme (1 = none, 5 = LZW, 8 = Deflate, ...).
     pub fn compression(&self) -> u16 {
         self.tag_u16(TAG_COMPRESSION).unwrap_or(1)
+    }
+
+    /// Bit order within each stored byte. `1` (the default) means the most
+    /// significant bit comes first, and `2` means the least significant does.
+    pub fn fill_order(&self) -> u16 {
+        self.tag_u16(TAG_FILL_ORDER).unwrap_or(1)
     }
 
     /// Photometric interpretation.

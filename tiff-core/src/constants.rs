@@ -6,6 +6,7 @@ pub const TAG_IMAGE_LENGTH: u16 = 257;
 pub const TAG_BITS_PER_SAMPLE: u16 = 258;
 pub const TAG_COMPRESSION: u16 = 259;
 pub const TAG_PHOTOMETRIC_INTERPRETATION: u16 = 262;
+pub const TAG_FILL_ORDER: u16 = 266;
 pub const TAG_STRIP_OFFSETS: u16 = 273;
 pub const TAG_SAMPLES_PER_PIXEL: u16 = 277;
 pub const TAG_ROWS_PER_STRIP: u16 = 278;

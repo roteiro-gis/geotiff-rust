@@ -6,6 +6,7 @@ Breaking changes:
 
 - add `max_retries` to the public `HttpOpenOptions` and `AsyncHttpOpenOptions` structs; exhaustive struct literals must set it or use `..Default::default()`
 - `CrsInfo::epsg()` and `GeoMetadata::epsg` return `None` for the reserved GeoKey values 0 (undefined) and 32767 (user-defined) instead of reporting them as EPSG codes; `projected_epsg()` and `geodetic_epsg()` still return the raw values
+- `read_decoded_*` converts 8- and 16-bit CIELab to RGB instead of returning Lab samples unchanged, honoring `WhitePoint` and matching GDAL for 8-bit chunky files; other depths and floating-point samples are now an error, and `read_image` and friends still return raw Lab
 
 Fixes:
 

@@ -284,16 +284,30 @@ pub(crate) fn decode_pixels(
             }
         }
         ColorModel::CieLab { extra_samples } => {
+            let converter = CieLabToRgb::new(ifd.white_point()?);
+            let full_scale = bit_max(decoded_layout.bits_per_sample) as f32;
             for pixel in 0..pixel_count {
-                for channel in 0..3 {
-                    let value = read_uint_sample(sample_bytes, storage_layout, pixel, channel);
+                let sample =
+                    |channel| read_uint_sample(sample_bytes, storage_layout, pixel, channel);
+                // a* and b* are signed whatever SampleFormat says. libtiff widens
+                // 8-bit samples to the 16-bit encoding.
+                let lab = if storage_layout.bits_per_sample == 8 {
+                    [
+                        sample(0) as i32 * 257,
+                        i32::from(sample(1) as u8 as i8) * 256,
+                        i32::from(sample(2) as u8 as i8) * 256,
+                    ]
+                } else {
+                    [
+                        sample(0) as i32,
+                        i32::from(sample(1) as u16 as i16),
+                        i32::from(sample(2) as u16 as i16),
+                    ]
+                };
+                for value in converter.to_rgb(lab) {
                     write_uint_sample(
                         &mut out,
-                        scale_uint_bits(
-                            value,
-                            storage_layout.bits_per_sample,
-                            decoded_layout.bits_per_sample,
-                        ),
+                        (value * full_scale + 0.5) as u64,
                         decoded_layout.bits_per_sample,
                     );
                 }
@@ -311,6 +325,75 @@ pub(crate) fn decode_pixels(
     }
 
     Ok((decoded_layout, out))
+}
+
+/// Converts CIELab to display RGB the way libtiff's RGBA interface does, so
+/// decoded pixels match GDAL.
+///
+/// Like libtiff, this applies no chromatic adaptation: a D50 white goes through
+/// a D65 sRGB matrix unchanged, so neutrals come out warm.
+struct CieLabToRgb {
+    white: [f32; 3],
+    gamma: Vec<f32>,
+}
+
+impl CieLabToRgb {
+    const GAMMA_LEVELS: usize = 1500;
+    const MIN_LUMINANCE: f32 = 1.0;
+    const MAX_LUMINANCE: f32 = 100.0;
+    const D50: [f32; 3] = [96.425, 100.0, 82.468];
+    const XYZ_TO_RGB: [[f32; 3]; 3] = [
+        [3.2410, -1.5374, -0.4986],
+        [-0.9692, 1.8760, 0.0416],
+        [0.0556, -0.2040, 1.0570],
+    ];
+
+    fn new(white_point: Option<[f64; 2]>) -> Self {
+        // TIFF defines no default white point. libtiff follows Adobe with D50.
+        let [x, y] = white_point.map_or_else(
+            || {
+                let sum: f32 = Self::D50.iter().sum();
+                [Self::D50[0] / sum, Self::D50[1] / sum]
+            },
+            |[x, y]| [x as f32, y as f32],
+        );
+        Self {
+            white: [x / y * 100.0, 100.0, (1.0 - x - y) / y * 100.0],
+            gamma: (0..=Self::GAMMA_LEVELS)
+                .map(|level| (level as f64 / Self::GAMMA_LEVELS as f64).powf(1.0 / 2.4) as f32)
+                .collect(),
+        }
+    }
+
+    /// Converts a 16-bit encoded L*a*b* value to RGB channels in `0.0..=1.0`.
+    fn to_rgb(&self, [lightness, a, b]: [i32; 3]) -> [f32; 3] {
+        let [x_white, y_white, z_white] = self.white;
+        let lightness = lightness as f32 * 100.0 / 65535.0;
+        let (y, fy) = if lightness < 8.856 {
+            let y = lightness * y_white / 903.292;
+            (y, 7.787 * (y / y_white) + 16.0 / 116.0)
+        } else {
+            let fy = (lightness + 16.0) / 116.0;
+            (y_white * fy * fy * fy, fy)
+        };
+        let from_f = |f: f32, white: f32| {
+            if f < 0.2069 {
+                white * (f - 0.13793) / 7.787
+            } else {
+                white * f * f * f
+            }
+        };
+        let x = from_f(a as f32 / 256.0 / 500.0 + fy, x_white);
+        let z = from_f(fy - b as f32 / 256.0 / 200.0, z_white);
+
+        let step = (Self::MAX_LUMINANCE - Self::MIN_LUMINANCE) / Self::GAMMA_LEVELS as f32;
+        Self::XYZ_TO_RGB.map(|[from_x, from_y, from_z]| {
+            let luminance = (from_x * x + from_y * y + from_z * z)
+                .clamp(Self::MIN_LUMINANCE, Self::MAX_LUMINANCE);
+            let level = ((luminance - Self::MIN_LUMINANCE) / step) as usize;
+            self.gamma[level.min(Self::GAMMA_LEVELS)]
+        })
+    }
 }
 
 fn can_passthrough(
@@ -335,8 +418,7 @@ fn can_passthrough(
         }
         | ColorModel::Rgb { .. }
         | ColorModel::TransparencyMask
-        | ColorModel::Separated { .. }
-        | ColorModel::CieLab { .. } => true,
+        | ColorModel::Separated { .. } => true,
         ColorModel::YCbCr { .. } => {
             Compression::from_code(ifd.compression()) == Some(Compression::Jpeg)
         }

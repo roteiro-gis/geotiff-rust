@@ -13,6 +13,7 @@ pub const TAG_ROWS_PER_STRIP: u16 = 278;
 pub const TAG_STRIP_BYTE_COUNTS: u16 = 279;
 pub const TAG_PLANAR_CONFIGURATION: u16 = 284;
 pub const TAG_PREDICTOR: u16 = 317;
+pub const TAG_WHITE_POINT: u16 = 318;
 pub const TAG_COLOR_MAP: u16 = 320;
 pub const TAG_TILE_WIDTH: u16 = 322;
 pub const TAG_TILE_LENGTH: u16 = 323;

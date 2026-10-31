@@ -256,20 +256,16 @@ impl GeoTiffBuilder {
     }
 
     /// Set a full affine transform. Takes precedence over pixel_scale + origin.
+    ///
+    /// The transform is corner-based, as returned by
+    /// `GeoTiffFile::transform`. It's converted for the raster type when the
+    /// tags are written, so [`Self::raster_type`] may be called before or after.
     pub fn transform(mut self, transform: GeoTransform) -> Self {
-        if transform.to_tiepoint_and_scale().is_some() {
-            self.affine_transform = Some(transform);
-            self.tiepoint = None;
-            self.pixel_scale = None;
-            self.tiepoint_is_origin = false;
-            self.transformation_matrix = None;
-        } else {
-            self.transformation_matrix = Some(transform.to_transformation_matrix());
-            self.affine_transform = None;
-            self.tiepoint = None;
-            self.pixel_scale = None;
-            self.tiepoint_is_origin = false;
-        }
+        self.affine_transform = Some(transform);
+        self.tiepoint = None;
+        self.pixel_scale = None;
+        self.tiepoint_is_origin = false;
+        self.transformation_matrix = None;
         self
     }
 
@@ -426,9 +422,8 @@ impl GeoTiffBuilder {
                 TagValue::Double(matrix.to_vec()),
             ));
         } else if let Some(transform) = self.affine_transform {
-            if let Some((tp, ps)) =
-                transform.to_tiepoint_and_scale_with_raster_type(self.current_raster_type())
-            {
+            let raster_type = self.current_raster_type();
+            if let Some((tp, ps)) = transform.to_tiepoint_and_scale_with_raster_type(raster_type) {
                 extra.push(Tag::new(
                     tags::TAG_MODEL_PIXEL_SCALE,
                     TagValue::Double(ps.to_vec()),
@@ -436,6 +431,12 @@ impl GeoTiffBuilder {
                 extra.push(Tag::new(
                     tags::TAG_MODEL_TIEPOINT,
                     TagValue::Double(tp.to_vec()),
+                ));
+            } else {
+                let matrix = transform.to_transformation_matrix_with_raster_type(raster_type);
+                extra.push(Tag::new(
+                    tags::TAG_MODEL_TRANSFORMATION,
+                    TagValue::Double(matrix.to_vec()),
                 ));
             }
         } else {

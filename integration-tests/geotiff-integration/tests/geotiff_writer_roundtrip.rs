@@ -698,3 +698,35 @@ fn geotiff_writer_rejects_oversized_geokey_serialization() {
         }) if count == u16::MAX as usize + 1
     ));
 }
+
+#[test]
+fn rotated_pixel_is_point_transform_survives_a_roundtrip() {
+    let transform = GeoTransform {
+        origin_x: 98.5,
+        pixel_width: 2.0,
+        skew_x: 1.0,
+        origin_y: 200.75,
+        skew_y: 0.5,
+        pixel_height: -2.0,
+    };
+    let mut buf = Cursor::new(Vec::new());
+
+    // The raster type is set after the transform on purpose: it must still be
+    // applied when the tags are written.
+    GeoTiffBuilder::new(4, 4)
+        .transform(transform)
+        .raster_type(RasterType::PixelIsPoint)
+        .epsg(4326)
+        .write_2d_to(&mut buf, Array2::<u8>::zeros((4, 4)).view())
+        .unwrap();
+
+    let file = GeoTiffFile::from_bytes(buf.into_inner()).unwrap();
+    let read = file.transform().unwrap();
+    let matrix = file.metadata().transformation.unwrap();
+
+    assert_eq!((read.origin_x, read.origin_y), (98.5, 200.75));
+    assert_eq!((read.pixel_width, read.skew_x), (2.0, 1.0));
+    assert_eq!((read.skew_y, read.pixel_height), (0.5, -2.0));
+    // On disk the matrix addresses the center of pixel (0, 0).
+    assert_eq!((matrix[3], matrix[7]), (100.0, 200.0));
+}

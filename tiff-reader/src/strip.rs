@@ -295,10 +295,10 @@ fn collect_strip_specs_for_window(
     band_index: Option<usize>,
 ) -> Result<Vec<StripBlockSpec>> {
     let offsets = ifd
-        .strip_offsets()
+        .block_table(crate::ifd::TAG_STRIP_OFFSETS)
         .ok_or(Error::TagNotFound(crate::ifd::TAG_STRIP_OFFSETS))?;
     let counts = ifd
-        .strip_byte_counts()
+        .block_table(crate::ifd::TAG_STRIP_BYTE_COUNTS)
         .ok_or(Error::TagNotFound(crate::ifd::TAG_STRIP_BYTE_COUNTS))?;
     if offsets.len() != counts.len() {
         return Err(Error::InvalidImageLayout(format!(
@@ -365,8 +365,8 @@ fn collect_strip_specs_for_window(
                 index: strip_index,
                 plane,
                 row_start,
-                offset: offsets[strip_index],
-                byte_count: counts[strip_index],
+                offset: offsets.at(strip_index),
+                byte_count: counts.at(strip_index),
                 rows_in_strip,
             });
         }

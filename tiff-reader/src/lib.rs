@@ -1471,6 +1471,52 @@ mod tests {
     }
 
     #[test]
+    fn uncompressed_byte_counts_past_the_block_end_are_ignored() {
+        // Two rows stored, but the byte count claims the strip holds four.
+        let pixels: Vec<u8> = (0..8).collect();
+        let stored = [pixels.as_slice(), &[0xff; 8]].concat();
+        let overrides = [(278, 4, 1, le_u32(4).to_vec())];
+
+        let bytes = build_stripped_tiff(4, 2, &stored, &overrides);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        assert_eq!(file.read_image_bytes(0).unwrap(), pixels);
+    }
+
+    #[test]
+    fn compressed_byte_counts_stay_bounded() {
+        let stored = vec![0u8; 8 * 4 + 4096 + 1];
+        let overrides = [(259, 3, 1, inline_short(8))];
+
+        let bytes = build_stripped_tiff(4, 2, &stored, &overrides);
+        let error = TiffFile::from_bytes(bytes)
+            .unwrap()
+            .read_image_bytes(0)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("read budget"), "{error}");
+    }
+
+    #[test]
+    fn void_sample_format_reads_as_unsigned() {
+        let pixels = [1u8, 2, 3, 4];
+        let overrides = [(339, 3, 1, inline_short(4))];
+
+        let bytes = build_stripped_tiff(2, 2, &pixels, &overrides);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        assert_eq!(file.ifd(0).unwrap().sample_format().unwrap(), [4]);
+        assert_eq!(
+            file.read_image::<u8>(0)
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            pixels
+        );
+    }
+
+    #[test]
     fn block_cache_does_not_collide_between_chain_index_and_ifd_offset() {
         // Ten chained IFDs: chain IFD #8 shares its numeric index with the
         // file offset (8) of the first IFD.

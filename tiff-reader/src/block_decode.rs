@@ -10,6 +10,7 @@ const LERC1_MAGIC_PREFIX: &[u8; 9] = b"CntZImage";
 const LERC2_MAGIC: &[u8; 6] = b"Lerc2 ";
 const COMPRESSED_BLOCK_INPUT_RATIO: usize = 4;
 const COMPRESSED_BLOCK_INPUT_SLACK: usize = 4096;
+const FILL_ORDER_LSB_FIRST: u16 = 2;
 
 /// Per-IFD metadata resolved once per read so per-block decoding avoids
 /// re-deriving (and re-allocating) color-model and codec parameters.
@@ -21,6 +22,7 @@ pub(crate) struct BlockDecodeContext<'a> {
     pub color_model: ColorModel,
     pub lerc_additional_compression: LercAdditionalCompression,
     pub jpeg_tables: Option<&'a [u8]>,
+    pub bits_reversed: bool,
 }
 
 impl<'a> BlockDecodeContext<'a> {
@@ -43,6 +45,10 @@ impl<'a> BlockDecodeContext<'a> {
             jpeg_tables: ifd
                 .tag(tiff_core::TAG_JPEG_TABLES)
                 .and_then(|tag| tag.value.as_bytes()),
+            // libtiff reverses stored bytes before every codec except JPEG,
+            // whose bitstream has a fixed bit order of its own.
+            bits_reversed: ifd.fill_order() == FILL_ORDER_LSB_FIRST
+                && compression != Some(Compression::Jpeg),
         })
     }
 
@@ -95,6 +101,21 @@ struct Lerc2Header {
 }
 
 pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result<Vec<u8>> {
+    if request.context.bits_reversed {
+        let reversed: Vec<u8> = request
+            .compressed
+            .iter()
+            .map(|byte| byte.reverse_bits())
+            .collect();
+        return decode_block_payload(BlockDecodeRequest {
+            compressed: &reversed,
+            ..request
+        });
+    }
+    decode_block_payload(request)
+}
+
+fn decode_block_payload(request: BlockDecodeRequest<'_>) -> Result<Vec<u8>> {
     let samples = request.context.block_samples();
     let expected_len = expected_encoded_block_len(&request, samples)?;
 

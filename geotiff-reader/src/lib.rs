@@ -978,6 +978,48 @@ mod tests {
         }])
     }
 
+    fn build_geotiff_with_geokeys(geo_keys: &[u16], ascii_params: &[u8]) -> Vec<u8> {
+        let tiepoints = [0.0, 0.0, 0.0, 100.0, 200.0, 0.0];
+        let scales = [2.0, 2.0, 0.0];
+        build_classic_tiff(&[TestIfdSpec {
+            image_data: vec![10u8, 20, 30, 40],
+            entries: vec![
+                (256u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (257u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (258u16, 3u16, 1u32, [8, 0, 0, 0].to_vec()),
+                (259u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (273u16, 4u16, 1u32, vec![]),
+                (277u16, 3u16, 1u32, [1, 0, 0, 0].to_vec()),
+                (278u16, 4u16, 1u32, le_u32(2).to_vec()),
+                (279u16, 4u16, 1u32, le_u32(4).to_vec()),
+                (
+                    33550u16,
+                    12u16,
+                    3u32,
+                    scales.iter().flat_map(|value| le_f64(*value)).collect(),
+                ),
+                (
+                    33922u16,
+                    12u16,
+                    6u32,
+                    tiepoints.iter().flat_map(|value| le_f64(*value)).collect(),
+                ),
+                (
+                    34735u16,
+                    3u16,
+                    geo_keys.len() as u32,
+                    geo_keys.iter().flat_map(|value| le_u16(*value)).collect(),
+                ),
+                (
+                    34737u16,
+                    2u16,
+                    ascii_params.len() as u32,
+                    ascii_params.to_vec(),
+                ),
+            ],
+        }])
+    }
+
     fn build_simple_lerc_geotiff() -> Vec<u8> {
         let tiepoints = [0.0, 0.0, 0.0, 100.0, 200.0, 0.0];
         let scales = [2.0, 2.0, 0.0];
@@ -1564,6 +1606,33 @@ mod tests {
         };
 
         build_classic_tiff(&[ghost, overview, base])
+    }
+
+    #[test]
+    fn opens_files_whose_geokeys_only_gdal_would_tolerate() {
+        const CITATION: u16 = 2049;
+        // KeyRevision 1.2, a Latin-1 citation, and a key with an unknown value
+        // location, none of which should stop the raster from opening.
+        let geo_keys = [
+            1, 1, 2, 4, // header
+            1024, 0, 1, 2, // model type = Geographic
+            CITATION, 34737, 9, 0, // citation
+            2048, 0, 1, 4326, // EPSG:4326
+            2054, 12345, 1, 0, // unknown location
+        ];
+        let file =
+            GeoTiffFile::from_bytes(build_geotiff_with_geokeys(&geo_keys, b"Geogr\xe1fic|\0"))
+                .unwrap();
+
+        assert_eq!(file.epsg(), Some(4326));
+        assert_eq!(file.geokeys().keys.len(), 3);
+        // Lossy tag decoding widens the Latin-1 byte, so only the prefix survives.
+        assert!(file
+            .geokeys()
+            .get_ascii(CITATION)
+            .is_some_and(|citation| citation.starts_with("Geogr")));
+        let (values, _) = file.read_raster::<u8>().unwrap().into_raw_vec_and_offset();
+        assert_eq!(values, vec![10, 20, 30, 40]);
     }
 
     #[test]

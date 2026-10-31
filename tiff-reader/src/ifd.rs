@@ -21,6 +21,8 @@ pub use tiff_core::{
     PhotometricInterpretation, YCbCrPositioning,
 };
 
+const SAMPLE_FORMAT_VOID: u16 = 4;
+
 /// Budgets that bound TIFF IFD parsing allocations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseBudgets {
@@ -530,6 +532,12 @@ impl Ifd {
                 "mixed SampleFormat values are not supported".into(),
             ));
         }
+        // SampleFormat=4 means "undefined", which libtiff reads as unsigned.
+        let first_format = if first_format == SAMPLE_FORMAT_VOID {
+            1
+        } else {
+            first_format
+        };
         if !matches!(first_format, 1..=3) {
             return Err(Error::UnsupportedSampleFormat(first_format));
         }

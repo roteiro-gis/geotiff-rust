@@ -143,20 +143,29 @@ pub(crate) fn read_block(
     }
 
     let byte_count_limit = compressed_block_byte_count_limit(&decode_request)?;
+    // Uncompressed blocks have an exact size, and some writers store a full
+    // RowsPerStrip for the last strip. Ignore that excess as libtiff does when
+    // the bytes really exist; a count running past the file is still corrupt.
+    let excess_is_stored = spec.offset.saturating_add(spec.byte_count) <= source.len();
+    let byte_count = if context.compression == Some(Compression::None) && excess_is_stored {
+        spec.byte_count.min(byte_count_limit as u64)
+    } else {
+        spec.byte_count
+    };
     let compressed = match options.gdal_structural_metadata {
         Some(metadata) => read_gdal_block_payload(
             source,
             metadata,
             context.byte_order,
             spec.offset,
-            spec.byte_count,
+            byte_count,
             byte_count_limit,
             spec.index,
         )?,
         None => read_block_payload(
             source,
             spec.offset,
-            spec.byte_count,
+            byte_count,
             byte_count_limit,
             spec.index,
         )?,

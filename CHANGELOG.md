@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.9.1 - 2026-10-31
+
+- upgrade `ruzstd` to 0.9.1 to fix a decompression bomb (RUSTSEC-2026-0344): a
+  small crafted ZSTD-compressed TIFF or remote COG could exhaust memory inside
+  the decoder, before the block budget applied. Every earlier release is
+  affected, and `cargo update` cannot reach the fix, so upgrade to this version
+- upgrade `lru` to 0.19 for a panic-safety soundness issue in `LruCache::pop()`
+  (RUSTSEC-2026-0253)
+- update `rustls`, `rustls-webpki`, `webpki-roots`, `quinn-proto`, and `tokio` in
+  the lockfiles to clear their advisories from this repository's builds
+
 ## 0.9.0 - 2026-10-18
 
 Breaking changes:

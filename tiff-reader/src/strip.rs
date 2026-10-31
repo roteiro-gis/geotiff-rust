@@ -14,8 +14,9 @@ use crate::header::ByteOrder;
 use crate::ifd::{Ifd, RasterLayout};
 use crate::source::TiffSource;
 use crate::{
-    allocate_decode_output, checked_layout_add, checked_layout_mul, read_block_payload,
-    read_gdal_block_payload, validate_decode_output_len, DecodeReadOptions, Window,
+    allocate_decode_output, checked_layout_add, checked_layout_mul, copy_strided_samples,
+    read_block_payload, read_gdal_block_payload, validate_decode_output_len, DecodeReadOptions,
+    Window,
 };
 
 pub(crate) fn read_window(
@@ -159,6 +160,11 @@ fn copy_strip_window_block(
             layout.bytes_per_sample,
             "strip plane byte offset",
         )?;
+        let src_col_offset = checked_layout_mul(
+            window.col_off,
+            layout.bytes_per_sample,
+            "strip source column offset",
+        )?;
         for row in copy_row_start..copy_row_end {
             let src_row_index = row - spec.row_start;
             let dest_row_index = row - window.row_off;
@@ -170,30 +176,14 @@ fn copy_strip_window_block(
                 checked_layout_mul(dest_row_index, output_row_bytes, "strip output row offset")?;
             let dest_row_end =
                 checked_layout_add(dest_row_offset, output_row_bytes, "strip output row range")?;
-            let src_row = &block[src_row_offset..src_row_end];
-            let dest_row = &mut output[dest_row_offset..dest_row_end];
-            for col in window.col_off..window.col_end() {
-                let src_offset =
-                    checked_layout_mul(col, layout.bytes_per_sample, "strip source column offset")?;
-                let src_end = checked_layout_add(
-                    src_offset,
-                    layout.bytes_per_sample,
-                    "strip source sample range",
-                )?;
-                let src = &src_row[src_offset..src_end];
-                let dest_col_index = col - window.col_off;
-                let pixel_base = checked_layout_add(
-                    checked_layout_mul(dest_col_index, pixel_stride, "strip output pixel offset")?,
-                    plane_offset,
-                    "strip output sample offset",
-                )?;
-                let pixel_end = checked_layout_add(
-                    pixel_base,
-                    layout.bytes_per_sample,
-                    "strip output sample range",
-                )?;
-                dest_row[pixel_base..pixel_end].copy_from_slice(src);
-            }
+            copy_strided_samples(
+                &mut output[dest_row_offset..dest_row_end][plane_offset..],
+                pixel_stride,
+                &block[src_row_offset..src_row_end][src_col_offset..],
+                layout.bytes_per_sample,
+                layout.bytes_per_sample,
+                window.cols,
+            );
         }
     }
     Ok(())
@@ -222,6 +212,11 @@ fn copy_strip_band_window_block(
         let src_row_bytes = layout.checked_row_bytes()?;
         let band_offset =
             checked_layout_mul(band_index, layout.bytes_per_sample, "band byte offset")?;
+        let src_col_offset = checked_layout_add(
+            checked_layout_mul(window.col_off, pixel_stride, "strip source column offset")?,
+            band_offset,
+            "strip source band offset",
+        )?;
         for row in copy_row_start..copy_row_end {
             let src_row_index = row - spec.row_start;
             let dest_row_index = row - window.row_off;
@@ -233,32 +228,14 @@ fn copy_strip_band_window_block(
                 checked_layout_mul(dest_row_index, output_row_bytes, "strip output row offset")?;
             let dest_row_end =
                 checked_layout_add(dest_row_offset, output_row_bytes, "strip output row range")?;
-            let src_row = &block[src_row_offset..src_row_end];
-            let dest_row = &mut output[dest_row_offset..dest_row_end];
-            for col in window.col_off..window.col_end() {
-                let src_base = checked_layout_add(
-                    checked_layout_mul(col, pixel_stride, "strip source column offset")?,
-                    band_offset,
-                    "strip source band offset",
-                )?;
-                let dest_col_index = col - window.col_off;
-                let dest_base = checked_layout_mul(
-                    dest_col_index,
-                    layout.bytes_per_sample,
-                    "strip output sample offset",
-                )?;
-                let src_end = checked_layout_add(
-                    src_base,
-                    layout.bytes_per_sample,
-                    "strip source sample range",
-                )?;
-                let dest_end = checked_layout_add(
-                    dest_base,
-                    layout.bytes_per_sample,
-                    "strip output sample range",
-                )?;
-                dest_row[dest_base..dest_end].copy_from_slice(&src_row[src_base..src_end]);
-            }
+            copy_strided_samples(
+                &mut output[dest_row_offset..dest_row_end],
+                layout.bytes_per_sample,
+                &block[src_row_offset..src_row_end][src_col_offset..],
+                pixel_stride,
+                layout.bytes_per_sample,
+                window.cols,
+            );
         }
     } else {
         let src_row_bytes = layout.checked_sample_plane_row_bytes()?;

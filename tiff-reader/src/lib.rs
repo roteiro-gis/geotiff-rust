@@ -155,6 +155,52 @@ pub(crate) fn checked_layout_mul(lhs: usize, rhs: usize, context: &'static str) 
         .ok_or_else(|| Error::InvalidImageLayout(format!("{context} overflows usize")))
 }
 
+/// Copy `count` samples between rows that space them differently, as moving a
+/// band out of interleaved pixels or a plane into them does.
+///
+/// This runs for every sample of a read while holding the output lock, so each
+/// supported sample width gets its own fixed-size copy.
+pub(crate) fn copy_strided_samples(
+    dest: &mut [u8],
+    dest_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    bytes_per_sample: usize,
+    count: usize,
+) {
+    fn copy<const BYTES: usize>(
+        dest: &mut [u8],
+        dest_stride: usize,
+        src: &[u8],
+        src_stride: usize,
+        count: usize,
+    ) {
+        for (dest, src) in dest
+            .chunks_mut(dest_stride)
+            .zip(src.chunks(src_stride))
+            .take(count)
+        {
+            dest[..BYTES].copy_from_slice(&src[..BYTES]);
+        }
+    }
+
+    match bytes_per_sample {
+        1 => copy::<1>(dest, dest_stride, src, src_stride, count),
+        2 => copy::<2>(dest, dest_stride, src, src_stride, count),
+        4 => copy::<4>(dest, dest_stride, src, src_stride, count),
+        8 => copy::<8>(dest, dest_stride, src, src_stride, count),
+        _ => {
+            for (dest, src) in dest
+                .chunks_mut(dest_stride)
+                .zip(src.chunks(src_stride))
+                .take(count)
+            {
+                dest[..bytes_per_sample].copy_from_slice(&src[..bytes_per_sample]);
+            }
+        }
+    }
+}
+
 pub(crate) fn allocate_decode_output(output_len: usize, budget: usize) -> Result<Vec<u8>> {
     let mut output = allocate_decode_output_capacity(output_len, budget)?;
     output.resize(output_len, 0);
@@ -1049,8 +1095,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        parse_gdal_structural_metadata, parse_gdal_structural_metadata_len, Error,
-        GdalStructuralMetadata, OpenOptions, ParseBudgets, TiffFile,
+        copy_strided_samples, parse_gdal_structural_metadata, parse_gdal_structural_metadata_len,
+        Error, GdalStructuralMetadata, OpenOptions, ParseBudgets, TiffFile,
         GDAL_STRUCTURAL_METADATA_PREFIX,
     };
     use crate::source::{BytesSource, TiffSource};
@@ -1196,6 +1242,59 @@ mod tests {
             data.push(pixel);
         }
         data
+    }
+
+    #[test]
+    fn strided_copy_moves_one_band_between_interleaved_and_planar_rows() {
+        for bytes_per_sample in [1usize, 2, 3, 4, 8] {
+            let pixel_stride = bytes_per_sample * 3;
+            let count = 5;
+            let interleaved: Vec<u8> = (0..pixel_stride * count).map(|v| v as u8).collect();
+
+            // Extract the middle band from interleaved pixels.
+            let mut band = vec![0u8; bytes_per_sample * count];
+            copy_strided_samples(
+                &mut band,
+                bytes_per_sample,
+                &interleaved[bytes_per_sample..],
+                pixel_stride,
+                bytes_per_sample,
+                count,
+            );
+            let expected: Vec<u8> = interleaved
+                .chunks_exact(pixel_stride)
+                .flat_map(|pixel| pixel[bytes_per_sample..bytes_per_sample * 2].to_vec())
+                .collect();
+            assert_eq!(band, expected, "{bytes_per_sample}-byte extract");
+
+            // Insert it back, leaving the other bands untouched.
+            let mut output = vec![0xffu8; interleaved.len()];
+            copy_strided_samples(
+                &mut output[bytes_per_sample..],
+                pixel_stride,
+                &band,
+                bytes_per_sample,
+                bytes_per_sample,
+                count,
+            );
+            for (index, pixel) in output.chunks_exact(pixel_stride).enumerate() {
+                assert_eq!(
+                    pixel[bytes_per_sample..bytes_per_sample * 2],
+                    expected[index * bytes_per_sample..(index + 1) * bytes_per_sample],
+                );
+                assert!(pixel[..bytes_per_sample].iter().all(|&value| value == 0xff));
+                assert!(pixel[bytes_per_sample * 2..]
+                    .iter()
+                    .all(|&value| value == 0xff));
+            }
+        }
+    }
+
+    #[test]
+    fn strided_copy_stops_after_count_samples() {
+        let mut dest = [0u8; 6];
+        copy_strided_samples(&mut dest, 2, &[1, 2, 3, 4, 5, 6], 2, 2, 2);
+        assert_eq!(dest, [1, 2, 3, 4, 0, 0]);
     }
 
     #[test]

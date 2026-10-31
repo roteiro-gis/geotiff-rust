@@ -355,10 +355,10 @@ fn collect_tile_specs_for_window(
     }
 
     let offsets = ifd
-        .tile_offsets()
+        .block_table(crate::ifd::TAG_TILE_OFFSETS)
         .ok_or(Error::TagNotFound(crate::ifd::TAG_TILE_OFFSETS))?;
     let counts = ifd
-        .tile_byte_counts()
+        .block_table(crate::ifd::TAG_TILE_BYTE_COUNTS)
         .ok_or(Error::TagNotFound(crate::ifd::TAG_TILE_BYTE_COUNTS))?;
     if offsets.len() != counts.len() {
         return Err(Error::InvalidImageLayout(format!(
@@ -429,8 +429,8 @@ fn collect_tile_specs_for_window(
                     y,
                     cols_in_tile,
                     rows_in_tile,
-                    offset: offsets[tile_index],
-                    byte_count: counts[tile_index],
+                    offset: offsets.at(tile_index),
+                    byte_count: counts.at(tile_index),
                     tile_width,
                     tile_height,
                 });

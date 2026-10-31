@@ -626,6 +626,17 @@ impl Ifd {
         })
     }
 
+    /// Borrow a strip or tile offset or byte-count table.
+    pub(crate) fn block_table(&self, code: u16) -> Option<BlockTable<'_>> {
+        match &self.tag(code)?.value {
+            TagValue::Byte(values) => Some(BlockTable::Byte(values)),
+            TagValue::Short(values) => Some(BlockTable::Short(values)),
+            TagValue::Long(values) => Some(BlockTable::Long(values)),
+            TagValue::Long8(values) => Some(BlockTable::Long8(values)),
+            _ => None,
+        }
+    }
+
     fn tag_u16(&self, code: u16) -> Option<u16> {
         self.tag(code).and_then(|tag| tag.value.as_u16())
     }
@@ -636,6 +647,38 @@ impl Ifd {
 
     fn tag_u64_list(&self, code: u16) -> Option<Vec<u64>> {
         self.tag(code).and_then(|tag| tag.value.as_u64_vec())
+    }
+}
+
+/// Borrowed view of a strip or tile offset or byte-count table.
+///
+/// These tables can hold millions of entries while a read touches only a few,
+/// so reads index them in place instead of copying them into `Vec<u64>`s.
+#[derive(Clone, Copy)]
+pub(crate) enum BlockTable<'a> {
+    Byte(&'a [u8]),
+    Short(&'a [u16]),
+    Long(&'a [u32]),
+    Long8(&'a [u64]),
+}
+
+impl BlockTable<'_> {
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Byte(values) => values.len(),
+            Self::Short(values) => values.len(),
+            Self::Long(values) => values.len(),
+            Self::Long8(values) => values.len(),
+        }
+    }
+
+    pub(crate) fn at(self, index: usize) -> u64 {
+        match self {
+            Self::Byte(values) => u64::from(values[index]),
+            Self::Short(values) => u64::from(values[index]),
+            Self::Long(values) => u64::from(values[index]),
+            Self::Long8(values) => values[index],
+        }
     }
 }
 
@@ -1049,7 +1092,7 @@ mod tests {
         ColorModel, ExtraSample, Ifd, InkSet, LercAdditionalCompression, RasterLayout,
         TAG_BITS_PER_SAMPLE, TAG_COLOR_MAP, TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH,
         TAG_INK_SET, TAG_LERC_PARAMETERS, TAG_PHOTOMETRIC_INTERPRETATION, TAG_SAMPLES_PER_PIXEL,
-        TAG_SAMPLE_FORMAT, TAG_YCBCR_SUBSAMPLING,
+        TAG_SAMPLE_FORMAT, TAG_STRIP_OFFSETS, TAG_TILE_OFFSETS, TAG_YCBCR_SUBSAMPLING,
     };
     use crate::header::{ByteOrder, TiffHeader};
     use crate::source::BytesSource;
@@ -1063,6 +1106,38 @@ mod tests {
             index: Some(0),
             offset: 0,
         }
+    }
+
+    #[test]
+    fn block_tables_match_the_owned_accessors_for_every_tag_width() {
+        let table_of = |value: TagValue| {
+            let (tag_type, count) = (value.tag_type(), value.count());
+            Ifd {
+                tags: vec![Tag {
+                    code: TAG_STRIP_OFFSETS,
+                    tag_type,
+                    count,
+                    value,
+                }],
+                index: None,
+                offset: 0,
+            }
+        };
+
+        for ifd in [
+            table_of(TagValue::Byte(vec![7, 9])),
+            table_of(TagValue::Short(vec![7, 9])),
+            table_of(TagValue::Long(vec![7, 9])),
+            table_of(TagValue::Long8(vec![7, 9])),
+        ] {
+            let table = ifd.block_table(TAG_STRIP_OFFSETS).unwrap();
+            let values: Vec<u64> = (0..table.len()).map(|index| table.at(index)).collect();
+            assert_eq!(Some(values), ifd.strip_offsets());
+        }
+
+        let ascii = table_of(TagValue::Ascii("7".into()));
+        assert!(ascii.block_table(TAG_STRIP_OFFSETS).is_none());
+        assert!(ascii.block_table(TAG_TILE_OFFSETS).is_none());
     }
 
     #[test]

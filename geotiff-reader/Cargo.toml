@@ -17,7 +17,7 @@ geotiff-core = { version = "0.9.0", path = "../geotiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
 tiff-reader = { version = "0.9.0", path = "../tiff-reader", optional = true }
-lru = { version = "0.16.3", optional = true }
+lru = { version = "0.19", optional = true }
 parking_lot = { version = "0.12", optional = true }
 
 [features]

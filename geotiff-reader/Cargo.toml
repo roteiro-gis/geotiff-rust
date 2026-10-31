@@ -13,10 +13,10 @@ keywords = ["geotiff", "cog", "raster", "gis", "read-only"]
 categories = ["science", "parser-implementations"]
 
 [dependencies]
-geotiff-core = { version = "0.9.1", path = "../geotiff-core" }
+geotiff-core = { version = "0.10.0", path = "../geotiff-core" }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
-tiff-reader = { version = "0.9.1", path = "../tiff-reader", optional = true }
+tiff-reader = { version = "0.10.0", path = "../tiff-reader", optional = true }
 lru = { version = "0.19", optional = true }
 parking_lot = { version = "0.12", optional = true }
 

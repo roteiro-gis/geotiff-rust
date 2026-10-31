@@ -20,7 +20,9 @@ use tiff_reader::{OpenOptions as TiffOpenOptions, TiffFile, TiffSample};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
-use crate::http_range::{probe_total_from_content_range, validate_content_range_header};
+use crate::http_range::{
+    is_transient, probe_total_from_content_range, retry_delay, validate_content_range_header,
+};
 use crate::{Error, GeoTiffFile, Result};
 
 /// Options for asynchronous HTTP range-backed GeoTIFF access.
@@ -38,6 +40,12 @@ pub struct AsyncHttpOpenOptions {
     /// per contiguous run rather than one request per chunk, so this bounds
     /// how much a single request may fetch. Set to 1 to disable coalescing.
     pub max_coalesced_chunks: usize,
+    /// Maximum retries of a range or object-size request after a transient
+    /// failure, with exponential backoff. Connection failures, interrupted
+    /// responses, and HTTP 408, 429, 500, 502, 503, and 504 are retried.
+    /// Timeouts aren't, so `request_timeout` still bounds a stalled request.
+    /// Set to 0 to disable.
+    pub max_retries: u32,
     /// TCP connect timeout for clients built from these options.
     ///
     /// Ignored when `client` is provided; configure custom clients directly.
@@ -61,6 +69,7 @@ impl Default for AsyncHttpOpenOptions {
             cache_bytes: 64 * 1024 * 1024,
             cache_slots: 257,
             max_coalesced_chunks: 16,
+            max_retries: 3,
             connect_timeout: Some(Duration::from_secs(10)),
             request_timeout: Some(Duration::from_secs(120)),
             headers: HeaderMap::new(),
@@ -244,6 +253,7 @@ struct AsyncHttpRangeSource {
     len: u64,
     chunk_size: usize,
     max_coalesced_chunks: usize,
+    max_retries: u32,
     headers: HeaderMap,
     request_timeout: Option<Duration>,
     cache: Mutex<RangeCacheState>,
@@ -347,8 +357,18 @@ impl AsyncHttpRangeSource {
                 builder.build()?
             }
         };
-        let len =
-            probe_content_length(&client, &url, &options.headers, options.request_timeout).await?;
+        let mut attempt = 0;
+        let len = loop {
+            match probe_content_length(&client, &url, &options.headers, options.request_timeout)
+                .await
+            {
+                Err(error) if attempt < options.max_retries && is_transient(&error) => {
+                    tokio::time::sleep(retry_delay(attempt)).await;
+                    attempt += 1;
+                }
+                result => break result?,
+            }
+        };
         let slots = NonZeroUsize::new(options.cache_slots.max(1)).unwrap();
         Ok(Self {
             client,
@@ -356,6 +376,7 @@ impl AsyncHttpRangeSource {
             len,
             chunk_size: options.chunk_size.max(1),
             max_coalesced_chunks: options.max_coalesced_chunks.max(1),
+            max_retries: options.max_retries,
             headers: options.headers,
             request_timeout: options.request_timeout,
             cache: Mutex::new(RangeCacheState {
@@ -478,7 +499,7 @@ impl AsyncHttpRangeSource {
                 run_end = next;
             }
             let run = &led[position..=run_end];
-            match self.fetch_run(run[0], run.len()).await {
+            match self.fetch_run_with_retries(run[0], run.len()).await {
                 Ok(bodies) => {
                     for (offset, body) in bodies.into_iter().enumerate() {
                         let index = run[0] + offset as u64;
@@ -511,6 +532,19 @@ impl AsyncHttpRangeSource {
 
     /// Issue one range request covering `count` consecutive chunks and split
     /// the response back into per-chunk bodies.
+    async fn fetch_run_with_retries(&self, first: u64, count: usize) -> Result<Vec<Vec<u8>>> {
+        let mut attempt = 0;
+        loop {
+            match self.fetch_run(first, count).await {
+                Err(error) if attempt < self.max_retries && is_transient(&error) => {
+                    tokio::time::sleep(retry_delay(attempt)).await;
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
+    }
+
     async fn fetch_run(&self, first: u64, count: usize) -> Result<Vec<Vec<u8>>> {
         let (start, _) = self.chunk_bounds(first)?;
         let (_, end) = self.chunk_bounds(first + count as u64 - 1)?;
@@ -708,6 +742,65 @@ mod tests {
 
     use super::{AsyncHttpGeoTiffFile, AsyncHttpOpenOptions, AsyncHttpRangeSource};
     use crate::http_test_support::{build_simple_geotiff, TestServer};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_range_failures_are_retried() {
+        let bytes = build_simple_geotiff();
+        let Some(server) = TestServer::start_with_transient_failures(bytes.clone(), 503, 2) else {
+            return;
+        };
+        let file = AsyncHttpGeoTiffFile::open_with_options(
+            server.url(),
+            AsyncHttpOpenOptions {
+                chunk_size: 1024,
+                ..AsyncHttpOpenOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(file.inner().epsg(), Some(4326));
+        assert_eq!(server.data_ranges().len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failures_stop_at_the_retry_budget_or_a_permanent_status() {
+        for (status, max_retries, expected_requests) in [(503, 1, 2), (503, 0, 1), (404, 3, 1)] {
+            let bytes = build_simple_geotiff();
+            let Some(server) = TestServer::start_with_transient_failures(bytes, status, 9) else {
+                return;
+            };
+            let result = AsyncHttpGeoTiffFile::open_with_options(
+                server.url(),
+                AsyncHttpOpenOptions {
+                    chunk_size: 1024,
+                    max_retries,
+                    ..AsyncHttpOpenOptions::default()
+                },
+            )
+            .await;
+
+            assert!(result.is_err());
+            assert_eq!(
+                server.data_ranges().len(),
+                expected_requests,
+                "status {status} with {max_retries} retries"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_retries_a_transient_size_probe_failure() {
+        let Some(server) =
+            TestServer::start_with_transient_probe_failures(build_simple_geotiff(), 503, 2)
+        else {
+            return;
+        };
+
+        let file = AsyncHttpGeoTiffFile::open(server.url()).await.unwrap();
+
+        assert_eq!(file.inner().epsg(), Some(4326));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn opens_remote_geotiff_over_async_http_ranges() {

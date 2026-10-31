@@ -107,6 +107,7 @@ pub(crate) fn decode_compressed_block(request: BlockDecodeRequest<'_>) -> Result
             width: request.block_width,
             height: request.block_height,
             samples_per_pixel: samples,
+            ycbcr: matches!(request.context.color_model, ColorModel::YCbCr { .. }),
         });
         let mut decoded = filters::decompress_with_layout(
             request.context.compression_code,

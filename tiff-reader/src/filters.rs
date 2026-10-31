@@ -16,6 +16,8 @@ pub(crate) struct ImageDecodeLayout {
     pub width: usize,
     pub height: usize,
     pub samples_per_pixel: usize,
+    /// Whether the TIFF's photometric interpretation says samples are YCbCr.
+    pub ycbcr: bool,
 }
 
 /// Decompress a strip or tile according to the TIFF compression scheme.
@@ -267,12 +269,32 @@ fn decompress_jpeg(
     expected_layout: Option<ImageDecodeLayout>,
 ) -> Result<Vec<u8>> {
     let stream = merge_jpeg_stream(jpeg_tables, data);
+    // Component IDs and Adobe markers are hints for standalone JPEGs. In a TIFF
+    // the color space comes from the photometric tag alone, and streams from
+    // encoders other than libjpeg often contradict it. The decoder has no raw
+    // interleaved mode, so `RGB` is used to interleave three components
+    // unchanged, and its `CMYK` inversion is undone below.
+    let color_transform = expected_layout.and_then(|layout| match layout.samples_per_pixel {
+        3 if layout.ycbcr => Some(jpeg_decoder::ColorTransform::YCbCr),
+        3 => Some(jpeg_decoder::ColorTransform::RGB),
+        4 => Some(jpeg_decoder::ColorTransform::CMYK),
+        _ => None,
+    });
     panic::catch_unwind(AssertUnwindSafe(|| {
         let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(stream));
         decoder.set_max_decoding_buffer_size(decoded_len_limit);
+        if let Some(color_transform) = color_transform {
+            decoder.set_color_transform(color_transform);
+        }
         decoder.read_info()?;
         validate_jpeg_metadata(&decoder, decoded_len_limit, expected_layout)?;
-        decoder.decode()
+        let mut decoded = decoder.decode()?;
+        if matches!(color_transform, Some(jpeg_decoder::ColorTransform::CMYK)) {
+            for value in &mut decoded {
+                *value = !*value;
+            }
+        }
+        Ok::<_, jpeg_decoder::Error>(decoded)
     }))
     .map_err(|payload| Error::DecompressionFailed {
         index,

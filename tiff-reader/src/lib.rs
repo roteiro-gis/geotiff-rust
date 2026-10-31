@@ -2394,6 +2394,43 @@ mod tests {
 
     #[cfg(feature = "jpeg")]
     #[test]
+    fn jpeg_color_conversion_follows_the_photometric_tag() {
+        // A JFIF stream with component IDs 1, 2, 3, which a standalone JPEG
+        // decoder would always treat as YCbCr. Pure red is (76, 85, 255) there.
+        let pixels = [255u8, 0, 0].repeat(64);
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 100)
+            .encode(&pixels, 8, 8, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        let read_first_pixel = |photometric: u16| {
+            let overrides = [
+                (258, 3, 3, [8, 0, 8, 0, 8, 0].to_vec()),
+                (259, 3, 1, inline_short(7)),
+                (262, 3, 1, inline_short(photometric)),
+                (277, 3, 1, inline_short(3)),
+            ];
+            let bytes = build_stripped_tiff(8, 8, &jpeg, &overrides);
+            let pixels = TiffFile::from_bytes(bytes)
+                .unwrap()
+                .read_image_bytes(0)
+                .unwrap();
+            [pixels[0], pixels[1], pixels[2]]
+        };
+        let assert_near = |actual: [u8; 3], expected: [u8; 3]| {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(actual.abs_diff(expected) <= 2, "{actual} vs {expected}");
+            }
+        };
+
+        const PHOTOMETRIC_RGB: u16 = 2;
+        const PHOTOMETRIC_YCBCR: u16 = 6;
+        assert_near(read_first_pixel(PHOTOMETRIC_YCBCR), [255, 0, 0]);
+        // Tagged RGB means the components are already RGB, so they pass through.
+        assert_near(read_first_pixel(PHOTOMETRIC_RGB), [76, 85, 255]);
+    }
+
+    #[cfg(feature = "jpeg")]
+    #[test]
     fn rejects_jpeg_payload_dimensions_that_do_not_match_tile() {
         let pixels = vec![17u8; 8 * 32];
         let mut jpeg = Vec::new();

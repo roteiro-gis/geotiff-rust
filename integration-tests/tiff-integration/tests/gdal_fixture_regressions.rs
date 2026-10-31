@@ -27,3 +27,22 @@ fn reads_gdal_written_u8_lerc_huffman_blocks() {
         assert_eq!(usize::from(value), expected, "pixel ({row}, {col})");
     }
 }
+
+/// Negative int8 samples only survive delta Huffman with a signed wrap, so an
+/// unsigned one saturates them with no error.
+#[test]
+fn reads_gdal_written_i8_lerc_huffman_blocks() {
+    let file = TiffFile::from_bytes(fixture("gdal_lerc_i8_huffman.tif")).unwrap();
+
+    let image = file.read_image::<i8>(0).unwrap();
+
+    let (height, width) = (image.shape()[0], image.shape()[1]);
+    assert_eq!((height, width), (48, 64));
+    for ((row, col), value) in (0..height)
+        .flat_map(|row| (0..width).map(move |col| (row, col)))
+        .zip(image.iter().copied())
+    {
+        let expected = ((col * 3 + row * 2) % 120 + (col * 7 + row * 13) % 4) as i64 - 60;
+        assert_eq!(i64::from(value), expected, "pixel ({row}, {col})");
+    }
+}

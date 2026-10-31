@@ -13,7 +13,7 @@ keywords = ["tiff", "bigtiff", "encoder", "raster", "gis"]
 categories = ["science", "encoding"]
 
 [dependencies]
-tiff-core = { version = "0.9.1", path = "../tiff-core" }
+tiff-core = { version = "0.10.0", path = "../tiff-core" }
 lerc-core = { workspace = true }
 lerc-writer = { workspace = true }
 thiserror = { workspace = true }

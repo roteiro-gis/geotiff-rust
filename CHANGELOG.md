@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-10-31
+
 Breaking changes:
 
 - add `max_retries` to the public `HttpOpenOptions` and `AsyncHttpOpenOptions` structs; exhaustive struct literals must set it or use `..Default::default()`

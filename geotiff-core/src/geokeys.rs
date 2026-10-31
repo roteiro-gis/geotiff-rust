@@ -32,6 +32,7 @@ pub const VERTICAL_CITATION: u16 = 4097;
 pub const VERTICAL_CS_TYPE: u16 = 4096;
 pub const VERTICAL_DATUM: u16 = 4098;
 pub const VERTICAL_UNITS: u16 = 4099;
+const GEO_KEY_DIRECTORY_TAG: u16 = 34735;
 const GEO_DOUBLE_PARAMS_TAG: u16 = 34736;
 const GEO_ASCII_PARAMS_TAG: u16 = 34737;
 pub const GEO_KEY_DIRECTORY_VERSION: u16 = 1;
@@ -154,87 +155,49 @@ impl GeoKeyDirectory {
     /// - `directory`: contents of tag 34735 (SHORT array)
     /// - `double_params`: contents of tag 34736 (DOUBLE array), may be empty
     /// - `ascii_params`: contents of tag 34737 (ASCII), may be empty
+    ///
+    /// Returns `None` only when the directory is shorter than its header or
+    /// declares an unknown `KeyDirectoryVersion`. Parsing otherwise follows
+    /// libgeotiff: later revisions are accepted and normalized to one this
+    /// crate can serialize, entries past the end of a short directory are
+    /// ignored, a key that can't be resolved is skipped, and the first of any
+    /// duplicate keys wins. Malformed metadata in one key shouldn't make the
+    /// raster unreadable.
     pub fn parse(directory: &[u16], double_params: &[f64], ascii_params: &str) -> Option<Self> {
-        if directory.len() < 4 {
+        if directory.len() < 4 || directory[0] != GEO_KEY_DIRECTORY_VERSION {
             return None;
         }
 
-        let version = directory[0];
-        let major_revision = directory[1];
-        let minor_revision = directory[2];
-        let num_keys = directory[3] as usize;
+        let minor_revision = match directory[2] {
+            minor @ (GEO_KEY_MINOR_REVISION_1_0 | GEO_KEY_MINOR_REVISION_1_1) => minor,
+            _ => GEO_KEY_MINOR_REVISION_1_1,
+        };
+        let num_keys = usize::from(directory[3]);
 
-        if version != GEO_KEY_DIRECTORY_VERSION
-            || major_revision != GEO_KEY_REVISION
-            || !matches!(
-                minor_revision,
-                GEO_KEY_MINOR_REVISION_1_0 | GEO_KEY_MINOR_REVISION_1_1
-            )
-            || directory.len() != 4 + num_keys * 4
-            || !ascii_params.is_ascii()
-        {
-            return None;
-        }
-
-        let mut keys = Vec::with_capacity(num_keys);
-        let mut seen_ids = HashSet::with_capacity(num_keys);
-        for i in 0..num_keys {
-            let base = 4 + i * 4;
-            let key_id = directory[base];
-            let location = directory[base + 1];
-            let count = directory[base + 2] as usize;
-            let value_offset = directory[base + 3];
-            if !seen_ids.insert(key_id) {
-                return None;
-            }
-
-            let value = match location {
-                0 => {
-                    // Value is the offset itself (short).
-                    if count != 1 {
-                        return None;
-                    }
-                    GeoKeyValue::Short(value_offset)
-                }
-                34736 => {
-                    // Value is in GeoDoubleParams.
-                    if count == 0 {
-                        return None;
-                    }
-                    let start = value_offset as usize;
-                    let end = start.checked_add(count)?;
-                    if end <= double_params.len() {
-                        GeoKeyValue::Double(double_params[start..end].to_vec())
-                    } else {
-                        return None;
-                    }
-                }
-                34737 => {
-                    // Value is in GeoAsciiParams.
-                    if count == 0 {
-                        return None;
-                    }
-                    let start = value_offset as usize;
-                    let end = start.checked_add(count)?;
-                    if let Some(raw) = ascii_params.get(start..end) {
-                        if !raw.ends_with('|') {
-                            return None;
-                        }
-                        let s = raw.trim_end_matches('|').trim_end_matches('\0').to_string();
-                        GeoKeyValue::Ascii(s)
-                    } else {
-                        return None;
-                    }
-                }
-                _ => return None,
+        let mut keys = Vec::new();
+        let mut seen_ids = HashSet::new();
+        for entry in directory[4..].chunks_exact(4).take(num_keys) {
+            let &[id, location, count, value_offset] = entry else {
+                continue;
             };
-
-            keys.push(GeoKey { id: key_id, value });
+            let Some(value) = parse_key_value(
+                location,
+                usize::from(count),
+                value_offset,
+                directory,
+                double_params,
+                ascii_params,
+            ) else {
+                continue;
+            };
+            if seen_ids.insert(id) {
+                keys.push(GeoKey { id, value });
+            }
         }
 
         Some(Self {
-            version,
-            major_revision,
+            version: GEO_KEY_DIRECTORY_VERSION,
+            major_revision: GEO_KEY_REVISION,
             minor_revision,
             keys,
         })
@@ -382,6 +345,40 @@ impl GeoKeyDirectory {
     }
 }
 
+fn parse_key_value(
+    location: u16,
+    count: usize,
+    value_offset: u16,
+    directory: &[u16],
+    double_params: &[f64],
+    ascii_params: &str,
+) -> Option<GeoKeyValue> {
+    let start = usize::from(value_offset);
+    match location {
+        0 => Some(GeoKeyValue::Short(value_offset)),
+        GEO_KEY_DIRECTORY_TAG if count == 1 => {
+            directory.get(start).copied().map(GeoKeyValue::Short)
+        }
+        GEO_DOUBLE_PARAMS_TAG if count > 0 => double_params
+            .get(start..start + count)
+            .map(|values| GeoKeyValue::Double(values.to_vec())),
+        GEO_ASCII_PARAMS_TAG if count > 0 => {
+            // Offsets count bytes, and citations aren't always ASCII, so slice
+            // bytes rather than a `str`, which panics off a char boundary.
+            let bytes = ascii_params.as_bytes();
+            let end = (start + count).min(bytes.len());
+            let raw = bytes.get(start..end)?;
+            let text = String::from_utf8_lossy(raw);
+            Some(GeoKeyValue::Ascii(
+                text.trim_end_matches('|')
+                    .trim_end_matches('\0')
+                    .to_string(),
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn checked_u16_len(key_id: u16, tag: u16, count: usize) -> Result<u16, GeoKeySerializeError> {
     u16::try_from(count).map_err(|_| GeoKeySerializeError::ValueCountTooLarge {
         key_id,
@@ -457,17 +454,53 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_invalid_headers_duplicate_keys_and_inline_counts() {
+    fn parse_rejects_unusable_directories() {
+        assert!(GeoKeyDirectory::parse(&[], &[], "").is_none());
+        assert!(GeoKeyDirectory::parse(&[1, 1, 1], &[], "").is_none());
         assert!(GeoKeyDirectory::parse(&[2, 1, 1, 0], &[], "").is_none());
-        assert!(GeoKeyDirectory::parse(&[1, 2, 1, 0], &[], "").is_none());
-        assert!(GeoKeyDirectory::parse(&[1, 1, 2, 0], &[], "").is_none());
-        assert!(GeoKeyDirectory::parse(&[1, 1, 1, 1, GT_MODEL_TYPE, 0, 2, 1], &[], "").is_none());
-        assert!(GeoKeyDirectory::parse(
-            &[1, 1, 1, 2, GT_MODEL_TYPE, 0, 1, 1, GT_MODEL_TYPE, 0, 1, 2],
-            &[],
-            ""
-        )
-        .is_none());
+    }
+
+    #[test]
+    fn parse_normalizes_later_revisions_so_the_directory_stays_serializable() {
+        for directory in [[1, 1, 2, 0], [1, 2, 0, 0]] {
+            let parsed = GeoKeyDirectory::parse(&directory, &[], "").unwrap();
+            assert_eq!(parsed.major_revision, GEO_KEY_REVISION);
+            assert!(parsed.serialize().is_ok());
+        }
+    }
+
+    #[test]
+    fn parse_tolerates_padded_and_truncated_directories() {
+        let padded = [1, 1, 0, 1, GT_MODEL_TYPE, 0, 1, 2, 0, 0, 0, 0];
+        let parsed = GeoKeyDirectory::parse(&padded, &[], "").unwrap();
+        assert_eq!(parsed.keys.len(), 1);
+
+        let truncated = [1, 1, 0, 5, GT_MODEL_TYPE, 0, 1, 2, GEODETIC_CRS_TYPE, 0];
+        let parsed = GeoKeyDirectory::parse(&truncated, &[], "").unwrap();
+        assert_eq!(parsed.keys.len(), 1);
+        assert_eq!(parsed.get_short(GT_MODEL_TYPE), Some(2));
+    }
+
+    #[test]
+    fn parse_keeps_the_first_of_duplicate_keys() {
+        let directory = [1, 1, 1, 2, GT_MODEL_TYPE, 0, 1, 1, GT_MODEL_TYPE, 0, 1, 2];
+        let parsed = GeoKeyDirectory::parse(&directory, &[], "").unwrap();
+        assert_eq!(parsed.keys.len(), 1);
+        assert_eq!(parsed.get_short(GT_MODEL_TYPE), Some(1));
+    }
+
+    #[test]
+    fn parse_reads_inline_values_regardless_of_declared_count() {
+        let directory = [1, 1, 1, 1, GT_MODEL_TYPE, 0, 0, 2];
+        let parsed = GeoKeyDirectory::parse(&directory, &[], "").unwrap();
+        assert_eq!(parsed.get_short(GT_MODEL_TYPE), Some(2));
+    }
+
+    #[test]
+    fn parse_resolves_values_stored_in_the_directory_itself() {
+        let directory = [1, 1, 1, 1, GT_MODEL_TYPE, 34735, 1, 8, 2];
+        let parsed = GeoKeyDirectory::parse(&directory, &[], "").unwrap();
+        assert_eq!(parsed.get_short(GT_MODEL_TYPE), Some(2));
     }
 
     #[test]
@@ -525,29 +558,44 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_invalid_parameter_references_without_panicking() {
-        let directory = [
-            1u16,
-            1,
-            0,
-            1, // header
-            GEOG_CITATION,
-            34737,
-            1,
-            1, // byte offsets that are invalid for lossy UTF-8
-        ];
-        let ascii = String::from_utf8_lossy(&[0xff, b'|']).into_owned();
+    fn parse_skips_unresolvable_keys_without_panicking() {
+        let model_type = [GT_MODEL_TYPE, 0, 1, 2];
+        for bad_key in [
+            [GEOG_CITATION, 34737, 1, 500],     // ASCII offset past the end
+            [GEOG_CITATION, 34737, 0, 0],       // zero-length ASCII
+            [GEOG_ANGULAR_UNITS, 34736, 5, 0],  // DOUBLE range past the end
+            [GEOG_ANGULAR_UNITS, 34736, 0, 0],  // zero-length DOUBLE
+            [GEOG_ANGULAR_UNITS, 65000, 1, 0],  // unknown value location
+            [GEOG_ANGULAR_UNITS, 34735, 3, 4],  // SHORT array has no value type
+            [GEOG_ANGULAR_UNITS, 34735, 1, 99], // SHORT offset past the end
+        ] {
+            let mut directory = vec![1, 1, 1, 2];
+            directory.extend_from_slice(&model_type);
+            directory.extend_from_slice(&bad_key);
 
-        assert!(GeoKeyDirectory::parse(&directory, &[], &ascii).is_none());
-        assert!(
-            GeoKeyDirectory::parse(&[1, 1, 1, 1, GEOG_CITATION, 34737, 2, 0], &[], "x|").is_some()
-        );
-        assert!(
-            GeoKeyDirectory::parse(&[1, 1, 1, 1, GEOG_CITATION, 34737, 1, 0], &[], "x").is_none()
-        );
-        assert!(
-            GeoKeyDirectory::parse(&[1, 1, 1, 1, GEOG_CITATION, 65000, 1, 0], &[], "").is_none()
-        );
+            let parsed = GeoKeyDirectory::parse(&directory, &[1.0], "x|").unwrap();
+
+            assert_eq!(parsed.keys.len(), 1, "bad key {bad_key:?}");
+            assert_eq!(parsed.get_short(GT_MODEL_TYPE), Some(2));
+        }
+    }
+
+    #[test]
+    fn parse_reads_citations_that_are_not_ascii_or_not_delimited() {
+        let citation = |ascii: &str, count: u16| {
+            let directory = [1, 1, 1, 1, GEOG_CITATION, 34737, count, 0];
+            GeoKeyDirectory::parse(&directory, &[], ascii)
+                .unwrap()
+                .get_ascii(GEOG_CITATION)
+                .map(String::from)
+        };
+
+        assert_eq!(citation("Geográfico|", 12).as_deref(), Some("Geográfico"));
+        assert_eq!(citation("WGS 84", 6).as_deref(), Some("WGS 84"));
+        // A count running past the end keeps whatever text is there.
+        assert_eq!(citation("WGS 84|", 99).as_deref(), Some("WGS 84"));
+        // Slicing inside a multi-byte character must not panic.
+        assert_eq!(citation("é|", 1).as_deref(), Some("\u{fffd}"));
     }
 
     #[test]

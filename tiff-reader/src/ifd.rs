@@ -12,7 +12,8 @@ pub use tiff_core::constants::{
     TAG_PHOTOMETRIC_INTERPRETATION, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR,
     TAG_REFERENCE_BLACK_WHITE, TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
     TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS, TAG_SUB_IFDS, TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH,
-    TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_YCBCR_POSITIONING, TAG_YCBCR_SUBSAMPLING,
+    TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_WHITE_POINT, TAG_YCBCR_POSITIONING,
+    TAG_YCBCR_SUBSAMPLING,
 };
 pub use tiff_core::RasterLayout;
 
@@ -338,6 +339,25 @@ impl Ifd {
         Ok(Some(YCbCrPositioning::from_code(value)))
     }
 
+    /// TIFF WhitePoint chromaticity as `[x, y]`.
+    pub fn white_point(&self) -> Result<Option<[f64; 2]>> {
+        let Some(tag) = self.tag(TAG_WHITE_POINT) else {
+            return Ok(None);
+        };
+        let values = tag.value.as_f64_vec().ok_or(Error::UnexpectedTagType {
+            tag: TAG_WHITE_POINT,
+            expected: "RATIONAL or DOUBLE",
+            actual: tag.tag_type.to_code(),
+        })?;
+        match values.as_slice() {
+            [x, y] if x.is_finite() && y.is_finite() && *y != 0.0 => Ok(Some([*x, *y])),
+            _ => Err(Error::InvalidTagValue {
+                tag: TAG_WHITE_POINT,
+                reason: format!("expected 2 finite values and non-zero y, found {values:?}"),
+            }),
+        }
+    }
+
     /// TIFF ReferenceBlackWhite values normalized to `f64`.
     pub fn reference_black_white(&self) -> Result<Option<[f64; 6]>> {
         let Some(tag) = self.tag(TAG_REFERENCE_BLACK_WHITE) else {
@@ -581,8 +601,8 @@ impl Ifd {
     /// Normalize the raster layout produced by high-level pixel reads.
     ///
     /// This layout reflects color-decoded output rather than the on-disk sample
-    /// organization. For example, palette and YCbCr rasters decode to RGB
-    /// pixels, and bit-packed integer rasters expand to 8- or 16-bit samples.
+    /// organization. For example, palette, YCbCr, and CIELab rasters decode to
+    /// RGB pixels, and bit-packed integer rasters expand to 8- or 16-bit samples.
     pub fn decoded_raster_layout(&self) -> Result<RasterLayout> {
         let storage = self.raster_layout()?;
         let color_model = self.color_model()?;
@@ -615,6 +635,16 @@ impl Ifd {
                     ));
                 }
                 (1, decoded_uint_bits(storage.bits_per_sample))
+            }
+            ColorModel::CieLab { .. } => {
+                if !matches!(storage.sample_format, 1 | 2)
+                    || !matches!(storage.bits_per_sample, 8 | 16)
+                {
+                    return Err(Error::InvalidImageLayout(
+                        "decoded CIELab reads require 8- or 16-bit integer source samples".into(),
+                    ));
+                }
+                (1, storage.bits_per_sample)
             }
             _ => (
                 storage.sample_format,

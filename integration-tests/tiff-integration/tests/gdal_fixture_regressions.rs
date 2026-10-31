@@ -46,3 +46,15 @@ fn reads_gdal_written_i8_lerc_huffman_blocks() {
         assert_eq!(i64::from(value), expected, "pixel ({row}, {col})");
     }
 }
+
+/// libtiff's Lab conversion is specific enough that only its own output can
+/// pin it down, so the expected bytes are GDAL's reading of the same file.
+#[test]
+fn cielab_decodes_to_the_same_rgb_as_gdal() {
+    let file = TiffFile::from_bytes(fixture("gdal_cielab.tif")).unwrap();
+
+    assert_eq!(
+        file.read_decoded_image_bytes(0).unwrap(),
+        fixture("gdal_cielab_rgb.bin")
+    );
+}

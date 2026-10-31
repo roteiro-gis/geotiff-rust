@@ -1516,6 +1516,148 @@ mod tests {
         );
     }
 
+    const LAB_PIXELS: [u8; 15] = [255, 0, 0, 128, 0, 0, 128, 100, 0, 128, 0xc0, 0, 0, 0, 0];
+
+    /// One row of CIELab pixels, with `samples` values per pixel.
+    fn build_lab_tiff(
+        bits: u16,
+        samples: u16,
+        image: &[u8],
+        extra: Vec<(u16, u16, u32, Vec<u8>)>,
+    ) -> Vec<u8> {
+        let width = image.len() / usize::from(samples) / usize::from(bits / 8);
+        let bits_per_sample = (0..samples).flat_map(|_| le_u16(bits)).collect();
+        let mut overrides = vec![
+            (258, 3, u32::from(samples), bits_per_sample),
+            (262, 3, 1, inline_short(8)),
+            (277, 3, 1, inline_short(samples)),
+        ];
+        overrides.extend(extra);
+        build_stripped_tiff(width as u32, 1, image, &overrides)
+    }
+
+    fn sample_formats(format: u16, samples: u16) -> (u16, u16, u32, Vec<u8>) {
+        let formats = (0..samples).flat_map(|_| le_u16(format)).collect();
+        (339, 3, u32::from(samples), formats)
+    }
+
+    #[test]
+    fn cielab_decodes_to_the_rgb_gdal_reads() {
+        let bytes = build_lab_tiff(8, 3, &LAB_PIXELS, vec![]);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        // GDAL 3.12 output, including the warm white of an unadapted D50.
+        assert_eq!(
+            file.read_decoded_image_bytes(0).unwrap(),
+            [255, 252, 222, 133, 123, 107, 255, 0, 112, 0, 147, 105, 0, 0, 0]
+        );
+        assert_eq!(file.read_image_bytes(0).unwrap(), LAB_PIXELS);
+    }
+
+    #[test]
+    fn cielab_honors_the_white_point_tag() {
+        let white_point = [312_700u32, 1_000_000, 329_000, 1_000_000]
+            .iter()
+            .flat_map(|value| le_u32(*value))
+            .collect();
+        let bytes = build_lab_tiff(8, 3, &LAB_PIXELS, vec![(318, 5, 2, white_point)]);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        assert_eq!(
+            file.read_decoded_image_bytes(0).unwrap(),
+            [255, 255, 255, 124, 124, 124, 255, 0, 128, 0, 148, 122, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn cielab_ignores_a_signed_sample_format() {
+        let bytes = build_lab_tiff(8, 3, &LAB_PIXELS, vec![sample_formats(2, 3)]);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        assert_eq!(
+            file.read_decoded_image_bytes(0).unwrap(),
+            [255, 252, 222, 133, 123, 107, 255, 0, 112, 0, 147, 105, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn cielab_keeps_alpha_samples() {
+        let pixels: Vec<u8> = LAB_PIXELS
+            .chunks_exact(3)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 200])
+            .collect();
+        let bytes = build_lab_tiff(8, 4, &pixels, vec![(338, 3, 1, inline_short(2))]);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        assert_eq!(
+            file.read_decoded_image_bytes(0).unwrap(),
+            [
+                255, 252, 222, 200, 133, 123, 107, 200, 255, 0, 112, 200, 0, 147, 105, 200, 0, 0,
+                0, 200
+            ]
+        );
+    }
+
+    #[test]
+    fn cielab_16_bit_samples_match_their_8_bit_equivalents() {
+        // libtiff widens 8-bit Lab with L * 257 and a, b * 256.
+        let wide: Vec<u8> = LAB_PIXELS
+            .chunks_exact(3)
+            .flat_map(|pixel| {
+                let lightness = u16::from(pixel[0]) * 257;
+                let a = i16::from(pixel[1] as i8) * 256;
+                let b = i16::from(pixel[2] as i8) * 256;
+                [lightness.to_le_bytes(), a.to_le_bytes(), b.to_le_bytes()]
+            })
+            .flatten()
+            .collect();
+        let bytes = build_lab_tiff(16, 3, &wide, vec![]);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        let decoded = file.read_decoded_image_bytes(0).unwrap();
+
+        assert_eq!(
+            file.ifd(0)
+                .unwrap()
+                .decoded_raster_layout()
+                .unwrap()
+                .bits_per_sample,
+            16
+        );
+        let narrowed: Vec<u8> = decoded
+            .chunks_exact(2)
+            .map(|sample| {
+                (f64::from(u16::from_ne_bytes([sample[0], sample[1]])) / 257.0).round() as u8
+            })
+            .collect();
+        assert_eq!(
+            narrowed,
+            [255, 252, 222, 133, 123, 107, 255, 0, 112, 0, 147, 105, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn cielab_rejects_depths_and_formats_it_cannot_convert() {
+        for format in [1, 3] {
+            let bytes = build_lab_tiff(32, 3, &[0; 12], vec![sample_formats(format, 3)]);
+            let file = TiffFile::from_bytes(bytes).unwrap();
+
+            let error = file.read_decoded_image_bytes(0).unwrap_err();
+
+            assert!(error.to_string().contains("decoded CIELab"), "{error}");
+            assert_eq!(file.read_image_bytes(0).unwrap(), [0; 12]);
+        }
+    }
+
+    #[test]
+    fn cielab_rejects_a_white_point_with_zero_y() {
+        let white_point = [1u32, 3, 0, 1].iter().flat_map(|v| le_u32(*v)).collect();
+        let bytes = build_lab_tiff(8, 3, &LAB_PIXELS, vec![(318, 5, 2, white_point)]);
+        let file = TiffFile::from_bytes(bytes).unwrap();
+
+        assert!(file.read_decoded_image_bytes(0).is_err());
+    }
+
     #[test]
     fn block_cache_does_not_collide_between_chain_index_and_ifd_offset() {
         // Ten chained IFDs: chain IFD #8 shares its numeric index with the

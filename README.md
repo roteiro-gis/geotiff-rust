@@ -39,7 +39,7 @@ let raster: ndarray::ArrayD<f32> = file.read_raster()?;
 Use `read_decoded_raster` / `read_decoded_window` on `GeoTiffFile` and
 `read_decoded_image` / `read_decoded_window` on `TiffFile` when you want
 palette expansion or color-space conversion (for example palette TIFF,
-YCbCr, or CMYK) instead of storage-domain samples.
+YCbCr, CMYK, or CIELab) instead of storage-domain samples.
 
 Use `read_band` / `read_band_window` on `GeoTiffFile` and `TiffFile` when
 you only need one storage-domain band as a `[rows, cols]` array.
@@ -119,7 +119,7 @@ with `bands(...)` and optional
 - Bounded IFD parsing and block decompression budgets for untrusted input
 - Parallel decompression via Rayon
 - Storage-domain typed sample reads via `read_image` / `read_window` / `read_band*`, including bit-packed unsigned samples of 1 to 15 bits, which read as `u8` or `u16`
-- Explicit decoded pixel reads via `read_decoded_*` for standard TIFF color models, including palette expansion, YCbCr/CMYK conversion, and bit-packed grayscale/palette decode
+- Explicit decoded pixel reads via `read_decoded_*` for standard TIFF color models, including palette expansion, YCbCr/CMYK/CIELab conversion, and bit-packed grayscale/palette decode
 - Structured photometric/color-model metadata: palette `ColorMap`, `ExtraSamples`, CMYK, and YCbCr
 - GeoKey directory, structured CRS metadata (projected, geographic, geocentric, vertical, compound), transforms, NoData
 - Overview discovery from both reduced-resolution top-level IFDs and recursive base-image SubIFD-backed overview trees

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Other changes:
+
+- read uncompressed strips and tiles on the calling thread instead of handing each block to the rayon pool: 72 256×256 windows of a 3294×1556 `f32` DEM stored as one-row strips (GDAL's default layout for untiled files) went from 20.3 to 6.6 ms; compressed blocks still decode in parallel
+
 ## 0.10.0 - 2026-10-31
 
 Breaking changes:

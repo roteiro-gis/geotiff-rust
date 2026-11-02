@@ -39,16 +39,24 @@ pub(crate) fn read_window(
     let relevant_specs = collect_tile_specs_for_window(ifd, &layout, window, None)?;
 
     #[cfg(feature = "rayon")]
-    {
-        let output = Mutex::new(output.as_mut_slice());
-        relevant_specs.par_iter().try_for_each(|&spec| {
-            let block = read_tile_block(source, ifd_offset, cache, spec, &context, options)?;
-            copy_tile_window_block(&mut output.lock(), block.as_slice(), spec, &layout, window)?;
-            Ok::<(), Error>(())
-        })?;
+    if context.decodes_in_parallel() {
+        {
+            let output = Mutex::new(output.as_mut_slice());
+            relevant_specs.par_iter().try_for_each(|&spec| {
+                let block = read_tile_block(source, ifd_offset, cache, spec, &context, options)?;
+                copy_tile_window_block(
+                    &mut output.lock(),
+                    block.as_slice(),
+                    spec,
+                    &layout,
+                    window,
+                )?;
+                Ok::<(), Error>(())
+            })?;
+        }
+        return Ok(output);
     }
 
-    #[cfg(not(feature = "rayon"))]
     for spec in relevant_specs {
         let block = read_tile_block(source, ifd_offset, cache, spec, &context, options)?;
         copy_tile_window_block(&mut output, block.as_slice(), spec, &layout, window)?;
@@ -85,23 +93,25 @@ pub(crate) fn read_window_band(
     let relevant_specs = collect_tile_specs_for_window(ifd, &layout, window, Some(band_index))?;
 
     #[cfg(feature = "rayon")]
-    {
-        let output = Mutex::new(output.as_mut_slice());
-        relevant_specs.par_iter().try_for_each(|&spec| {
-            let block = read_tile_block(source, ifd_offset, cache, spec, &context, options)?;
-            copy_tile_band_window_block(
-                &mut output.lock(),
-                block.as_slice(),
-                spec,
-                &layout,
-                window,
-                band_index,
-            )?;
-            Ok::<(), Error>(())
-        })?;
+    if context.decodes_in_parallel() {
+        {
+            let output = Mutex::new(output.as_mut_slice());
+            relevant_specs.par_iter().try_for_each(|&spec| {
+                let block = read_tile_block(source, ifd_offset, cache, spec, &context, options)?;
+                copy_tile_band_window_block(
+                    &mut output.lock(),
+                    block.as_slice(),
+                    spec,
+                    &layout,
+                    window,
+                    band_index,
+                )?;
+                Ok::<(), Error>(())
+            })?;
+        }
+        return Ok(output);
     }
 
-    #[cfg(not(feature = "rayon"))]
     for spec in relevant_specs {
         let block = read_tile_block(source, ifd_offset, cache, spec, &context, options)?;
         copy_tile_band_window_block(

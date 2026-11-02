@@ -168,15 +168,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jpeg-decoder"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
-dependencies = [
- "rayon",
-]
-
-[[package]]
 name = "lerc-core"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -477,7 +468,6 @@ version = "0.10.0"
 dependencies = [
  "flate2",
  "image-webp",
- "jpeg-decoder",
  "lerc-core",
  "lerc-reader",
  "lru",
@@ -489,6 +479,8 @@ dependencies = [
  "thiserror",
  "tiff-core",
  "weezl",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -535,3 +527,18 @@ name = "zlib-rs"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5431d5661c32445236631278f27946e444ddafe4684cac70b185272d4f9c52d5"
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
+]

@@ -28,7 +28,7 @@ parking_lot = "0.12"
 default = ["rayon", "jpeg", "zstd", "webp"]
 f16 = ["tiff-core/f16"]
 rayon = ["dep:rayon"]
-jpeg = ["dep:jpeg-decoder"]
+jpeg = ["dep:zune-jpeg", "dep:zune-core"]
 zstd = ["dep:ruzstd"]
 webp = ["dep:image-webp"]
 
@@ -36,8 +36,12 @@ webp = ["dep:image-webp"]
 version = "1"
 optional = true
 
-[dependencies.jpeg-decoder]
-version = "0.3"
+[dependencies.zune-jpeg]
+version = "0.5.15"
+optional = true
+
+[dependencies.zune-core]
+version = "0.5.1"
 optional = true
 
 [dependencies.ruzstd]

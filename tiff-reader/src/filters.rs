@@ -6,6 +6,11 @@ use std::io::Read;
 #[cfg(feature = "jpeg")]
 use std::panic::{self, AssertUnwindSafe};
 
+#[cfg(feature = "jpeg")]
+use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+#[cfg(feature = "jpeg")]
+use zune_jpeg::JpegDecoder;
+
 use crate::error::{Error, Result};
 use crate::header::ByteOrder;
 use tiff_core::{Compression, Predictor};
@@ -269,32 +274,52 @@ fn decompress_jpeg(
     expected_layout: Option<ImageDecodeLayout>,
 ) -> Result<Vec<u8>> {
     let stream = merge_jpeg_stream(jpeg_tables, data);
-    // Component IDs and Adobe markers are hints for standalone JPEGs. In a TIFF
-    // the color space comes from the photometric tag alone, and streams from
-    // encoders other than libjpeg often contradict it. The decoder has no raw
-    // interleaved mode, so `RGB` is used to interleave three components
-    // unchanged, and its `CMYK` inversion is undone below.
-    let color_transform = expected_layout.and_then(|layout| match layout.samples_per_pixel {
-        3 if layout.ycbcr => Some(jpeg_decoder::ColorTransform::YCbCr),
-        3 => Some(jpeg_decoder::ColorTransform::RGB),
-        4 => Some(jpeg_decoder::ColorTransform::CMYK),
-        _ => None,
-    });
+    let failed = |reason: String| Error::DecompressionFailed {
+        index,
+        reason: format!("JPEG: {reason}"),
+    };
     panic::catch_unwind(AssertUnwindSafe(|| {
-        let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(stream));
-        decoder.set_max_decoding_buffer_size(decoded_len_limit);
-        if let Some(color_transform) = color_transform {
-            decoder.set_color_transform(color_transform);
+        let max_dimension = usize::from(u16::MAX);
+        let options = DecoderOptions::default()
+            .set_strict_mode(true)
+            .set_max_width(max_dimension)
+            .set_max_height(max_dimension);
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(stream.as_slice()), options);
+        decoder
+            .decode_headers()
+            .map_err(|error| failed(error.to_string()))?;
+        let input = decoder
+            .input_colorspace()
+            .ok_or_else(|| failed("colorspace missing after headers".into()))?;
+        let (width, height) = decoder
+            .dimensions()
+            .ok_or_else(|| failed("dimensions missing after headers".into()))?;
+        validate_jpeg_metadata(
+            width,
+            height,
+            input.num_components(),
+            decoded_len_limit,
+            expected_layout,
+        )
+        .map_err(failed)?;
+        // Component IDs and Adobe markers are hints for standalone JPEGs. In a
+        // TIFF the color space comes from the photometric tag alone, as in
+        // libtiff. Requesting the detected input colorspace as the output
+        // copies the components through unchanged, and only a stream the tag
+        // marks as YCbCr is converted to RGB.
+        let tagged_ycbcr = expected_layout.is_some_and(|layout| layout.ycbcr);
+        let output = match input {
+            ColorSpace::YCbCr if tagged_ycbcr => ColorSpace::RGB,
+            other => other,
+        };
+        decoder.set_options(options.jpeg_set_out_colorspace(output));
+        let mut decoded = decoder
+            .decode()
+            .map_err(|error| failed(error.to_string()))?;
+        if tagged_ycbcr && input != ColorSpace::YCbCr {
+            ycbcr_to_rgb_in_place(&mut decoded);
         }
-        decoder.read_info()?;
-        validate_jpeg_metadata(&decoder, decoded_len_limit, expected_layout)?;
-        let mut decoded = decoder.decode()?;
-        if matches!(color_transform, Some(jpeg_decoder::ColorTransform::CMYK)) {
-            for value in &mut decoded {
-                *value = !*value;
-            }
-        }
-        Ok::<_, jpeg_decoder::Error>(decoded)
+        Ok(decoded)
     }))
     .map_err(|payload| Error::DecompressionFailed {
         index,
@@ -303,44 +328,52 @@ fn decompress_jpeg(
             panic_payload_message(payload.as_ref())
         ),
     })?
-    .map_err(|e| Error::DecompressionFailed {
-        index,
-        reason: format!("JPEG: {e}"),
-    })
+}
+
+/// JFIF YCbCr to RGB for a YCbCr-tagged tile whose stream markers claim
+/// another colorspace, so the decoder handed back unconverted components.
+#[cfg(feature = "jpeg")]
+fn ycbcr_to_rgb_in_place(pixels: &mut [u8]) {
+    let to_byte = |value: f32| value.round().clamp(0.0, 255.0) as u8;
+    for pixel in pixels.chunks_exact_mut(3) {
+        let y = f32::from(pixel[0]);
+        let cb = f32::from(pixel[1]) - 128.0;
+        let cr = f32::from(pixel[2]) - 128.0;
+        pixel[0] = to_byte(y + 1.402 * cr);
+        pixel[1] = to_byte(y - 0.344_136 * cb - 0.714_136 * cr);
+        pixel[2] = to_byte(y + 1.772 * cb);
+    }
 }
 
 #[cfg(feature = "jpeg")]
-fn validate_jpeg_metadata<R: std::io::Read>(
-    decoder: &jpeg_decoder::Decoder<R>,
+fn validate_jpeg_metadata(
+    width: usize,
+    height: usize,
+    components: usize,
     decoded_len_limit: usize,
     expected_layout: Option<ImageDecodeLayout>,
-) -> std::result::Result<(), jpeg_decoder::Error> {
-    let info = decoder.info().ok_or_else(|| {
-        jpeg_decoder::Error::Format("JPEG metadata missing after read_info".into())
-    })?;
-    let decoded_len = usize::from(info.width)
-        .checked_mul(usize::from(info.height))
-        .and_then(|pixels| pixels.checked_mul(info.pixel_format.pixel_bytes()))
-        .ok_or_else(|| jpeg_decoder::Error::Format("JPEG decoded size overflow".into()))?;
+) -> std::result::Result<(), String> {
+    let decoded_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(components))
+        .ok_or_else(|| "JPEG decoded size overflow".to_string())?;
     if decoded_len > decoded_len_limit {
-        return Err(jpeg_decoder::Error::Format(format!(
+        return Err(format!(
             "JPEG decoded size {decoded_len} exceeds TIFF block budget {decoded_len_limit}"
-        )));
+        ));
     }
     if let Some(expected) = expected_layout {
-        if usize::from(info.width) != expected.width || usize::from(info.height) != expected.height
-        {
-            return Err(jpeg_decoder::Error::Format(format!(
-                "JPEG dimensions {}x{} do not match TIFF block {}x{}",
-                info.width, info.height, expected.width, expected.height
-            )));
+        if width != expected.width || height != expected.height {
+            return Err(format!(
+                "JPEG dimensions {width}x{height} do not match TIFF block {}x{}",
+                expected.width, expected.height
+            ));
         }
-        if info.pixel_format.pixel_bytes() != expected.samples_per_pixel {
-            return Err(jpeg_decoder::Error::Format(format!(
-                "JPEG channel count {} does not match TIFF block channel count {}",
-                info.pixel_format.pixel_bytes(),
+        if components != expected.samples_per_pixel {
+            return Err(format!(
+                "JPEG channel count {components} does not match TIFF block channel count {}",
                 expected.samples_per_pixel
-            )));
+            ));
         }
     }
     Ok(())

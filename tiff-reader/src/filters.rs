@@ -602,64 +602,87 @@ fn fix_endianness(buf: &mut [u8], byte_order: ByteOrder, bit_depth: u16) {
 }
 
 fn reverse_horizontal_predictor(buf: &mut [u8], bit_depth: u16, samples: u16) {
-    let bytes_per_value = match bit_depth {
-        0..=8 => 1,
-        9..=16 => 2,
-        17..=32 => 4,
-        _ => 8,
-    };
-    let lookback = usize::from(samples) * bytes_per_value;
+    let samples = usize::from(samples);
+    match bit_depth {
+        0..=8 => accumulate::<u8>(buf, samples),
+        9..=16 => accumulate::<u16>(buf, samples),
+        17..=32 => accumulate::<u32>(buf, samples),
+        _ => accumulate::<u64>(buf, samples),
+    }
+}
 
-    match bytes_per_value {
-        1 => {
-            for index in lookback..buf.len() {
-                buf[index] = buf[index].wrapping_add(buf[index - lookback]);
+/// A native-endian integer that horizontal differencing operates on.
+trait PredictorValue: Copy + Default {
+    const BYTES: usize;
+    fn read(bytes: &[u8]) -> Self;
+    fn write(self, bytes: &mut [u8]);
+    fn add(self, other: Self) -> Self;
+}
+
+macro_rules! predictor_value {
+    ($($ty:ty),*) => {$(
+        impl PredictorValue for $ty {
+            const BYTES: usize = std::mem::size_of::<$ty>();
+            fn read(bytes: &[u8]) -> Self {
+                let mut array = [0; std::mem::size_of::<$ty>()];
+                array.copy_from_slice(bytes);
+                <$ty>::from_ne_bytes(array)
+            }
+            fn write(self, bytes: &mut [u8]) {
+                bytes.copy_from_slice(&self.to_ne_bytes());
+            }
+            fn add(self, other: Self) -> Self {
+                self.wrapping_add(other)
             }
         }
-        2 => {
-            for index in (lookback..buf.len()).step_by(2) {
-                let current = u16::from_ne_bytes(buf[index..index + 2].try_into().unwrap());
-                let previous = u16::from_ne_bytes(
-                    buf[index - lookback..index - lookback + 2]
-                        .try_into()
-                        .unwrap(),
-                );
-                buf[index..index + 2]
-                    .copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
-            }
-        }
-        4 => {
-            for index in (lookback..buf.len()).step_by(4) {
-                let current = u32::from_ne_bytes(buf[index..index + 4].try_into().unwrap());
-                let previous = u32::from_ne_bytes(
-                    buf[index - lookback..index - lookback + 4]
-                        .try_into()
-                        .unwrap(),
-                );
-                buf[index..index + 4]
-                    .copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
-            }
-        }
+    )*};
+}
+
+predictor_value!(u8, u16, u32, u64);
+
+/// Adds each value to the one `samples` values earlier, in place.
+///
+/// Up to four samples per pixel keep their running sums in locals. Reading
+/// back the value stored one pixel earlier instead makes every step wait on
+/// store-to-load forwarding, which dominated decode time for predicted rows.
+fn accumulate<T: PredictorValue>(buf: &mut [u8], samples: usize) {
+    match samples {
+        0 => {}
+        1 => accumulate_pixels::<T, 1>(buf),
+        2 => accumulate_pixels::<T, 2>(buf),
+        3 => accumulate_pixels::<T, 3>(buf),
+        4 => accumulate_pixels::<T, 4>(buf),
         _ => {
-            for index in (lookback..buf.len()).step_by(8) {
-                let current = u64::from_ne_bytes(buf[index..index + 8].try_into().unwrap());
-                let previous = u64::from_ne_bytes(
-                    buf[index - lookback..index - lookback + 8]
-                        .try_into()
-                        .unwrap(),
-                );
-                buf[index..index + 8]
-                    .copy_from_slice(&current.wrapping_add(previous).to_ne_bytes());
+            let lookback = samples * T::BYTES;
+            for index in (lookback..buf.len()).step_by(T::BYTES) {
+                let previous = T::read(&buf[index - lookback..index - lookback + T::BYTES]);
+                let current = T::read(&buf[index..index + T::BYTES]);
+                current
+                    .add(previous)
+                    .write(&mut buf[index..index + T::BYTES]);
             }
         }
     }
 }
 
+fn accumulate_pixels<T: PredictorValue, const SAMPLES: usize>(buf: &mut [u8]) {
+    let mut sums = [T::default(); SAMPLES];
+    let mut pixels = buf.chunks_exact_mut(SAMPLES * T::BYTES);
+    for pixel in &mut pixels {
+        for (sum, value) in sums.iter_mut().zip(pixel.chunks_exact_mut(T::BYTES)) {
+            *sum = sum.add(T::read(value));
+            sum.write(value);
+        }
+    }
+    let partial = pixels.into_remainder();
+    for (sum, value) in sums.iter().zip(partial.chunks_exact_mut(T::BYTES)) {
+        sum.add(T::read(value)).write(value);
+    }
+}
+
 fn predict_f16(input: &mut [u8], output: &mut [u8], samples: u16) {
     let samples = usize::from(samples);
-    for i in samples..input.len() {
-        input[i] = input[i].wrapping_add(input[i - samples]);
-    }
+    accumulate::<u8>(input, samples);
     for (i, chunk) in output.chunks_mut(2).enumerate() {
         chunk.copy_from_slice(&u16::to_ne_bytes(u16::from_be_bytes([
             input[i],
@@ -670,9 +693,7 @@ fn predict_f16(input: &mut [u8], output: &mut [u8], samples: u16) {
 
 fn predict_f32(input: &mut [u8], output: &mut [u8], samples: u16) {
     let samples = usize::from(samples);
-    for i in samples..input.len() {
-        input[i] = input[i].wrapping_add(input[i - samples]);
-    }
+    accumulate::<u8>(input, samples);
     for (i, chunk) in output.chunks_mut(4).enumerate() {
         chunk.copy_from_slice(&u32::to_ne_bytes(u32::from_be_bytes([
             input[i],
@@ -685,9 +706,7 @@ fn predict_f32(input: &mut [u8], output: &mut [u8], samples: u16) {
 
 fn predict_f64(input: &mut [u8], output: &mut [u8], samples: u16) {
     let samples = usize::from(samples);
-    for i in samples..input.len() {
-        input[i] = input[i].wrapping_add(input[i - samples]);
-    }
+    accumulate::<u8>(input, samples);
     for (i, chunk) in output.chunks_mut(8).enumerate() {
         chunk.copy_from_slice(&u64::to_ne_bytes(u64::from_be_bytes([
             input[i],
@@ -714,6 +733,42 @@ mod tests {
     use crate::header::ByteOrder;
     use std::io::Write;
     use tiff_core::Compression;
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn horizontal_predictor_matches_a_sequential_sum_for_every_layout() {
+        for (bit_depth, bytes) in [(8u16, 1usize), (16, 2), (32, 4), (64, 8)] {
+            for samples in 1u16..=6 {
+                let pixels = 7;
+                let len = (pixels * usize::from(samples) + 1) * bytes;
+                let row: Vec<u8> = (0..len).map(|index| (index * 37 % 251) as u8).collect();
+
+                let mut expected = row.clone();
+                let lookback = usize::from(samples) * bytes;
+                for index in (lookback..expected.len()).step_by(bytes) {
+                    let mut carry = 0u16;
+                    for byte in 0..bytes {
+                        let total = u16::from(expected[index + byte])
+                            + u16::from(expected[index - lookback + byte])
+                            + carry;
+                        expected[index + byte] = (total & 0xff) as u8;
+                        carry = total >> 8;
+                    }
+                }
+
+                let mut actual = row;
+                fix_endianness_and_predict(
+                    &mut actual,
+                    bit_depth,
+                    samples,
+                    ByteOrder::LittleEndian,
+                    2,
+                )
+                .unwrap();
+                assert_eq!(actual, expected, "{bit_depth}-bit, {samples} samples");
+            }
+        }
+    }
 
     #[test]
     fn horizontal_predictor_restores_u16_rows() {

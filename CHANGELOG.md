@@ -2,10 +2,15 @@
 
 ## Unreleased
 
+Breaking changes:
+
+- JPEG blocks that use lossless coding (SOF3) fail to decode; JPEG decoding reads baseline, extended sequential, and progressive 8-bit streams
+
 Other changes:
 
 - read uncompressed strips and tiles on the calling thread instead of handing each block to the rayon pool: 72 256×256 windows of a 3294×1556 `f32` DEM stored as one-row strips (GDAL's default layout for untiled files) went from 20.3 to 6.6 ms; compressed blocks still decode in parallel
 - undo horizontal and floating-point predictors with each pixel's running sums kept in locals instead of reading back the previous pixel from memory: reading 144 256×256 tiles went from 64.6 to 43.2 ms for 8-bit RGB, from 27.3 to 16.2 ms for an `i16` DEM, and from 104 to 76 ms for an `f32` DEM with the floating-point predictor
+- decode JPEG blocks with `zune-jpeg` instead of `jpeg-decoder`: 144 256×256 tiles of a YCbCr orthophoto read in 21 ms instead of 57 ms on one thread, because `jpeg-decoder` started worker threads for every tile and converted YCbCr to RGB without SIMD
 
 ## 0.10.0 - 2026-10-31
 

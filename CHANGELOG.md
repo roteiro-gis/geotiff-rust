@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-11-03
+
 Breaking changes:
 
 - JPEG blocks that use lossless coding (SOF3) fail to decode; JPEG decoding reads baseline, extended sequential, and progressive 8-bit streams

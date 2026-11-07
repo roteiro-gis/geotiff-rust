@@ -597,6 +597,29 @@ fn cog_rejects_band_counts_exceeding_samples_per_pixel_limit() {
 }
 
 #[test]
+fn cog_streaming_rejects_zero_tile_dimensions_before_touching_the_sink() {
+    for (width, height) in [(0, 16), (16, 0), (0, 0)] {
+        for overviews in [vec![], vec![2, 4]] {
+            let cog = CogBuilder::new(GeoTiffBuilder::new(16, 16).tile_size(width, height))
+                .overview_levels(overviews);
+            let original = b"existing sink contents".to_vec();
+            let mut sink = Cursor::new(original.clone());
+            sink.set_position(3);
+            let error = match cog.tile_writer::<u8, _>(&mut sink) {
+                Ok(_) => panic!("zero tile dimensions must be rejected"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                GeoTiffWriteError::Tiff(tiff_writer::Error::InvalidConfig(_))
+            ));
+            assert_eq!(sink.position(), 3);
+            assert_eq!(sink.into_inner(), original);
+        }
+    }
+}
+
+#[test]
 fn cog_average_overviews_ignore_nodata_for_oneshot_and_streaming_writes() {
     let nodata = -1.0f32;
     let oneshot = Array2::from_shape_vec(

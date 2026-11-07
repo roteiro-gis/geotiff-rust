@@ -1152,10 +1152,10 @@ impl<T: NumericSample, W: Write + Seek> CogTileWriter<T, W> {
     fn new(cog: CogBuilder, sink: W) -> Result<Self> {
         let tw = cog.inner.tile_width.unwrap_or(256);
         let th = cog.inner.tile_height.unwrap_or(256);
-        let tiles_across = (cog.inner.width as usize).div_ceil(tw as usize);
-        let tiles_down = (cog.inner.height as usize).div_ceil(th as usize);
         let overview_levels = cog.normalized_overview_levels()?;
         cog.validate_images::<T>(&overview_levels, tw, th)?;
+        let tiles_across = (cog.inner.width as usize).div_ceil(tw as usize);
+        let tiles_down = (cog.inner.height as usize).div_ceil(th as usize);
         let nodata_value = parse_nodata_value::<T>(&cog.inner.nodata)?;
         let fill_value = nodata_value.unwrap_or_else(T::zero);
         let block_samples = if matches!(

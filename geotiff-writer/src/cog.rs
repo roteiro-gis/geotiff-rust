@@ -1513,9 +1513,15 @@ where
                     let valid = &span[..valid_span_len];
                     match spec.nodata {
                         Some(nodata_value) => {
+                            let nodata_is_nan = nodata_value.to_f64().is_nan();
                             for (col, chunk) in valid.chunks(level).enumerate() {
                                 for value in chunk {
-                                    if *value == nodata_value {
+                                    // NaN never compares equal, including to itself.
+                                    // Keep finite comparisons in T so large integer
+                                    // NoData values retain their exact identity.
+                                    if *value == nodata_value
+                                        || (nodata_is_nan && value.to_f64().is_nan())
+                                    {
                                         continue;
                                     }
                                     sums[col] += value.to_f64();

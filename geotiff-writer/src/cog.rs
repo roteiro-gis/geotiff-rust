@@ -1483,11 +1483,12 @@ where
     }
 
     let span_col_start = out_col_start * level;
-    let span_len = out_cols * level;
-    // Columns past the raster edge only pad the final overview pixel; they
-    // must not contribute to averages.
+    // Only allocate for source columns that exist. A level larger than the
+    // raster still produces one pixel, without a level-sized scratch buffer.
+    // Saturating multiplication also handles that padded span on 32-bit hosts.
+    let span_len = out_cols.saturating_mul(level);
     let valid_span_len = span_len.min(grid.width.saturating_sub(span_col_start));
-    let mut span = vec![source.fill_value(); span_len];
+    let mut span = vec![source.fill_value(); valid_span_len];
 
     match spec.resampling {
         Resampling::NearestNeighbor => {
@@ -1507,7 +1508,7 @@ where
                 sums.fill(0.0);
                 counts.fill(0);
                 let src_row_start = (out_row_start + row) * level;
-                let src_row_end = (src_row_start + level).min(grid.height);
+                let src_row_end = src_row_start.saturating_add(level).min(grid.height);
                 for src_row in src_row_start..src_row_end {
                     source.read_span(src_row, span_col_start, band, &mut span)?;
                     let valid = &span[..valid_span_len];
@@ -1935,6 +1936,82 @@ fn spool_cog_block<T: NumericSample>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overview_scratch_spans_stay_inside_the_source_raster() {
+        struct BoundedSource(RawTileGrid);
+
+        impl OverviewSampleSource<u8> for BoundedSource {
+            fn fill_value(&self) -> u8 {
+                0
+            }
+
+            fn grid(&self) -> RawTileGrid {
+                self.0
+            }
+
+            fn read_span(
+                &mut self,
+                row: usize,
+                col_start: usize,
+                _band: usize,
+                out: &mut [u8],
+            ) -> Result<()> {
+                assert!(row < self.0.height);
+                assert!(out.len() <= self.0.width - col_start);
+                out.fill(7);
+                Ok(())
+            }
+        }
+
+        let mut source = BoundedSource(RawTileGrid {
+            tile_width: 16,
+            tile_height: 16,
+            tiles_across: 1,
+            tiles_down: 1,
+            width: 3,
+            height: 3,
+            bands: 1,
+            planar_configuration: tiff_core::PlanarConfiguration::Chunky,
+        });
+        let plan = TileWritePlan {
+            tile_width: 16,
+            tile_height: 16,
+            planar_configuration: tiff_core::PlanarConfiguration::Chunky,
+            compression: Compression::None,
+            predictor: Predictor::None,
+            lerc_options: None,
+            jpeg_options: None,
+            jpeg_sampling: None,
+            deflate_level: None,
+            sparse: false,
+        };
+        for resampling in [Resampling::NearestNeighbor, Resampling::Average] {
+            let mut out = [0; 256];
+            resample_band_into(
+                &mut source,
+                OverviewLevelSpec {
+                    overview_width: 1,
+                    overview_height: 1,
+                    level: 4096,
+                    resampling,
+                    nodata: None,
+                },
+                0,
+                0,
+                0,
+                plan,
+                BandTarget {
+                    out: &mut out,
+                    stride: 1,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!(out[0], 7);
+            assert!(out[1..].iter().all(|&value| value == 0));
+        }
+    }
 
     fn single_block_image() -> CogImage {
         CogImage {

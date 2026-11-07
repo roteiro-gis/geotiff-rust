@@ -490,6 +490,35 @@ fn cog_validates_and_dedupes_overview_levels() {
     assert_eq!(tiff.ifd_count(), 3);
 }
 
+#[test]
+fn cog_overview_factors_can_exceed_the_raster_dimensions() {
+    let data = Array2::from_shape_vec((3, 3), (1u16..=9).collect()).unwrap();
+    for (resampling, expected) in [
+        (Resampling::NearestNeighbor, 1u16),
+        (Resampling::Average, 5u16),
+    ] {
+        let cog = CogBuilder::new(GeoTiffBuilder::new(3, 3).tile_size(16, 16))
+            .overview_levels(vec![4, u32::MAX])
+            .resampling(resampling);
+        for streaming in [false, true] {
+            let mut buf = Cursor::new(Vec::new());
+            if streaming {
+                let mut writer = cog.tile_writer::<u16, _>(&mut buf).unwrap();
+                writer.write_tile(0, 0, &data.view()).unwrap();
+                writer.finish().unwrap();
+            } else {
+                cog.write_2d_to(&mut buf, data.view()).unwrap();
+            }
+            let file = TiffFile::from_bytes(buf.into_inner()).unwrap();
+            for ifd in [1, 2] {
+                let overview = file.read_image::<u16>(ifd).unwrap();
+                assert_eq!(overview.shape(), &[1, 1]);
+                assert_eq!(overview[[0, 0]], expected);
+            }
+        }
+    }
+}
+
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn cog_oneshot_rejects_shapes_that_exceed_u32_without_truncating() {

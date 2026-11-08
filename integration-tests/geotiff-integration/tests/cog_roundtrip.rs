@@ -655,6 +655,61 @@ fn cog_streaming_rejects_duplicate_tiles() {
     ));
 }
 
+fn assert_nan_nodata_overviews<T: geotiff_writer::NumericSample>() {
+    let nan = T::from_f64(f64::NAN);
+    let mut data = Array3::from_elem((3, 3, 2), nan);
+    data[[0, 0, 0]] = T::from_f64(1.0);
+    data[[1, 1, 0]] = T::from_f64(5.0);
+    data[[0, 2, 0]] = T::from_f64(3.0);
+    data[[1, 0, 1]] = T::from_f64(8.0);
+
+    for layout in [PlanarConfiguration::Chunky, PlanarConfiguration::Planar] {
+        let cog = CogBuilder::new(
+            GeoTiffBuilder::new(3, 3)
+                .bands(2)
+                .tile_size(16, 16)
+                .planar_configuration(layout)
+                .nodata("nan"),
+        )
+        .overview_levels(vec![2])
+        .resampling(Resampling::Average);
+
+        for streaming in [false, true] {
+            let mut buf = Cursor::new(Vec::new());
+            if streaming {
+                let mut writer = cog.tile_writer::<T, _>(&mut buf).unwrap();
+                // The unwritten last row is filled with NaN NoData.
+                writer
+                    .write_tile_3d(0, 0, &data.slice(ndarray::s![..2, .., ..]))
+                    .unwrap();
+                writer.finish().unwrap();
+            } else {
+                cog.write_3d_to(&mut buf, data.view()).unwrap();
+            }
+            let file = TiffFile::from_bytes(buf.into_inner()).unwrap();
+            let overview = file.read_image::<T>(1).unwrap();
+            assert_eq!(overview.shape(), &[2, 2, 2]);
+            assert_eq!(overview[[0, 0, 0]].to_f64(), 3.0);
+            assert_eq!(overview[[0, 1, 0]].to_f64(), 3.0);
+            assert_eq!(overview[[0, 0, 1]].to_f64(), 8.0);
+            assert!(overview[[0, 1, 1]].to_f64().is_nan());
+            for col in 0..2 {
+                for band in 0..2 {
+                    assert!(overview[[1, col, band]].to_f64().is_nan());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cog_average_overviews_ignore_nan_nodata() {
+    assert_nan_nodata_overviews::<f32>();
+    assert_nan_nodata_overviews::<f64>();
+    #[cfg(feature = "f16")]
+    assert_nan_nodata_overviews::<half::f16>();
+}
+
 #[test]
 fn cog_emits_bigtiff_when_requested() {
     let data = Array2::<u8>::from_elem((32, 32), 7);

@@ -146,6 +146,28 @@ fn opens_real_world_cog_over_http_ranges() {
 type ServedRanges = Arc<Mutex<Vec<Option<(usize, usize)>>>>;
 
 #[cfg(feature = "cog")]
+#[test]
+fn http_fixture_server_waits_for_request_headers() {
+    let Some(server) = TestServer::start(vec![1, 2, 3]) else {
+        return;
+    };
+    let mut stream = std::net::TcpStream::connect(server.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    // Let the server accept before sending any bytes. On macOS accepted
+    // sockets inherit the listener's nonblocking mode.
+    thread::sleep(Duration::from_millis(100));
+    stream
+        .write_all(b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.contains("Content-Length: 3\r\n"));
+}
+
+#[cfg(feature = "cog")]
 struct TestServer {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -168,6 +190,9 @@ impl TestServer {
             while !stop_flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Accepted sockets can inherit the listener's mode on
+                        // macOS; request parsing expects blocking reads.
+                        stream.set_nonblocking(false).unwrap();
                         let Some((request_line, range)) = read_request(&mut stream) else {
                             continue;
                         };

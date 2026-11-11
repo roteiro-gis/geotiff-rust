@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.11.1 - 2026-11-11
+
+- ignore NaN samples when averaging COG overviews with NaN NoData, preserving valid averages and leaving all-missing pixels as NaN across complete and streaming writes
+- reject zero tile dimensions before computing the streaming COG tile grid, returning a configuration error instead of panicking or touching the output
+- bound COG overview scratch rows to the source raster width so large overview factors do not allocate enormous padded buffers; use saturating size arithmetic to avoid overflow on 32-bit targets
+- fix intermittent HTTP interoperability tests on macOS by setting accepted fixture-server sockets to blocking mode before reading request headers
+
 ## 0.11.0 - 2026-11-03
 
 Breaking changes:

@@ -34,6 +34,17 @@ fn checked_builder_dimension(dimension: u32, name: &str) -> Result<usize> {
         .map_err(|_| Error::Other(format!("{name} dimension exceeds usize::MAX")))
 }
 
+/// Tags that [`GeoTiffBuilder`] writes itself, so they cannot be added with [`GeoTiffBuilder::tag`]
+const GEOTIFF_MANAGED_TAGS: &[u16] = &[
+    tags::TAG_MODEL_PIXEL_SCALE,
+    tags::TAG_MODEL_TIEPOINT,
+    tags::TAG_MODEL_TRANSFORMATION,
+    tags::TAG_GEO_KEY_DIRECTORY,
+    tags::TAG_GEO_DOUBLE_PARAMS,
+    tags::TAG_GEO_ASCII_PARAMS,
+    tags::TAG_GDAL_NODATA,
+];
+
 fn dimension_matches(actual: usize, expected: u32) -> bool {
     matches!(u32::try_from(actual), Ok(actual) if actual == expected)
 }
@@ -67,6 +78,7 @@ pub struct GeoTiffBuilder {
     pub(crate) tile_height: Option<u32>,
     pub(crate) photometric: PhotometricInterpretation,
     pub(crate) tiff_variant: TiffVariant,
+    pub(crate) extra_tags: Vec<Tag>,
 }
 
 impl GeoTiffBuilder {
@@ -99,6 +111,7 @@ impl GeoTiffBuilder {
             tile_height: None,
             photometric: PhotometricInterpretation::MinIsBlack,
             tiff_variant: TiffVariant::Auto,
+            extra_tags: Vec::new(),
         }
     }
 
@@ -406,6 +419,17 @@ impl GeoTiffBuilder {
         self
     }
 
+    /// Add an arbitrary extra TIFF tag, e.g. `GDAL_METADATA` (42112).
+    ///
+    /// The tag is written into the image IFD next to the GeoTIFF tags. Tags
+    /// that this builder or the TIFF writer manage (such as the georeferencing
+    /// tags or `GDAL_NODATA`), or a tag added more than once, are rejected when
+    /// the file is written.
+    pub fn tag(mut self, tag: Tag) -> Self {
+        self.extra_tags.push(tag);
+        self
+    }
+
     /// Build the GeoTIFF extra tags from the current metadata.
     pub(crate) fn build_extra_tags(&self) -> Result<Vec<Tag>> {
         self.validate_georeferencing()?;
@@ -484,6 +508,19 @@ impl GeoTiffBuilder {
         if let Some(ref nd) = self.nodata {
             extra.push(Tag::new(tags::TAG_GDAL_NODATA, TagValue::Ascii(nd.clone())));
         }
+
+        // User-defined tags must not replace the tags managed by this builder
+        for tag in &self.extra_tags {
+            if extra.iter().any(|managed| managed.code == tag.code)
+                || GEOTIFF_MANAGED_TAGS.contains(&tag.code)
+            {
+                return Err(Error::InvalidConfig(format!(
+                    "extra TIFF tag {} is managed by the GeoTIFF builder",
+                    tag.code
+                )));
+            }
+        }
+        extra.extend(self.extra_tags.iter().cloned());
 
         Ok(extra)
     }
@@ -1079,5 +1116,38 @@ mod tests {
             .transformation_matrix([0.0; 16])
             .build_extra_tags()
             .is_err());
+    }
+
+    #[test]
+    fn extra_tags_are_written_after_the_geotiff_tags() {
+        let gdal_metadata = Tag::new(
+            42112,
+            TagValue::Ascii("<GDALMetadata></GDALMetadata>".into()),
+        );
+        let tags = GeoTiffBuilder::new(1, 1)
+            .epsg(4326)
+            .pixel_scale(1.0, 1.0)
+            .origin(0.0, 0.0)
+            .tag(gdal_metadata)
+            .build_extra_tags()
+            .unwrap();
+
+        assert_eq!(tags.last().map(|tag| tag.code), Some(42112));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.code == tags::TAG_GEO_KEY_DIRECTORY));
+    }
+
+    #[test]
+    fn extra_tags_must_not_replace_managed_geotiff_tags() {
+        for code in [tags::TAG_MODEL_PIXEL_SCALE, tags::TAG_GDAL_NODATA] {
+            let result = GeoTiffBuilder::new(1, 1)
+                .tag(Tag::new(code, TagValue::Ascii("0".into())))
+                .build_extra_tags();
+            assert!(
+                matches!(result, Err(Error::InvalidConfig(_))),
+                "tag {code} should be rejected"
+            );
+        }
     }
 }

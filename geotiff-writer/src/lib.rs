@@ -38,6 +38,6 @@ pub use geotiff_core::{
 };
 pub use tiff_core::{
     ColorMap, ColorModel, Compression, ExtraSample, InkSet, LercAdditionalCompression,
-    PhotometricInterpretation, PlanarConfiguration, Predictor, YCbCrPositioning,
+    PhotometricInterpretation, PlanarConfiguration, Predictor, Tag, TagValue, YCbCrPositioning,
 };
 pub use tiff_writer::{JpegOptions, LercOptions, TiffVariant};

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- add `GeoTiffBuilder::tag` for extra TIFF tags such as `GDAL_METADATA` (band descriptions and metadata items), written into the image IFD next to the GeoTIFF tags; tags the builder manages itself, such as the georeferencing tags and `GDAL_NODATA`, are rejected; re-export `Tag` and `TagValue`
+
 ## 0.11.1 - 2026-11-11
 
 - ignore NaN samples when averaging COG overviews with NaN NoData, preserving valid averages and leaving all-missing pixels as NaN across complete and streaming writes

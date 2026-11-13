@@ -730,3 +730,29 @@ fn rotated_pixel_is_point_transform_survives_a_roundtrip() {
     // On disk the matrix addresses the center of pixel (0, 0).
     assert_eq!((matrix[3], matrix[7]), (100.0, 200.0));
 }
+
+#[test]
+fn geotiff_roundtrips_extra_tags() {
+    const TAG_GDAL_METADATA: u16 = 42112;
+    let gdal_metadata = r#"<GDALMetadata><Item name="DESCRIPTION" sample="0" role="description">red</Item></GDALMetadata>"#;
+
+    let data = Array2::<u16>::from_elem((4, 4), 7);
+    let mut buf = Cursor::new(Vec::new());
+    GeoTiffBuilder::new(4, 4)
+        .epsg(4326)
+        .pixel_scale(1.0, 1.0)
+        .origin(0.0, 4.0)
+        .tag(Tag::new(
+            TAG_GDAL_METADATA,
+            TagValue::Ascii(gdal_metadata.to_string()),
+        ))
+        .write_2d_to(&mut buf, data.view())
+        .unwrap();
+
+    let file = GeoTiffFile::from_bytes(buf.into_inner()).unwrap();
+    let tag = file.tiff().ifd(0).unwrap().tag(TAG_GDAL_METADATA).unwrap();
+    assert_eq!(tag.value.as_str(), Some(gdal_metadata));
+    assert_eq!(file.epsg(), Some(4326));
+    let raster = file.read_band::<u16>(0).unwrap();
+    assert_eq!(raster.into_dimensionality::<ndarray::Ix2>().unwrap(), data);
+}

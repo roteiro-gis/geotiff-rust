@@ -1,6 +1,6 @@
 //! Compression filter pipeline for TIFF strip/tile decompression.
 
-#[cfg(any(feature = "jpeg", feature = "zstd", feature = "webp"))]
+#[cfg(any(feature = "jpeg", feature = "webp"))]
 use std::io::Cursor;
 use std::io::Read;
 #[cfg(feature = "jpeg")]
@@ -381,13 +381,21 @@ fn validate_jpeg_metadata(
 
 #[cfg(feature = "zstd")]
 fn decompress_zstd(data: &[u8], index: usize, decoded_len_limit: usize) -> Result<Vec<u8>> {
-    let decoder = ruzstd::decoding::StreamingDecoder::new(Cursor::new(data)).map_err(|error| {
-        Error::DecompressionFailed {
-            index,
-            reason: format!("ZSTD: {error}"),
-        }
-    })?;
-    read_bounded_to_end(decoder, index, "ZSTD", decoded_len_limit)
+    // Decode the first frame only and ignore any bytes after it, as libtiff
+    // and ruzstd do.
+    let mut decoded = Vec::new();
+    zrip::decompress_frame_into(data, &mut decoded, decoded_len_limit).map_err(
+        |error| match error {
+            zrip::DecompressError::OutputTooSmall => {
+                decoded_block_too_large(index, "ZSTD", decoded_len_limit)
+            }
+            error => Error::DecompressionFailed {
+                index,
+                reason: format!("ZSTD: {error}"),
+            },
+        },
+    )?;
+    Ok(decoded)
 }
 
 #[cfg(feature = "webp")]
@@ -870,13 +878,23 @@ mod tests {
     #[test]
     fn zstd_decoder_rejects_blocks_that_exceed_budget() {
         let payload = [0x2a; 128];
-        let compressed = ruzstd::encoding::compress_to_vec(
-            &payload[..],
-            ruzstd::encoding::CompressionLevel::Fastest,
-        );
+        let compressed = zrip::compress(&payload, 1).unwrap();
 
         let err = decompress(Compression::Zstd.to_code(), &compressed, 0, None, 127).unwrap_err();
         assert!(err.to_string().contains("block budget"));
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_decoder_ignores_bytes_after_the_first_frame() {
+        let payload = [0x2a; 128];
+        let frame = zrip::compress(&payload, 1).unwrap();
+        let other = zrip::compress(&[0x55; 64], 1).unwrap();
+        for trailer in [&[0u8][..], &[0xff; 7][..], &other[..]] {
+            let block = [&frame[..], trailer].concat();
+            let decoded = decompress(Compression::Zstd.to_code(), &block, 0, None, 128).unwrap();
+            assert_eq!(decoded, payload);
+        }
     }
 
     #[cfg(feature = "jpeg")]

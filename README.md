@@ -188,7 +188,7 @@ mutated or truncated while it is open.
 | `local` | yes | Local file reading via `tiff-reader` (geotiff-reader) |
 | `rayon` | yes | Parallel strip/tile decompression (tiff-reader, geotiff-reader) |
 | `jpeg` | yes | JPEG-in-TIFF read/write support (tiff-reader, tiff-writer) |
-| `zstd` | yes | Pure-Rust ZSTD compression via `ruzstd`, including TIFF `LERC+ZSTD` read/write support (tiff-reader, tiff-writer) |
+| `zstd` | yes | Pure-Rust ZSTD compression via `zrip`, including TIFF `LERC+ZSTD` read/write support (tiff-reader, tiff-writer) |
 | `webp` | yes | Pure-Rust WebP-in-TIFF decoding (tiff-reader) |
 | `f16` | no | IEEE 16-bit floating-point raster samples (all TIFF/GeoTIFF crates) |
 | `cog` | no | HTTP range-backed remote COG open with rustls TLS by default (geotiff-reader) |

@@ -18,7 +18,7 @@ env:
 
 jobs:
   msrv:
-    name: Rust 1.88 MSRV
+    name: Rust 1.89 MSRV
     runs-on: ubuntu-24.04
 
     steps:
@@ -26,13 +26,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+        run: rustup toolchain install 1.89.0 --profile minimal --no-self-update
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Check all targets and features
-        run: cargo +1.88.0 check --workspace --all-targets --all-features --locked
+        run: cargo +1.89.0 check --workspace --all-targets --all-features --locked
 
   checks:
     runs-on: ubuntu-24.04

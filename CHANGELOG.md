@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Breaking changes:
+
+- raise the minimum supported Rust version from 1.88 to 1.89 for `zrip`
+
+Other changes:
+
+- compress and decompress ZSTD blocks with `zrip` instead of `ruzstd`: writing a 3600×3600 `f32` DEM as 512×512 ZSTD tiles went from 1286 to 259 ms (4.0% smaller) and a 5490×5490 `u16` Sentinel-2 band from 2210 to 194 ms (22% smaller); reading the same rasters written by libzstd at level 9 went from 346 to 160 ms and from 469 to 113 ms. A block still decodes only its first frame and ignores bytes after it, and now fails on a wrong frame checksum
 - add `GeoTiffBuilder::tag` for extra TIFF tags such as `GDAL_METADATA` (band descriptions and metadata items), written into the image IFD next to the GeoTIFF tags; tags the builder manages itself, such as the georeferencing tags and `GDAL_NODATA`, are rejected; re-export `Tag` and `TagValue`
 
 ## 0.11.1 - 2026-11-11

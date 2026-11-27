@@ -15,7 +15,7 @@ resolver = "2"
 [workspace.package]
 version = "0.11.1"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/roteiro-gis/geotiff-rust"
 homepage = "https://github.com/roteiro-gis/geotiff-rust"

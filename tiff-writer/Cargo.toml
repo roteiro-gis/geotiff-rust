@@ -25,12 +25,14 @@ half = { workspace = true, optional = true }
 default = ["jpeg", "zstd"]
 f16 = ["dep:half", "tiff-core/f16"]
 jpeg = ["dep:jpeg-encoder"]
-zstd = ["dep:ruzstd"]
+zstd = ["dep:zrip"]
 
 [dependencies.jpeg-encoder]
 version = "0.6"
 optional = true
 
-[dependencies.ruzstd]
-version = "0.9.1"
+[dependencies.zrip]
+version = "0.8.30"
+default-features = false
+features = ["std", "simd"]
 optional = true

@@ -29,7 +29,7 @@ default = ["rayon", "jpeg", "zstd", "webp"]
 f16 = ["tiff-core/f16"]
 rayon = ["dep:rayon"]
 jpeg = ["dep:zune-jpeg", "dep:zune-core"]
-zstd = ["dep:ruzstd"]
+zstd = ["dep:zrip"]
 webp = ["dep:image-webp"]
 
 [dependencies.rayon]
@@ -44,8 +44,10 @@ optional = true
 version = "0.5.1"
 optional = true
 
-[dependencies.ruzstd]
-version = "0.9.1"
+[dependencies.zrip]
+version = "0.8.30"
+default-features = false
+features = ["std", "simd"]
 optional = true
 
 [dependencies.image-webp]
